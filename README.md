@@ -95,6 +95,8 @@ The defaults in `wrangler.jsonc` are intentionally conservative:
 - `MAX_GLOBAL_DAILY_GENERATIONS=250`
 - `MAX_OPENAI_ATTEMPTS=3`
 
+During development, `DISABLE_GENERATION_LIMITS=true` bypasses the per-user and global daily caps while still recording generated-count and estimated-cost metadata. Turn it off before live play.
+
 Sprite assets are global by `taxon_id + asset_kind + asset_version + prompt_hash`, so once a species sprite exists every user reuses it.
 
 ## OpenAI Sprite Generation
@@ -109,6 +111,24 @@ The production generator uses `gpt-image-2` by default. When references are enab
 `gpt-image-2` currently does not support transparent backgrounds, so generated sheets request an opaque plain/auto background and the UI treats each sheet as a 4x4 grid.
 
 For development/backfill, `SPRITE_GENERATION_MODE=batch` leaves Cloudflare Queue messages acknowledged but keeps D1 `sprite_jobs` queued for OpenAI Batch submission. This uses `/v1/images/edits` with `gpt-image-2`, the iNaturalist default photo URL when available, and the House Sparrow style sheet served from R2.
+
+The dev Global Seed panel imports the top 1,000 plants and top 1,000 animals across North America (`place_id=97394`) and Europe (`place_id=67952`), stores them in `global_seed_taxa`, skips sprites that are already ready or active, and submits missing sprites in 200-item OpenAI batches.
+
+Global seed endpoints:
+
+```sh
+curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/global-seed/dev-import \
+  -H "content-type: application/json" \
+  -d '{"limitPerGroup":1000}'
+
+curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/global-seed/dev-queue \
+  -H "content-type: application/json" \
+  -d '{"limit":200}'
+
+curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/global-seed/dev-submit \
+  -H "content-type: application/json" \
+  -d '{"limit":200}'
+```
 
 Submit a small batch:
 

@@ -2,7 +2,6 @@ import {
   chooseNpcMove,
   createBattleCreature,
   createGenome,
-  createNpcTeam,
   createSeededRng,
   resolveTurn
 } from "./game.js";
@@ -10,6 +9,18 @@ import {
 const ASSET_VERSION = 1;
 const DEFAULT_ASSET_KIND = "sprite_sheet";
 const INAT_SPECIES_CACHE_TTL_SECONDS = 6 * 60 * 60;
+const GLOBAL_SEED_KEY = "na_europe_plants_animals_v1";
+const GLOBAL_SEED_LIMIT_PER_GROUP = 1000;
+const GLOBAL_SEED_BATCH_SIZE = 200;
+const GLOBAL_SEED_PRIORITY = 120;
+const GLOBAL_SEED_REGIONS = [
+  { key: "north_america", label: "North America", placeId: 97394 },
+  { key: "europe", label: "Europe", placeId: 67952 }
+];
+const GLOBAL_SEED_GROUPS = [
+  { key: "plants", label: "Plants", iconicTaxon: "Plantae" },
+  { key: "animals", label: "Animals", iconicTaxon: "Animalia" }
+];
 const DEMO_USER_ID = "demo:birds";
 const DEMO_PLAYER_TAXON_IDS = [13858, 12727, 8229, 7428, 1965];
 const DEMO_DUMMY_TAXA = [
@@ -91,6 +102,10 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(result);
   }
 
+  if (request.method === "POST" && url.pathname === "/api/manual-sprites/upload") {
+    return jsonResponse(await uploadManualSprite(request, env));
+  }
+
   const rosterMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/roster$/);
   if (request.method === "GET" && rosterMatch) {
     const userId = decodeURIComponent(rosterMatch[1]);
@@ -112,7 +127,7 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "POST" && queueMatch) {
     const userId = decodeURIComponent(queueMatch[1]);
     const payload = await readJson(request);
-    const limit = clampInt(payload.limit, 1, 48, 12);
+    const limit = clampInt(payload.limit, 1, maxQueueMoreLimit(env), 12);
     const queued = await queueMissingSpritesForUser(env, userId, limit, 80);
     return jsonResponse({ queued });
   }
@@ -120,7 +135,7 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "POST" && url.pathname === "/api/sprite-jobs") {
     const payload = await readJson(request);
     const userId = String(payload.userId ?? "");
-    const limit = clampInt(payload.limit, 1, 48, 12);
+    const limit = clampInt(payload.limit, 1, maxQueueMoreLimit(env), 12);
 
     if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
 
@@ -131,12 +146,45 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "GET" && url.pathname === "/api/sprite-jobs") {
     const status = url.searchParams.get("status") ?? "queued";
     const userId = url.searchParams.get("userId") ?? "";
-    return jsonResponse(await listSpriteJobs(env, status, userId));
+    const limit = clampInt(url.searchParams.get("limit"), 1, maxQueueMoreLimit(env), 100);
+    return jsonResponse(await listSpriteJobs(env, status, userId, limit));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/global-seed/status") {
+    return jsonResponse(await getGlobalSeedStatus(env));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/global-seed/jobs") {
+    const limit = clampInt(url.searchParams.get("limit"), 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
+    return jsonResponse({ jobs: await selectQueuedSpriteJobsForBatch(env, limit, "", true) });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/global-seed/dev-import") {
+    const payload = await readJson(request);
+    const limitPerGroup = clampInt(payload.limitPerGroup, 1, 1000, GLOBAL_SEED_LIMIT_PER_GROUP);
+    return jsonResponse(await importGlobalSeedTaxa(env, limitPerGroup));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/global-seed/dev-queue") {
+    const payload = await readJson(request);
+    const limit = clampInt(payload.limit, 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
+    return jsonResponse(await queueMissingGlobalSeedSprites(env, limit));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/global-seed/dev-submit") {
+    const payload = await readJson(request);
+    const limit = clampInt(payload.limit, 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
+    return jsonResponse(await submitDevSpriteBatch(env, request.url, {
+      limit,
+      userId: "",
+      queueMissing: false,
+      seedOnly: true
+    }));
   }
 
   if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-submit") {
     const payload = await readJson(request);
-    const limit = clampInt(payload.limit, 1, 25, 2);
+    const limit = clampInt(payload.limit, 1, maxBatchSubmitLimit(env), 2);
     const userId = payload.userId ? String(payload.userId) : "";
     const queueMissing = payload.queueMissing !== false;
     return jsonResponse(await submitDevSpriteBatch(env, request.url, { limit, userId, queueMissing }));
@@ -174,6 +222,12 @@ async function routeRequest(request, env, ctx) {
       .slice(0, 100);
 
     return jsonResponse(await getSpriteStatus(env, taxonIds));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/sprite-tree") {
+    const limit = clampInt(url.searchParams.get("limit"), 1, 1000, 500);
+    const q = String(url.searchParams.get("q") ?? "");
+    return jsonResponse(await getSpriteTree(env, { limit, q }));
   }
 
   const teamMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/teams$/);
@@ -264,35 +318,7 @@ async function importUserByLogin(env, rawLogin) {
     const taxon = row.taxon;
     if (!taxon?.id || !taxon.name) continue;
 
-    await env.DB.prepare(`
-      INSERT INTO taxa (
-        taxon_id, scientific_name, common_name, rank,
-        iconic_taxon_name, ancestry, parent_id, default_photo_url, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(taxon_id) DO UPDATE SET
-        scientific_name = excluded.scientific_name,
-        common_name = excluded.common_name,
-        rank = excluded.rank,
-        iconic_taxon_name = excluded.iconic_taxon_name,
-        ancestry = excluded.ancestry,
-        parent_id = excluded.parent_id,
-        default_photo_url = excluded.default_photo_url,
-        updated_at = excluded.updated_at
-    `).bind(
-      taxon.id,
-      taxon.name,
-      taxon.preferred_common_name ?? taxon.english_common_name ?? null,
-      taxon.rank ?? null,
-      taxon.iconic_taxon_name ?? null,
-      taxon.ancestry ?? null,
-      taxon.parent_id ?? null,
-      taxon.default_photo?.medium_url ??
-        taxon.default_photo?.square_url ??
-        taxon.default_photo?.url ??
-        null,
-      now
-    ).run();
+    await upsertTaxonFromInat(env, taxon, now);
 
     const obsCount = Number(row.count ?? 0);
     const bondLevel = Math.floor(10 * Math.log10(1 + obsCount));
@@ -320,6 +346,42 @@ async function importUserByLogin(env, rawLogin) {
     queuedSprites,
     warning: importWarning
   };
+}
+
+async function upsertTaxonFromInat(env, taxon, now) {
+  await prepareTaxonUpsert(env, taxon, now).run();
+}
+
+function prepareTaxonUpsert(env, taxon, now) {
+  return env.DB.prepare(`
+    INSERT INTO taxa (
+      taxon_id, scientific_name, common_name, rank,
+      iconic_taxon_name, ancestry, parent_id, default_photo_url, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(taxon_id) DO UPDATE SET
+      scientific_name = excluded.scientific_name,
+      common_name = excluded.common_name,
+      rank = excluded.rank,
+      iconic_taxon_name = excluded.iconic_taxon_name,
+      ancestry = excluded.ancestry,
+      parent_id = excluded.parent_id,
+      default_photo_url = excluded.default_photo_url,
+      updated_at = excluded.updated_at
+  `).bind(
+    taxon.id,
+    taxon.name,
+    taxon.preferred_common_name ?? taxon.english_common_name ?? null,
+    taxon.rank ?? null,
+    taxon.iconic_taxon_name ?? null,
+    taxon.ancestry ?? null,
+    taxon.parent_id ?? null,
+    taxon.default_photo?.medium_url ??
+      taxon.default_photo?.square_url ??
+      taxon.default_photo?.url ??
+      null,
+    now
+  );
 }
 
 async function fetchSpeciesCounts(env, inatLogin) {
@@ -418,6 +480,506 @@ async function writeSpeciesCountsCache(env, cacheKey, rows) {
   );
 }
 
+async function importGlobalSeedTaxa(env, limitPerGroup = GLOBAL_SEED_LIMIT_PER_GROUP) {
+  const now = new Date().toISOString();
+  const groups = [];
+  let importedTaxa = 0;
+
+  for (const group of GLOBAL_SEED_GROUPS) {
+    const rows = await fetchGlobalSeedSpeciesCounts(env, group, limitPerGroup);
+    let groupImported = 0;
+    let statements = [];
+
+    for (const row of rows) {
+      const taxon = row.taxon;
+      if (!taxon?.id || !taxon.name) continue;
+
+      statements.push(
+        prepareTaxonUpsert(env, taxon, now),
+        prepareGlobalSeedTaxonUpsert(env, group, row, now)
+      );
+
+      groupImported += 1;
+
+      if (statements.length >= 100) {
+        await env.DB.batch(statements);
+        statements = [];
+      }
+    }
+
+    if (statements.length > 0) {
+      await env.DB.batch(statements);
+    }
+
+    importedTaxa += groupImported;
+    groups.push({
+      key: group.key,
+      label: group.label,
+      importedTaxa: groupImported
+    });
+  }
+
+  return {
+    seedKey: GLOBAL_SEED_KEY,
+    limitPerGroup,
+    importedTaxa,
+    groups,
+    status: await getGlobalSeedStatus(env)
+  };
+}
+
+function prepareGlobalSeedTaxonUpsert(env, group, row, now) {
+  return env.DB.prepare(`
+    INSERT INTO global_seed_taxa (
+      seed_key, group_key, taxon_id, observed_count,
+      region_keys, source_json, imported_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(seed_key, group_key, taxon_id)
+    DO UPDATE SET
+      observed_count = excluded.observed_count,
+      region_keys = excluded.region_keys,
+      source_json = excluded.source_json,
+      imported_at = excluded.imported_at
+  `).bind(
+    GLOBAL_SEED_KEY,
+    group.key,
+    row.taxon.id,
+    row.count,
+    JSON.stringify(row.regionKeys),
+    JSON.stringify({
+      group: group.iconicTaxon,
+      regions: row.regionCounts
+    }),
+    now
+  );
+}
+
+async function fetchGlobalSeedSpeciesCounts(env, group, limitPerGroup) {
+  const cacheKey = `inat:global_seed:${GLOBAL_SEED_KEY}:${group.key}:${limitPerGroup}:v1`;
+  const cached = await readSpeciesCountsCache(env, cacheKey);
+  if (cached?.fresh) return cached.rows;
+
+  const merged = new Map();
+  const pages = Math.ceil(limitPerGroup / 500);
+
+  for (const region of GLOBAL_SEED_REGIONS) {
+    for (let page = 1; page <= pages; page += 1) {
+      const url = new URL("https://api.inaturalist.org/v1/observations/species_counts");
+      url.searchParams.set("place_id", String(region.placeId));
+      url.searchParams.set("rank", "species");
+      url.searchParams.set("verifiable", "true");
+      url.searchParams.set("photos", "true");
+      url.searchParams.set("per_page", "500");
+      url.searchParams.set("page", String(page));
+      url.searchParams.append("iconic_taxa[]", group.iconicTaxon);
+
+      const res = await fetchInatWithRetry(url.toString());
+      if (!res.ok) {
+        const text = await res.text();
+        if (res.status === 429) {
+          const error = new Error("iNaturalist rate limit reached while importing global seed taxa");
+          error.code = "INAT_RATE_LIMITED";
+          throw error;
+        }
+
+        throw new Error(`iNaturalist global seed species_counts failed: ${res.status} ${text}`);
+      }
+
+      const data = await res.json();
+      const pageRows = Array.isArray(data.results) ? data.results : [];
+
+      for (const row of pageRows) {
+        const taxon = row.taxon;
+        if (!taxon?.id || !taxon.name) continue;
+        if (taxon.rank && taxon.rank !== "species") continue;
+
+        const count = Number(row.count ?? 0);
+        const current = merged.get(taxon.id) ?? {
+          taxon,
+          count: 0,
+          regionKeys: [],
+          regionCounts: {}
+        };
+
+        current.count += count;
+        current.regionCounts[region.key] = (current.regionCounts[region.key] ?? 0) + count;
+        if (!current.regionKeys.includes(region.key)) current.regionKeys.push(region.key);
+        if (!current.taxon.default_photo && taxon.default_photo) current.taxon = taxon;
+        merged.set(taxon.id, current);
+      }
+
+      if (pageRows.length < 500) break;
+      await sleep(1100);
+    }
+  }
+
+  const rows = Array.from(merged.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limitPerGroup);
+
+  await writeSpeciesCountsCache(env, cacheKey, rows);
+  return rows;
+}
+
+async function getGlobalSeedStatus(env) {
+  const rows = await env.DB.prepare(`
+    SELECT
+      gst.group_key,
+      COUNT(*) AS seed_count,
+      SUM(CASE WHEN EXISTS (
+        SELECT 1 FROM sprite_assets sa
+        WHERE sa.taxon_id = gst.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+      ) THEN 1 ELSE 0 END) AS ready_count,
+      SUM(CASE WHEN EXISTS (
+        SELECT 1 FROM sprite_jobs sj
+        WHERE sj.taxon_id = gst.taxon_id
+          AND sj.asset_kind = ?
+          AND sj.asset_version = ?
+          AND sj.status = 'queued'
+      ) THEN 1 ELSE 0 END) AS queued_count,
+      SUM(CASE WHEN EXISTS (
+        SELECT 1 FROM sprite_jobs sj
+        WHERE sj.taxon_id = gst.taxon_id
+          AND sj.asset_kind = ?
+          AND sj.asset_version = ?
+          AND sj.status = 'batch_submitted'
+      ) THEN 1 ELSE 0 END) AS batch_submitted_count,
+      SUM(CASE WHEN EXISTS (
+        SELECT 1 FROM sprite_jobs sj
+        WHERE sj.taxon_id = gst.taxon_id
+          AND sj.asset_kind = ?
+          AND sj.asset_version = ?
+          AND sj.status = 'failed'
+      ) THEN 1 ELSE 0 END) AS failed_count
+    FROM global_seed_taxa gst
+    WHERE gst.seed_key = ?
+    GROUP BY gst.group_key
+    ORDER BY gst.group_key
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    GLOBAL_SEED_KEY
+  ).all();
+
+  const groups = GLOBAL_SEED_GROUPS.map((group) => {
+    const row = (rows.results ?? []).find((item) => item.group_key === group.key) ?? {};
+    const seedCount = Number(row.seed_count ?? 0);
+    const readyCount = Number(row.ready_count ?? 0);
+    const queuedCount = Number(row.queued_count ?? 0);
+    const batchSubmittedCount = Number(row.batch_submitted_count ?? 0);
+    const failedCount = Number(row.failed_count ?? 0);
+    const activeCount = queuedCount + batchSubmittedCount;
+
+    return {
+      key: group.key,
+      label: group.label,
+      seedCount,
+      readyCount,
+      queuedCount,
+      batchSubmittedCount,
+      failedCount,
+      missingCount: Math.max(0, seedCount - readyCount - activeCount)
+    };
+  });
+
+  return {
+    seedKey: GLOBAL_SEED_KEY,
+    limitPerGroup: GLOBAL_SEED_LIMIT_PER_GROUP,
+    batchSize: GLOBAL_SEED_BATCH_SIZE,
+    regions: GLOBAL_SEED_REGIONS,
+    groups,
+    totals: groups.reduce((totals, group) => ({
+      seedCount: totals.seedCount + group.seedCount,
+      readyCount: totals.readyCount + group.readyCount,
+      queuedCount: totals.queuedCount + group.queuedCount,
+      batchSubmittedCount: totals.batchSubmittedCount + group.batchSubmittedCount,
+      failedCount: totals.failedCount + group.failedCount,
+      missingCount: totals.missingCount + group.missingCount
+    }), {
+      seedCount: 0,
+      readyCount: 0,
+      queuedCount: 0,
+      batchSubmittedCount: 0,
+      failedCount: 0,
+      missingCount: 0
+    })
+  };
+}
+
+async function queueMissingGlobalSeedSprites(env, limit = GLOBAL_SEED_BATCH_SIZE) {
+  const rows = await env.DB.prepare(`
+    SELECT gst.taxon_id
+    FROM global_seed_taxa gst
+    LEFT JOIN sprite_assets sa
+      ON sa.taxon_id = gst.taxon_id
+      AND sa.asset_kind = ?
+      AND sa.asset_version = ?
+      AND sa.status = 'ready'
+    LEFT JOIN sprite_jobs sj
+      ON sj.taxon_id = gst.taxon_id
+      AND sj.asset_kind = ?
+      AND sj.asset_version = ?
+      AND sj.status IN ('queued', 'running', 'batch_submitted', 'ready')
+    WHERE gst.seed_key = ?
+      AND sa.asset_id IS NULL
+      AND sj.job_id IS NULL
+    ORDER BY gst.observed_count DESC
+    LIMIT ?
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    GLOBAL_SEED_KEY,
+    limit
+  ).all();
+
+  let queued = 0;
+  for (const row of rows.results ?? []) {
+    const didQueue = await ensureSpriteJob(
+      env,
+      Number(row.taxon_id),
+      DEFAULT_ASSET_KIND,
+      ASSET_VERSION,
+      GLOBAL_SEED_PRIORITY
+    );
+
+    if (didQueue) queued += 1;
+  }
+
+  return {
+    queued,
+    requested: limit,
+    status: await getGlobalSeedStatus(env)
+  };
+}
+
+async function uploadManualSprite(request, env) {
+  const form = await request.formData();
+  const file = form.get("sprite");
+  const taxonId = String(form.get("taxonId") ?? "").trim();
+  const scientificName = String(form.get("scientificName") ?? "").trim();
+  const commonName = String(form.get("commonName") ?? "").trim();
+  const userId = String(form.get("userId") ?? "").trim();
+  const addToRoster = String(form.get("addToRoster") ?? "false") === "true";
+
+  if (!file || typeof file.arrayBuffer !== "function") {
+    throw new Error("Missing sprite image file");
+  }
+
+  const bytes = await file.arrayBuffer();
+  const maxBytes = intEnv(env, "MAX_MANUAL_UPLOAD_BYTES", 12_000_000);
+  if (bytes.byteLength <= 0) throw new Error("Sprite image file is empty");
+  if (bytes.byteLength > maxBytes) throw new Error(`Sprite image file is larger than ${Math.floor(maxBytes / 1_000_000)} MB`);
+
+  const contentType = normalizeImageContentType(file.type) ??
+    contentTypeForAssetKey(file.name ?? "");
+  if (!contentType) {
+    throw new Error("Manual sprite must be PNG, JPEG, or WebP");
+  }
+
+  const taxon = await resolveInatTaxonForManualUpload({
+    taxonId,
+    scientificName,
+    commonName
+  });
+  const now = new Date().toISOString();
+  const taxonForDb = {
+    ...taxon,
+    preferred_common_name: commonName || taxon.preferred_common_name || taxon.english_common_name || null
+  };
+
+  await upsertTaxonFromInat(env, taxonForDb, now);
+
+  const fileHash = await sha256ArrayBufferHex(bytes);
+  const promptHash = `manual-upload:${fileHash.slice(0, 24)}`;
+  const extension = extensionForContentType(contentType);
+  const r2Key = `${speciesAssetPrefix(ASSET_VERSION, taxon.id, taxon.name)}/manual/${fileHash.slice(0, 16)}/${DEFAULT_ASSET_KIND}.${extension}`;
+  const assetId = await sha256Hex(`${taxon.id}|${DEFAULT_ASSET_KIND}|${ASSET_VERSION}|${promptHash}`);
+  const dimensions = readImageDimensions(bytes, contentType);
+
+  await env.ASSETS.put(r2Key, bytes, {
+    httpMetadata: {
+      contentType,
+      cacheControl: "public, max-age=31536000, immutable"
+    },
+    customMetadata: {
+      taxonId: String(taxon.id),
+      promptHash,
+      assetKind: DEFAULT_ASSET_KIND,
+      assetVersion: String(ASSET_VERSION),
+      scientificName: String(taxon.name ?? ""),
+      commonName: String(taxonForDb.preferred_common_name ?? ""),
+      speciesSlug: slugifyScientificName(taxon.name),
+      source: "manual-upload",
+      fileHash,
+      uploadedAt: now
+    }
+  });
+
+  await env.DB.prepare(`
+    UPDATE sprite_assets
+    SET status = 'superseded'
+    WHERE taxon_id = ?
+      AND asset_kind = ?
+      AND asset_version = ?
+      AND status = 'ready'
+      AND (model = 'manual-upload' OR model = 'manual-upload-web' OR prompt_hash LIKE 'manual-upload:%')
+      AND prompt_hash <> ?
+  `).bind(taxon.id, DEFAULT_ASSET_KIND, ASSET_VERSION, promptHash).run();
+
+  await env.DB.prepare(`
+    INSERT INTO sprite_assets (
+      asset_id, taxon_id, asset_kind, asset_version,
+      model, prompt_hash, r2_key, status,
+      width, height, content_type, cost_estimate_usd, usage_json, created_at
+    )
+    VALUES (?, ?, ?, ?, 'manual-upload', ?, ?, 'ready', ?, ?, ?, 0, ?, ?)
+    ON CONFLICT(taxon_id, asset_kind, asset_version, prompt_hash)
+    DO UPDATE SET
+      model = excluded.model,
+      r2_key = excluded.r2_key,
+      status = 'ready',
+      width = excluded.width,
+      height = excluded.height,
+      content_type = excluded.content_type,
+      cost_estimate_usd = excluded.cost_estimate_usd,
+      usage_json = excluded.usage_json
+  `).bind(
+    assetId,
+    taxon.id,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    promptHash,
+    r2Key,
+    dimensions?.width ?? null,
+    dimensions?.height ?? null,
+    contentType,
+    JSON.stringify({
+      source: "manual-upload",
+      file_name: file.name ?? null,
+      file_size_bytes: bytes.byteLength,
+      file_hash_sha256: fileHash,
+      uploaded_at: now
+    }),
+    now
+  ).run();
+
+  const addedToRoster = addToRoster && userId
+    ? await addManualSpriteToUserRoster(env, userId, taxonForDb, now)
+    : false;
+
+  return {
+    uploaded: true,
+    taxonId: taxon.id,
+    scientificName: taxon.name,
+    commonName: taxonForDb.preferred_common_name ?? null,
+    rank: taxon.rank ?? null,
+    iconicTaxonName: taxon.iconic_taxon_name ?? null,
+    assetId,
+    r2Key,
+    url: `/api/assets/${encodeR2Key(r2Key)}`,
+    contentType,
+    width: dimensions?.width ?? null,
+    height: dimensions?.height ?? null,
+    addedToRoster
+  };
+}
+
+async function resolveInatTaxonForManualUpload({ taxonId, scientificName, commonName }) {
+  if (taxonId) {
+    const id = Number.parseInt(taxonId, 10);
+    if (!Number.isFinite(id)) throw new Error("Taxon ID must be a number");
+
+    const url = `https://api.inaturalist.org/v1/taxa/${encodeURIComponent(String(id))}`;
+    const res = await fetchInatWithRetry(url);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`iNaturalist taxon lookup failed: ${res.status} ${text}`);
+    }
+
+    const data = await res.json();
+    const taxon = Array.isArray(data.results) ? data.results[0] : data;
+    if (!taxon?.id || !taxon.name) throw new Error("iNaturalist did not return a taxon for that ID");
+    return taxon;
+  }
+
+  const query = scientificName || commonName;
+  if (!query) throw new Error("Provide a taxon ID, scientific name, or common name");
+
+  const url = new URL("https://api.inaturalist.org/v1/taxa/autocomplete");
+  url.searchParams.set("q", query);
+  url.searchParams.set("is_active", "true");
+  url.searchParams.set("per_page", "10");
+
+  const res = await fetchInatWithRetry(url.toString());
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`iNaturalist taxon lookup failed: ${res.status} ${text}`);
+  }
+
+  const data = await res.json();
+  const rows = Array.isArray(data.results) ? data.results : [];
+  if (rows.length === 0) throw new Error("No matching iNaturalist taxon found");
+
+  const scientificLower = scientificName.toLowerCase();
+  const commonLower = commonName.toLowerCase();
+  const exactScientific = scientificLower
+    ? rows.find((taxon) => String(taxon.name ?? "").toLowerCase() === scientificLower)
+    : null;
+  const exactCommon = commonLower
+    ? rows.find((taxon) => String(taxon.preferred_common_name ?? taxon.english_common_name ?? "").toLowerCase() === commonLower)
+    : null;
+  const species = rows.find((taxon) => taxon.rank === "species");
+  const taxon = exactScientific || exactCommon || species || rows[0];
+
+  if (!taxon?.id || !taxon.name) throw new Error("iNaturalist returned an unusable taxon match");
+  return taxon;
+}
+
+async function addManualSpriteToUserRoster(env, userId, taxon, now) {
+  const user = await env.DB.prepare(`
+    SELECT id
+    FROM users
+    WHERE id = ?
+  `).bind(userId).first();
+
+  if (!user) return false;
+
+  await env.DB.prepare(`
+    INSERT INTO user_taxa (
+      user_id, taxon_id, obs_count, weighted_obs, bond_level, imported_at
+    )
+    VALUES (?, ?, 1, 1, 3, ?)
+    ON CONFLICT(user_id, taxon_id) DO UPDATE SET
+      obs_count = CASE
+        WHEN user_taxa.obs_count < excluded.obs_count THEN excluded.obs_count
+        ELSE user_taxa.obs_count
+      END,
+      weighted_obs = CASE
+        WHEN user_taxa.weighted_obs < excluded.weighted_obs THEN excluded.weighted_obs
+        ELSE user_taxa.weighted_obs
+      END,
+      bond_level = CASE
+        WHEN user_taxa.bond_level < excluded.bond_level THEN excluded.bond_level
+        ELSE user_taxa.bond_level
+      END,
+      imported_at = excluded.imported_at
+  `).bind(userId, taxon.id, now).run();
+
+  return true;
+}
+
 async function getExistingUserTaxaCount(env, userId) {
   const row = await env.DB.prepare(`
     SELECT COUNT(*) AS count
@@ -446,7 +1008,7 @@ async function queueMissingSpritesForUser(env, userId, limit, priority) {
       ON sj.taxon_id = ut.taxon_id
       AND sj.asset_kind = ?
       AND sj.asset_version = ?
-      AND sj.status IN ('queued', 'running', 'ready')
+      AND sj.status IN ('queued', 'running', 'batch_submitted', 'ready')
     WHERE ut.user_id = ?
       AND sa.asset_id IS NULL
       AND sj.job_id IS NULL
@@ -689,7 +1251,7 @@ async function markSpriteJobFailed(env, jobId, error) {
   return Number(row?.attempts ?? 0);
 }
 
-async function listSpriteJobs(env, status, userId = "") {
+async function listSpriteJobs(env, status, userId = "", limit = 100) {
   const statement = userId
     ? env.DB.prepare(`
         SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name, t.default_photo_url, ut.obs_count
@@ -698,18 +1260,30 @@ async function listSpriteJobs(env, status, userId = "") {
         JOIN user_taxa ut
           ON ut.taxon_id = sj.taxon_id
           AND ut.user_id = ?
+        LEFT JOIN sprite_assets sa
+          ON sa.taxon_id = sj.taxon_id
+          AND sa.asset_kind = sj.asset_kind
+          AND sa.asset_version = sj.asset_version
+          AND sa.status = 'ready'
         WHERE sj.status = ?
+          AND sa.asset_id IS NULL
         ORDER BY sj.priority ASC, ut.obs_count DESC, sj.created_at ASC
-        LIMIT 100
-      `).bind(userId, status)
+        LIMIT ?
+      `).bind(userId, status, limit)
     : env.DB.prepare(`
         SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name, t.default_photo_url, NULL AS obs_count
         FROM sprite_jobs sj
         JOIN taxa t ON t.taxon_id = sj.taxon_id
+        LEFT JOIN sprite_assets sa
+          ON sa.taxon_id = sj.taxon_id
+          AND sa.asset_kind = sj.asset_kind
+          AND sa.asset_version = sj.asset_version
+          AND sa.status = 'ready'
         WHERE sj.status = ?
+          AND sa.asset_id IS NULL
         ORDER BY sj.priority ASC, sj.created_at ASC
-        LIMIT 100
-      `).bind(status);
+        LIMIT ?
+      `).bind(status, limit);
 
   const rows = await statement.all();
 
@@ -725,7 +1299,12 @@ async function submitDevSpriteBatch(env, requestUrl, options) {
     await queueMissingSpritesForUser(env, options.userId, options.limit, 80);
   }
 
-  const jobs = await selectQueuedSpriteJobsForBatch(env, options.limit, options.userId);
+  const jobs = await selectQueuedSpriteJobsForBatch(
+    env,
+    options.limit,
+    options.userId,
+    options.seedOnly === true
+  );
   if (jobs.length === 0) {
     return { submitted: false, message: "No queued sprite jobs available for batch submission" };
   }
@@ -836,11 +1415,13 @@ async function submitDevSpriteBatch(env, requestUrl, options) {
   };
 }
 
-async function selectQueuedSpriteJobsForBatch(env, limit, userId = "") {
+async function selectQueuedSpriteJobsForBatch(env, limit, userId = "", seedOnly = false) {
   const baseSelect = `
     SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name, t.default_photo_url
+      ${seedOnly ? ", gst.observed_count AS seed_observed_count, gst.group_key AS seed_group_key" : ""}
     FROM sprite_jobs sj
     JOIN taxa t ON t.taxon_id = sj.taxon_id
+    ${seedOnly ? "JOIN global_seed_taxa gst ON gst.taxon_id = sj.taxon_id AND gst.seed_key = ?" : ""}
   `;
   const readyAssetJoin = `
     LEFT JOIN sprite_assets sa
@@ -853,11 +1434,17 @@ async function selectQueuedSpriteJobsForBatch(env, limit, userId = "") {
   const whereClause = `
     WHERE sj.status = 'queued'
       AND sa.asset_id IS NULL
-    ORDER BY sj.priority ASC, sj.created_at ASC
+    ORDER BY ${seedOnly ? "gst.observed_count DESC," : ""} sj.priority ASC, sj.created_at ASC
     LIMIT ?
   `;
 
-  const statement = userId
+  const statement = seedOnly
+    ? env.DB.prepare(`
+        ${baseSelect}
+        ${readyAssetJoin}
+        ${whereClause}
+      `).bind(GLOBAL_SEED_KEY, limit)
+    : userId
     ? env.DB.prepare(`
         ${baseSelect}
         JOIN user_taxa ut
@@ -1150,11 +1737,13 @@ async function syncSpriteBatchOutputLine(env, batchId, line) {
   const contentType = contentTypeForOutputFormat(outputFormat);
   const extension = extensionForOutputFormat(outputFormat);
   const r2Key = `${speciesAssetPrefix(item.asset_version, item.taxon_id, item.scientific_name)}/${String(item.prompt_hash).slice(0, 16)}/${item.asset_kind}.${extension}`;
+  const imageBytes = base64ToArrayBuffer(b64);
   const usage = {
     ...(body.usage ?? {}),
     endpoint: "images.edits.batch",
     openai_batch_id: batchId,
-    custom_id: line.custom_id
+    custom_id: line.custom_id,
+    output_bytes: imageBytes.byteLength
   };
   const costEstimateUsd = estimateOpenAICostUsd(
     env,
@@ -1164,7 +1753,7 @@ async function syncSpriteBatchOutputLine(env, batchId, line) {
   const assetId = await sha256Hex(`${item.taxon_id}|${item.asset_kind}|${item.asset_version}|${item.prompt_hash}`);
   const now = new Date().toISOString();
 
-  await env.ASSETS.put(r2Key, base64ToArrayBuffer(b64), {
+  await env.ASSETS.put(r2Key, imageBytes, {
     httpMetadata: {
       contentType,
       cacheControl: "public, max-age=31536000, immutable"
@@ -1176,7 +1765,8 @@ async function syncSpriteBatchOutputLine(env, batchId, line) {
       assetVersion: String(item.asset_version),
       scientificName: String(item.scientific_name ?? ""),
       speciesSlug: slugifyScientificName(item.scientific_name),
-      openaiBatchId: batchId
+      openaiBatchId: batchId,
+      outputBytes: String(imageBytes.byteLength)
     }
   });
 
@@ -1363,7 +1953,22 @@ async function getRoster(env, userId, limit, q = "") {
       t.default_photo_url,
       ut.obs_count,
       ut.bond_level,
-      sa.r2_key,
+      (
+        SELECT sa.r2_key
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+        ORDER BY
+          CASE
+            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+            WHEN sa.model = 'manual-upload' OR sa.prompt_hash LIKE 'manual-%' THEN 2
+            ELSE 3
+          END,
+          sa.created_at DESC
+        LIMIT 1
+      ) AS r2_key,
       (
         SELECT sj.status
         FROM sprite_jobs sj
@@ -1383,11 +1988,6 @@ async function getRoster(env, userId, limit, q = "") {
       ) AS sprite_job_status
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
-    LEFT JOIN sprite_assets sa
-      ON sa.taxon_id = t.taxon_id
-      AND sa.asset_kind = ?
-      AND sa.asset_version = ?
-      AND sa.status = 'ready'
     WHERE ut.user_id = ?
       AND (
         ? = ''
@@ -1451,33 +2051,234 @@ async function getSpriteStatus(env, taxonIds) {
 
   const placeholders = taxonIds.map(() => "?").join(",");
   const rows = await env.DB.prepare(`
-    SELECT taxon_id, r2_key, status
-    FROM sprite_assets
-    WHERE taxon_id IN (${placeholders})
-      AND asset_kind = ?
-      AND asset_version = ?
-  `).bind(...taxonIds, DEFAULT_ASSET_KIND, ASSET_VERSION).all();
+    SELECT
+      t.taxon_id,
+      (
+        SELECT sa.r2_key
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+        ORDER BY
+          CASE
+            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+            ELSE 3
+          END,
+          sa.created_at DESC
+        LIMIT 1
+      ) AS r2_key
+    FROM taxa t
+    WHERE t.taxon_id IN (${placeholders})
+  `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION, ...taxonIds).all();
 
   return {
     sprites: (rows.results ?? []).map((row) => ({
       taxonId: row.taxon_id,
-      status: row.status,
+      status: row.r2_key ? "ready" : "missing",
       url: row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null
     }))
   };
+}
+
+async function getSpriteTree(env, options = {}) {
+  const q = String(options.q ?? "").trim();
+  const rows = await env.DB.prepare(`
+    SELECT
+      t.taxon_id,
+      t.scientific_name,
+      t.common_name,
+      t.rank,
+      t.iconic_taxon_name,
+      t.ancestry,
+      t.parent_id,
+      (
+        SELECT sa.r2_key
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+        ORDER BY
+          CASE
+            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+            ELSE 3
+          END,
+          sa.created_at DESC
+        LIMIT 1
+      ) AS r2_key,
+      (
+        SELECT sa.model
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+        ORDER BY
+          CASE
+            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+            ELSE 3
+          END,
+          sa.created_at DESC
+        LIMIT 1
+      ) AS sprite_model
+    FROM taxa t
+    WHERE EXISTS (
+        SELECT 1
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+      )
+      AND (
+        ? = ''
+        OR lower(t.scientific_name) LIKE '%' || lower(?) || '%'
+        OR lower(COALESCE(t.common_name, '')) LIKE '%' || lower(?) || '%'
+        OR lower(COALESCE(t.iconic_taxon_name, '')) LIKE '%' || lower(?) || '%'
+      )
+    ORDER BY COALESCE(t.iconic_taxon_name, 'Life') ASC, t.scientific_name ASC
+    LIMIT ?
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    q,
+    q,
+    q,
+    q,
+    options.limit ?? 500
+  ).all();
+
+  const leaves = (rows.results ?? []).map((row) => ({
+    key: `taxon:${row.taxon_id}`,
+    taxonId: Number(row.taxon_id),
+    name: row.common_name || row.scientific_name,
+    scientificName: row.scientific_name,
+    commonName: row.common_name ?? null,
+    rank: row.rank || "taxon",
+    iconicTaxonName: row.iconic_taxon_name || "Life",
+    parentId: row.parent_id === null || row.parent_id === undefined ? null : Number(row.parent_id),
+    ancestorIds: parseTaxonAncestry(row.ancestry),
+    sprite: {
+      status: "ready",
+      url: `/api/assets/${encodeR2Key(row.r2_key)}`,
+      model: row.sprite_model || null
+    },
+    children: [],
+    spriteCount: 1,
+    leaf: true
+  }));
+
+  const tree = buildSpriteTree(leaves);
+
+  return {
+    totalSprites: leaves.length,
+    limit: options.limit ?? 500,
+    q,
+    roots: tree
+  };
+}
+
+function buildSpriteTree(leaves) {
+  const rootMap = new Map();
+
+  const getBranch = (map, key, factory) => {
+    if (!map.has(key)) map.set(key, factory());
+    return map.get(key);
+  };
+
+  for (const leaf of leaves) {
+    const iconic = leaf.iconicTaxonName || "Life";
+    const iconicKey = `iconic:${iconic}`;
+    const iconicNode = getBranch(rootMap, iconicKey, () => branchNode(iconicKey, iconic, "iconic"));
+
+    const genusName = genusFromScientificName(leaf.scientificName);
+    const branchName = genusName || rankBranchName(leaf);
+    const branchKey = `${iconicKey}:branch:${branchName.toLowerCase()}`;
+    const branch = getBranch(iconicNode.childMap, branchKey, () => branchNode(branchKey, branchName, genusName ? "genus" : "group"));
+
+    branch.children.push(leaf);
+  }
+
+  const finalize = (node) => {
+    const directChildren = Array.isArray(node.children) ? node.children : [];
+    if (node.childMap) {
+      node.children = [
+        ...Array.from(node.childMap.values()),
+        ...directChildren
+      ];
+      delete node.childMap;
+    }
+
+    node.children = (node.children || [])
+      .map(finalize)
+      .sort(compareTreeNodes);
+    node.spriteCount = node.leaf
+      ? 1
+      : node.children.reduce((sum, child) => sum + Number(child.spriteCount || 0), 0);
+
+    return node;
+  };
+
+  return Array.from(rootMap.values()).map(finalize).sort(compareTreeNodes);
+}
+
+function branchNode(key, name, rank) {
+  return {
+    key,
+    name,
+    rank,
+    children: [],
+    childMap: new Map(),
+    spriteCount: 0,
+    leaf: false
+  };
+}
+
+function compareTreeNodes(left, right) {
+  if (left.leaf !== right.leaf) return left.leaf ? 1 : -1;
+  const countDiff = Number(right.spriteCount || 0) - Number(left.spriteCount || 0);
+  if (countDiff !== 0 && !left.leaf && !right.leaf) return countDiff;
+  return String(left.name || "").localeCompare(String(right.name || ""), undefined, { sensitivity: "base" });
+}
+
+function genusFromScientificName(value) {
+  const parts = String(value ?? "").trim().split(/\s+/);
+  if (parts.length < 2) return "";
+  return /^[A-Z][a-z-]+$/.test(parts[0]) ? parts[0] : "";
+}
+
+function rankBranchName(leaf) {
+  const rank = String(leaf.rank ?? "taxon");
+  if (rank && rank !== "species") return `${rank} taxa`;
+  return "Other taxa";
+}
+
+function parseTaxonAncestry(value) {
+  return String(value ?? "")
+    .split(/[\/,\s]+/)
+    .map((part) => Number.parseInt(part, 10))
+    .filter(Number.isFinite);
 }
 
 async function saveTeam(env, userId, name, taxonIds) {
   const cleanTaxonIds = taxonIds
     .map((taxonId) => Number.parseInt(taxonId, 10))
     .filter(Number.isFinite)
-    .slice(0, 3);
+    .slice(0, 5);
 
-  if (cleanTaxonIds.length !== 3) {
-    throw new Error("Teams must contain exactly 3 taxa");
+  if (cleanTaxonIds.length !== 5) {
+    throw new Error("Teams must contain exactly 5 taxa");
   }
 
-  await assertUserOwnsTaxa(env, userId, cleanTaxonIds);
+  await assertUserOwnsReadyTaxa(env, userId, cleanTaxonIds);
 
   const now = new Date().toISOString();
   const existing = await env.DB.prepare(`
@@ -1522,10 +2323,10 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
   const cleanTaxonIds = taxonIds
     .map((taxonId) => Number.parseInt(taxonId, 10))
     .filter(Number.isFinite)
-    .slice(0, 3);
+    .slice(0, 5);
 
-  if (cleanTaxonIds.length !== 3) {
-    throw new Error("Choose exactly 3 creatures");
+  if (cleanTaxonIds.length !== 5) {
+    throw new Error("Choose exactly 5 creatures");
   }
 
   const placeholders = cleanTaxonIds.map(() => "?").join(",");
@@ -1538,26 +2339,52 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
       t.ancestry,
       ut.obs_count,
       ut.bond_level,
-      sa.r2_key
+      (
+        SELECT sa.r2_key
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+        ORDER BY
+          CASE
+            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+            ELSE 3
+          END,
+          sa.created_at DESC
+        LIMIT 1
+      ) AS r2_key
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
-    LEFT JOIN sprite_assets sa
-      ON sa.taxon_id = t.taxon_id
-      AND sa.asset_kind = ?
-      AND sa.asset_version = ?
-      AND sa.status = 'ready'
     WHERE ut.user_id = ?
       AND t.taxon_id IN (${placeholders})
-  `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION, userId, ...cleanTaxonIds).all();
+      AND EXISTS (
+        SELECT 1
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+      )
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    userId,
+    ...cleanTaxonIds,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION
+  ).all();
 
   const byId = new Map((rows.results ?? []).map((row) => [Number(row.taxon_id), row]));
   const creatures = cleanTaxonIds.map((taxonId, index) => {
     const row = byId.get(taxonId);
-    if (!row) throw new Error(`Taxon ${taxonId} is not in this user's roster`);
+    if (!row) throw new Error(`Taxon ${taxonId} is not a ready sprite in this user's roster`);
 
     const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
     return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `p-${index}`);
   });
+  const opponent = await createRandomReadyNpcTeam(env, cleanTaxonIds, 5);
 
   const now = new Date().toISOString();
   const battleId = randomId("battle");
@@ -1568,8 +2395,8 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
     seed,
     turn: 1,
     player: { userId, name: "Your Team", activeIndex: 0, creatures },
-    opponent: createNpcTeam(npcTemplate),
-    log: [{ turn: 0, text: `A ${npcTemplate.replaceAll("_", " ")} challenges your field team.` }],
+    opponent,
+    log: [{ turn: 0, text: `${opponent.name} challenges your field team.` }],
     status: "active"
   };
 
@@ -1582,7 +2409,7 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
   `).bind(
     battleId,
     userId,
-    npcTemplate,
+    npcTemplate || "random_ready",
     JSON.stringify(state),
     seed,
     state.turn,
@@ -1592,6 +2419,80 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
   ).run();
 
   return state;
+}
+
+async function createRandomReadyNpcTeam(env, excludedTaxonIds = [], size = 5) {
+  const excluded = excludedTaxonIds
+    .map((taxonId) => Number.parseInt(taxonId, 10))
+    .filter(Number.isFinite);
+  const exclusionClause = excluded.length
+    ? `AND t.taxon_id NOT IN (${excluded.map(() => "?").join(",")})`
+    : "";
+
+  const rows = await env.DB.prepare(`
+    SELECT
+      t.taxon_id,
+      t.scientific_name,
+      t.common_name,
+      t.iconic_taxon_name,
+      t.ancestry,
+      COALESCE((
+        SELECT MAX(gst.observed_count)
+        FROM global_seed_taxa gst
+        WHERE gst.taxon_id = t.taxon_id
+      ), 10) AS obs_count,
+      8 AS bond_level,
+      (
+        SELECT sa.r2_key
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+        ORDER BY
+          CASE
+            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+            ELSE 3
+          END,
+          sa.created_at DESC
+        LIMIT 1
+      ) AS r2_key
+    FROM taxa t
+    WHERE EXISTS (
+        SELECT 1
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+      )
+      ${exclusionClause}
+    ORDER BY RANDOM()
+    LIMIT ?
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    ...excluded,
+    size
+  ).all();
+
+  const creatures = (rows.results ?? []).map((row, index) => {
+    const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
+    return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `npc-${index}`);
+  });
+
+  if (creatures.length < size) {
+    throw new Error(`Need at least ${size} ready global sprites to start an NPC battle`);
+  }
+
+  return {
+    name: "Wild Sprite Team",
+    activeIndex: 0,
+    creatures
+  };
 }
 
 async function startDemoBattle(env) {
@@ -1605,14 +2506,24 @@ async function startDemoBattle(env) {
       t.ancestry,
       ut.obs_count,
       ut.bond_level,
-      sa.r2_key
+      (
+        SELECT sa.r2_key
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+        ORDER BY
+          CASE
+            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+            ELSE 3
+          END,
+          sa.created_at DESC
+        LIMIT 1
+      ) AS r2_key
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
-    LEFT JOIN sprite_assets sa
-      ON sa.taxon_id = t.taxon_id
-      AND sa.asset_kind = ?
-      AND sa.asset_version = ?
-      AND sa.status = 'ready'
     WHERE ut.user_id = ?
       AND t.taxon_id IN (${placeholders})
   `).bind(
@@ -1727,17 +2638,25 @@ async function submitBattleMove(env, battleId, moveId) {
   return next;
 }
 
-async function assertUserOwnsTaxa(env, userId, taxonIds) {
+async function assertUserOwnsReadyTaxa(env, userId, taxonIds) {
   const placeholders = taxonIds.map(() => "?").join(",");
   const rows = await env.DB.prepare(`
-    SELECT taxon_id
-    FROM user_taxa
-    WHERE user_id = ?
-      AND taxon_id IN (${placeholders})
-  `).bind(userId, ...taxonIds).all();
+    SELECT DISTINCT ut.taxon_id
+    FROM user_taxa ut
+    WHERE ut.user_id = ?
+      AND ut.taxon_id IN (${placeholders})
+      AND EXISTS (
+        SELECT 1
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = ut.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+      )
+  `).bind(userId, ...taxonIds, DEFAULT_ASSET_KIND, ASSET_VERSION).all();
 
   if ((rows.results ?? []).length !== taxonIds.length) {
-    throw new Error("Team includes a taxon outside this user's roster");
+    throw new Error("Team must use 5 ready sprites from this user's roster");
   }
 }
 
@@ -2119,6 +3038,18 @@ function spriteGenerationMode(env) {
   return String(env.SPRITE_GENERATION_MODE ?? "on_demand").toLowerCase();
 }
 
+function generationLimitsDisabled(env) {
+  return ["1", "true", "yes", "on"].includes(String(env.DISABLE_GENERATION_LIMITS ?? "").toLowerCase());
+}
+
+function maxQueueMoreLimit(env) {
+  return generationLimitsDisabled(env) ? 500 : 48;
+}
+
+function maxBatchSubmitLimit(env) {
+  return generationLimitsDisabled(env) ? 500 : 25;
+}
+
 function isGptImage2(model) {
   return String(model ?? "").toLowerCase() === "gpt-image-2";
 }
@@ -2155,6 +3086,8 @@ function extensionForContentType(contentType) {
 }
 
 async function getUserQueueBudgetRemaining(env, userId) {
+  if (generationLimitsDisabled(env)) return Number.MAX_SAFE_INTEGER;
+
   const day = currentDay();
   const cap = intEnv(env, "MAX_USER_DAILY_QUEUED_JOBS", 24);
 
@@ -2181,12 +3114,23 @@ async function incrementUserQueueBudget(env, userId, amount) {
 
 async function reserveGlobalGenerationAttempt(env) {
   const day = currentDay();
-  const cap = intEnv(env, "MAX_GLOBAL_DAILY_GENERATIONS", 250);
 
   await env.DB.prepare(`
     INSERT OR IGNORE INTO generation_budget_daily (day, generated_count, estimated_cost_usd)
     VALUES (?, 0, 0)
   `).bind(day).run();
+
+  if (generationLimitsDisabled(env)) {
+    await env.DB.prepare(`
+      UPDATE generation_budget_daily
+      SET generated_count = generated_count + 1
+      WHERE day = ?
+    `).bind(day).run();
+
+    return true;
+  }
+
+  const cap = intEnv(env, "MAX_GLOBAL_DAILY_GENERATIONS", 250);
 
   const result = await env.DB.prepare(`
     UPDATE generation_budget_daily
@@ -2307,6 +3251,14 @@ function base64ToArrayBuffer(base64) {
   return bytes.buffer;
 }
 
+async function sha256ArrayBufferHex(input) {
+  const digest = await crypto.subtle.digest("SHA-256", input);
+
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function sha256Hex(input) {
   const data = new TextEncoder().encode(input);
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -2314,6 +3266,75 @@ async function sha256Hex(input) {
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function readImageDimensions(input, contentType) {
+  const bytes = new Uint8Array(input);
+
+  if (contentType === "image/png" && bytes.length >= 24) {
+    return {
+      width: readUint32BE(bytes, 16),
+      height: readUint32BE(bytes, 20)
+    };
+  }
+
+  if (contentType === "image/webp" && bytes.length >= 30) {
+    const riff = String.fromCharCode(...bytes.slice(0, 4));
+    const webp = String.fromCharCode(...bytes.slice(8, 12));
+    const chunk = String.fromCharCode(...bytes.slice(12, 16));
+    if (riff === "RIFF" && webp === "WEBP" && chunk === "VP8X") {
+      return {
+        width: 1 + readUint24LE(bytes, 24),
+        height: 1 + readUint24LE(bytes, 27)
+      };
+    }
+  }
+
+  if (contentType === "image/jpeg") {
+    return readJpegDimensions(bytes);
+  }
+
+  return null;
+}
+
+function readUint32BE(bytes, offset) {
+  return (
+    (bytes[offset] << 24) |
+    (bytes[offset + 1] << 16) |
+    (bytes[offset + 2] << 8) |
+    bytes[offset + 3]
+  ) >>> 0;
+}
+
+function readUint24LE(bytes, offset) {
+  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
+}
+
+function readJpegDimensions(bytes) {
+  let offset = 2;
+
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 0xff) return null;
+
+    const marker = bytes[offset + 1];
+    const length = (bytes[offset + 2] << 8) + bytes[offset + 3];
+    if (length < 2) return null;
+
+    if (
+      marker >= 0xc0 &&
+      marker <= 0xcf &&
+      ![0xc4, 0xc8, 0xcc].includes(marker)
+    ) {
+      return {
+        height: (bytes[offset + 5] << 8) + bytes[offset + 6],
+        width: (bytes[offset + 7] << 8) + bytes[offset + 8]
+      };
+    }
+
+    offset += 2 + length;
+  }
+
+  return null;
 }
 
 function currentDay() {
@@ -2566,6 +3587,27 @@ function renderAppHtml() {
       font-size: 0.9rem;
     }
 
+    .team-picker {
+      display: grid;
+      gap: 8px;
+      margin: 12px 0;
+      padding: 12px 0;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .team-picker-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .team-count {
+      font-weight: 900;
+      color: var(--ink);
+    }
+
     .dev-batch {
       display: grid;
       gap: 8px;
@@ -2612,12 +3654,173 @@ function renderAppHtml() {
       overflow-wrap: anywhere;
     }
 
+    .manual-upload {
+      display: grid;
+      gap: 8px;
+    }
+
+    .manual-upload input[type="text"],
+    .manual-upload input[type="number"],
+    .manual-upload input[type="file"] {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #fbfcf9;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    .manual-upload-check {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    .manual-result-link {
+      color: var(--teal);
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+
     .roster-head {
       display: flex;
       justify-content: space-between;
       gap: 12px;
       align-items: center;
       margin-bottom: 12px;
+    }
+
+    .view-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .view-tab {
+      min-height: 38px;
+      border: 0;
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
+      padding: 0 12px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 900;
+    }
+
+    .view-tab.active {
+      border-bottom-color: var(--teal);
+      color: var(--ink);
+    }
+
+    .view-panel[hidden] {
+      display: none;
+    }
+
+    .tree-tools {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .tree-tools input {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 12px;
+      background: #fbfcf9;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    .tree-browser {
+      display: grid;
+      gap: 10px;
+    }
+
+    .tree-summary {
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .sprite-tree {
+      display: grid;
+      gap: 8px;
+    }
+
+    .tree-node {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.78);
+      overflow: hidden;
+    }
+
+    .tree-node summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      min-height: 42px;
+      padding: 9px 12px;
+      cursor: pointer;
+      font-weight: 900;
+    }
+
+    .tree-node-list {
+      display: grid;
+      gap: 8px;
+      padding: 0 10px 10px 18px;
+    }
+
+    .tree-leaf {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      min-height: 88px;
+      border: 1px solid #e5e9e2;
+      border-radius: 8px;
+      padding: 8px;
+      background: #fbfcf9;
+    }
+
+    .tree-leaf-sprite {
+      display: grid;
+      place-items: center;
+      width: 72px;
+      aspect-ratio: 1 / 1;
+      border-radius: 8px;
+      background: #eef2eb;
+      overflow: hidden;
+    }
+
+    .tree-leaf-sprite .sheet-sprite {
+      width: 94%;
+    }
+
+    .tree-leaf-name {
+      min-width: 0;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+
+    .tree-leaf-meta {
+      color: var(--muted);
+      font-size: 0.82rem;
+      overflow-wrap: anywhere;
+    }
+
+    .tree-count {
+      color: var(--muted);
+      font-size: 0.8rem;
+      font-weight: 900;
+      white-space: nowrap;
     }
 
     .grid {
@@ -2634,6 +3837,15 @@ function renderAppHtml() {
       overflow: visible;
       min-width: 0;
       perspective: 1100px;
+    }
+
+    .card.unselectable {
+      cursor: default;
+    }
+
+    .card.selected .card-inner {
+      border-color: var(--teal);
+      box-shadow: 0 0 0 3px rgba(4, 124, 120, 0.18), var(--shadow);
     }
 
     .card:focus-visible {
@@ -2655,6 +3867,52 @@ function renderAppHtml() {
 
     .card.flipped .card-inner {
       transform: rotateY(180deg);
+    }
+
+    .card-actions {
+      position: absolute;
+      right: 8px;
+      bottom: 8px;
+      display: flex;
+      gap: 6px;
+      z-index: 4;
+    }
+
+    .card-action {
+      min-height: 28px;
+      border: 1px solid rgba(23, 32, 27, 0.18);
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--ink);
+      font-size: 0.72rem;
+      font-weight: 900;
+    }
+
+    .select-mark {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 4;
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border: 2px solid rgba(23, 32, 27, 0.28);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.92);
+      color: transparent;
+      font-weight: 900;
+    }
+
+    .card.selected .select-mark {
+      border-color: var(--teal);
+      background: var(--teal);
+      color: white;
+    }
+
+    .card.unselectable .select-mark {
+      opacity: 0.42;
     }
 
     .card-face {
@@ -3078,6 +4336,15 @@ function renderAppHtml() {
         grid-template-columns: 1fr;
       }
 
+      .tree-tools,
+      .tree-leaf {
+        grid-template-columns: 1fr;
+      }
+
+      .tree-leaf-sprite {
+        width: min(100%, 160px);
+      }
+
       .meta {
         padding: 10px;
       }
@@ -3125,6 +4392,16 @@ function renderAppHtml() {
             <strong id="bondCount">0</strong>
           </div>
         </div>
+        <div class="team-picker">
+          <div class="team-picker-row">
+            <div>
+              <span class="subtle">Combat Team</span>
+              <div class="team-count" id="teamCount">0 / 5 selected</div>
+            </div>
+            <button class="secondary" id="clearTeamButton" type="button" disabled>Clear</button>
+          </div>
+          <button class="primary" id="startBattleButton" type="button" disabled>Battle NPC</button>
+        </div>
         <button class="secondary" id="queueMoreButton" type="button" disabled>Queue More</button>
         <div class="dev-batch">
           <div class="dev-batch-head">
@@ -3135,18 +4412,64 @@ function renderAppHtml() {
           <button class="secondary" id="batchSubmitButton" type="button" disabled>Submit Batch</button>
           <div class="batch-list" id="batchQueueList">Load a roster, then click Queue More.</div>
         </div>
-        <button class="secondary" id="startBattleButton" type="button">5v5 Test Battle</button>
+        <div class="dev-batch">
+          <div class="dev-batch-head">
+            <h2>Global Seed</h2>
+            <span class="subtle" id="seedQueueCount">0 queued</span>
+          </div>
+          <button class="secondary" id="seedImportButton" type="button">Import Plants + Animals</button>
+          <button class="secondary" id="seedQueueButton" type="button">Queue 200</button>
+          <button class="secondary" id="seedSubmitButton" type="button" disabled>Submit 200</button>
+          <div class="batch-list" id="seedQueueList">Load seed status to start.</div>
+        </div>
+        <div class="dev-batch">
+          <div class="dev-batch-head">
+            <h2>Manual Sprite</h2>
+            <span class="subtle" id="manualUploadState">idle</span>
+          </div>
+          <form class="manual-upload" id="manualSpriteForm">
+            <input id="manualTaxonId" name="taxonId" inputmode="numeric" placeholder="iNaturalist taxon ID">
+            <input id="manualScientificName" name="scientificName" placeholder="Scientific name">
+            <input id="manualCommonName" name="commonName" placeholder="Common name">
+            <input id="manualSpriteFile" name="sprite" type="file" accept="image/png,image/jpeg,image/webp" required>
+            <label class="manual-upload-check">
+              <input id="manualAddToRoster" name="addToRoster" type="checkbox" checked>
+              Add to roster
+            </label>
+            <button class="secondary" id="manualUploadButton" type="submit">Upload Sprite</button>
+          </form>
+          <div class="batch-list" id="manualUploadResult">No manual upload yet.</div>
+        </div>
         <p class="status" id="statusLine"></p>
       </aside>
 
       <section>
-        <div class="roster-head">
-          <h2>Roster</h2>
-          <span class="subtle" id="refreshLabel"></span>
-        </div>
-        <div class="grid" id="rosterGrid"></div>
-        <div class="empty" id="emptyState">Import a public iNaturalist roster.</div>
-        <section class="battle" id="battlePanel" hidden></section>
+        <nav class="view-tabs" aria-label="Main views">
+          <button class="view-tab active" id="rosterTabButton" type="button" data-view-tab="roster">Roster</button>
+          <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
+        </nav>
+        <section class="view-panel" id="rosterView">
+          <div class="roster-head">
+            <h2>Roster</h2>
+            <span class="subtle" id="refreshLabel"></span>
+          </div>
+          <div class="grid" id="rosterGrid"></div>
+          <div class="empty" id="emptyState">Import a public iNaturalist roster.</div>
+          <section class="battle" id="battlePanel" hidden></section>
+        </section>
+        <section class="view-panel" id="treeView" hidden>
+          <div class="roster-head">
+            <h2>Sprite Tree</h2>
+            <span class="subtle" id="treeRefreshLabel"></span>
+          </div>
+          <div class="tree-tools">
+            <input id="treeSearchInput" placeholder="Search sprites, taxa, or groups">
+            <button class="secondary" id="treeRefreshButton" type="button">Refresh</button>
+          </div>
+          <div class="tree-browser" id="spriteTreePanel">
+            <div class="empty">Load the sprite tree to browse ready assets.</div>
+          </div>
+        </section>
       </section>
     </section>
   </main>
@@ -3154,14 +4477,23 @@ function renderAppHtml() {
   <script>
     const LAST_BATCH_STORAGE_KEY = "inatBattler:lastBatch";
     const BATCH_POLL_MS = 60000;
+    const DEV_QUEUE_MORE_LIMIT = 100;
+    const DEV_BATCH_SUBMIT_LIMIT = 100;
+    const GLOBAL_SEED_BATCH_LIMIT = 200;
     const ACTIVE_BATCH_STATUSES = new Set(["submitted", "validating", "in_progress", "finalizing", "cancelling"]);
 
     const state = {
       userId: localStorage.getItem("inatBattler:userId") || "",
       inatLogin: localStorage.getItem("inatBattler:inatLogin") || "",
+      activeView: "roster",
       taxa: [],
+      spriteTree: null,
+      treeSearch: "",
+      selectedTaxa: new Set(),
       flippedTaxa: new Set(),
       batchJobs: [],
+      seedJobs: [],
+      seedStatus: null,
       lastBatch: readStoredBatch(),
       batchPolling: null,
       batchSyncing: false,
@@ -3180,6 +4512,22 @@ function renderAppHtml() {
       batchSubmitButton: document.getElementById("batchSubmitButton"),
       batchQueueCount: document.getElementById("batchQueueCount"),
       batchQueueList: document.getElementById("batchQueueList"),
+      seedImportButton: document.getElementById("seedImportButton"),
+      seedQueueButton: document.getElementById("seedQueueButton"),
+      seedSubmitButton: document.getElementById("seedSubmitButton"),
+      seedQueueCount: document.getElementById("seedQueueCount"),
+      seedQueueList: document.getElementById("seedQueueList"),
+      manualSpriteForm: document.getElementById("manualSpriteForm"),
+      manualTaxonId: document.getElementById("manualTaxonId"),
+      manualScientificName: document.getElementById("manualScientificName"),
+      manualCommonName: document.getElementById("manualCommonName"),
+      manualSpriteFile: document.getElementById("manualSpriteFile"),
+      manualAddToRoster: document.getElementById("manualAddToRoster"),
+      manualUploadButton: document.getElementById("manualUploadButton"),
+      manualUploadState: document.getElementById("manualUploadState"),
+      manualUploadResult: document.getElementById("manualUploadResult"),
+      teamCount: document.getElementById("teamCount"),
+      clearTeamButton: document.getElementById("clearTeamButton"),
       startBattleButton: document.getElementById("startBattleButton"),
       statusLine: document.getElementById("statusLine"),
       accountLabel: document.getElementById("accountLabel"),
@@ -3188,6 +4536,14 @@ function renderAppHtml() {
       queuedCount: document.getElementById("queuedCount"),
       bondCount: document.getElementById("bondCount"),
       refreshLabel: document.getElementById("refreshLabel"),
+      rosterTabButton: document.getElementById("rosterTabButton"),
+      treeTabButton: document.getElementById("treeTabButton"),
+      rosterView: document.getElementById("rosterView"),
+      treeView: document.getElementById("treeView"),
+      treeSearchInput: document.getElementById("treeSearchInput"),
+      treeRefreshButton: document.getElementById("treeRefreshButton"),
+      treeRefreshLabel: document.getElementById("treeRefreshLabel"),
+      spriteTreePanel: document.getElementById("spriteTreePanel"),
       rosterGrid: document.getElementById("rosterGrid"),
       emptyState: document.getElementById("emptyState"),
       battlePanel: document.getElementById("battlePanel")
@@ -3200,6 +4556,20 @@ function renderAppHtml() {
       await importRoster(els.input.value);
     });
 
+    els.rosterTabButton.addEventListener("click", () => switchView("roster"));
+    els.treeTabButton.addEventListener("click", () => switchView("tree"));
+
+    els.treeRefreshButton.addEventListener("click", async () => {
+      state.treeSearch = els.treeSearchInput.value.trim();
+      await loadSpriteTree(true);
+    });
+
+    els.treeSearchInput.addEventListener("input", debounce(async () => {
+      if (state.activeView !== "tree") return;
+      state.treeSearch = els.treeSearchInput.value.trim();
+      await loadSpriteTree(false);
+    }, 250));
+
     els.queueMoreButton.addEventListener("click", async () => {
       if (!state.userId) return;
       setBusy(true, "Queueing sprites");
@@ -3208,7 +4578,7 @@ function renderAppHtml() {
         const res = await apiFetch("/api/sprite-jobs", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ userId: state.userId, limit: 12 })
+          body: JSON.stringify({ userId: state.userId, limit: DEV_QUEUE_MORE_LIMIT })
         });
 
         setStatus(res.queued > 0
@@ -3237,7 +4607,7 @@ function renderAppHtml() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             userId: state.userId,
-            limit: Math.min(12, state.batchJobs.length),
+            limit: Math.min(DEV_BATCH_SUBMIT_LIMIT, state.batchJobs.length),
             queueMissing: false
           })
         });
@@ -3257,7 +4627,85 @@ function renderAppHtml() {
       }
     });
 
-    els.startBattleButton.addEventListener("click", startDemoBattle);
+    els.seedImportButton.addEventListener("click", async () => {
+      setBusy(true, "Importing plant and animal seed taxa");
+
+      try {
+        const res = await apiFetch("/api/global-seed/dev-import", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ limitPerGroup: 1000 })
+        });
+
+        state.seedStatus = res.status || null;
+        setStatus("Imported " + Number(res.importedTaxa || 0) + " global seed taxa");
+        await loadGlobalSeedQueue();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    els.seedQueueButton.addEventListener("click", async () => {
+      setBusy(true, "Queueing global seed sprites");
+
+      try {
+        const res = await apiFetch("/api/global-seed/dev-queue", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ limit: GLOBAL_SEED_BATCH_LIMIT })
+        });
+
+        state.seedStatus = res.status || null;
+        setStatus(res.queued > 0
+          ? "Queued " + res.queued + " global seed sprite jobs"
+          : "No new global seed jobs queued. Import seed taxa first, or wait for submitted batches to finish.");
+        await loadGlobalSeedQueue();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    els.seedSubmitButton.addEventListener("click", async () => {
+      if (state.seedJobs.length === 0) return;
+      setBusy(true, "Submitting global seed batch");
+
+      try {
+        const res = await apiFetch("/api/global-seed/dev-submit", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ limit: Math.min(GLOBAL_SEED_BATCH_LIMIT, state.seedJobs.length) })
+        });
+
+        state.lastBatch = res.submitted ? normalizeSubmittedBatch(res) : null;
+        saveLastBatch();
+        setStatus(res.submitted
+          ? "Submitted seed batch " + res.batchId + " with " + res.itemCount + " sprites"
+          : (res.message || "No global seed jobs available for batch submission"));
+        if (res.submitted) scheduleBatchPolling(5000);
+        await loadGlobalSeedQueue();
+        await loadBatchQueue();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    els.manualSpriteForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await uploadManualSprite();
+    });
+
+    els.clearTeamButton.addEventListener("click", () => {
+      state.selectedTaxa.clear();
+      render();
+    });
+
+    els.startBattleButton.addEventListener("click", startNpcBattle);
 
     els.battlePanel.addEventListener("click", async (event) => {
       const button = event.target.closest("[data-move-id]");
@@ -3266,9 +4714,16 @@ function renderAppHtml() {
     });
 
     els.rosterGrid.addEventListener("click", (event) => {
+      const detailsButton = event.target.closest("[data-card-details]");
+      if (detailsButton) {
+        event.stopPropagation();
+        toggleCardFlip(detailsButton.getAttribute("data-taxon-id"));
+        return;
+      }
+
       const card = event.target.closest("[data-taxon-card]");
       if (!card) return;
-      toggleCardFlip(card.getAttribute("data-taxon-id"));
+      toggleTeamSelection(card.getAttribute("data-taxon-id"));
     });
 
     els.rosterGrid.addEventListener("keydown", (event) => {
@@ -3278,7 +4733,7 @@ function renderAppHtml() {
       if (!card) return;
 
       event.preventDefault();
-      toggleCardFlip(card.getAttribute("data-taxon-id"));
+      toggleTeamSelection(card.getAttribute("data-taxon-id"));
     });
 
     if (state.userId) {
@@ -3287,11 +4742,14 @@ function renderAppHtml() {
 
     renderBatchQueue();
     hydrateBatchTracker();
+    hydrateGlobalSeedStatus();
 
     async function importRoster(inatLogin) {
       setBusy(true, "Importing roster");
 
       try {
+        state.selectedTaxa.clear();
+        state.flippedTaxa.clear();
         const res = await apiFetch("/api/import", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -3316,8 +4774,40 @@ function renderAppHtml() {
 
       const res = await apiFetch("/api/roster?userId=" + encodeURIComponent(state.userId) + "&limit=100");
       state.taxa = res.taxa || [];
+      pruneSelectedTaxa();
       render();
       schedulePolling();
+    }
+
+    async function switchView(view) {
+      state.activeView = view === "tree" ? "tree" : "roster";
+      renderViewTabs();
+
+      if (state.activeView === "tree" && !state.spriteTree) {
+        await loadSpriteTree(false);
+      }
+    }
+
+    function renderViewTabs() {
+      const isTree = state.activeView === "tree";
+      els.rosterTabButton.classList.toggle("active", !isTree);
+      els.treeTabButton.classList.toggle("active", isTree);
+      els.rosterView.hidden = isTree;
+      els.treeView.hidden = !isTree;
+    }
+
+    async function loadSpriteTree(showStatus) {
+      const q = state.treeSearch || "";
+      if (showStatus) setStatus("Loading sprite tree");
+
+      try {
+        const res = await apiFetch("/api/sprite-tree?limit=1000&q=" + encodeURIComponent(q));
+        state.spriteTree = res;
+        renderSpriteTree();
+        if (showStatus) setStatus("Loaded " + Number(res.totalSprites || 0) + " ready sprites in the tree");
+      } catch (error) {
+        setStatus(error.message);
+      }
     }
 
     function render() {
@@ -3328,24 +4818,88 @@ function renderAppHtml() {
       const spriteCount = state.taxa.filter((taxon) => taxon.sprite.status === "ready").length;
       const queuedCount = state.taxa.filter((taxon) => ["queued", "running"].includes(taxon.sprite.status)).length;
       const bondCount = state.taxa.reduce((sum, taxon) => sum + Number(affinityLevel(taxon) || 0), 0);
+      const selectedCount = state.selectedTaxa.size;
 
       els.taxaCount.textContent = String(state.taxa.length);
       els.spriteCount.textContent = String(spriteCount);
       els.queuedCount.textContent = String(queuedCount);
       els.bondCount.textContent = String(bondCount);
+      els.teamCount.textContent = selectedCount + " / 5 selected";
+      els.clearTeamButton.disabled = selectedCount === 0;
+      els.startBattleButton.disabled = !state.userId || selectedCount !== 5;
       els.queueMoreButton.disabled = !state.userId;
       els.batchPreviewButton.disabled = !state.userId;
       els.batchSubmitButton.disabled = !state.userId || state.batchJobs.length === 0;
       els.refreshLabel.textContent = state.taxa.length ? "Top " + state.taxa.length : "";
       renderBatchQueue();
+      renderGlobalSeedQueue();
+      renderViewTabs();
+      renderSpriteTree();
       renderBattle();
+    }
+
+    function renderSpriteTree() {
+      const tree = state.spriteTree;
+
+      if (!tree) {
+        els.treeRefreshLabel.textContent = "";
+        els.spriteTreePanel.innerHTML = '<div class="empty">Open this tab to load the ready sprite tree.</div>';
+        return;
+      }
+
+      els.treeRefreshLabel.textContent = Number(tree.totalSprites || 0) + " ready sprites";
+
+      if (!Array.isArray(tree.roots) || tree.roots.length === 0) {
+        els.spriteTreePanel.innerHTML = '<div class="empty">No ready sprites match this search.</div>';
+        return;
+      }
+
+      els.spriteTreePanel.innerHTML =
+        '<div class="tree-summary">Grouped by iNaturalist iconic taxon and genus from the current D1/R2 sprite assets.</div>' +
+        '<div class="sprite-tree">' + tree.roots.map((node) => renderTreeNode(node, 0)).join("") + '</div>';
+    }
+
+    function renderTreeNode(node, depth) {
+      if (node.leaf) return renderTreeLeaf(node);
+
+      const open = depth < 1 ? " open" : "";
+      return '<details class="tree-node"' + open + '>' +
+        '<summary>' +
+          '<span>' + escapeHtml(node.name || "Taxon") + '</span>' +
+          '<span class="tree-count">' + Number(node.spriteCount || 0) + ' sprites</span>' +
+        '</summary>' +
+        '<div class="tree-node-list">' +
+          (Array.isArray(node.children) ? node.children.map((child) => renderTreeNode(child, depth + 1)).join("") : "") +
+        '</div>' +
+      '</details>';
+    }
+
+    function renderTreeLeaf(node) {
+      const sprite = node.sprite?.url
+        ? renderSheetSprite(node.sprite.url, "anim-idle")
+        : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(node.iconicTaxonName)) + '"></div>';
+
+      return '<div class="tree-leaf">' +
+        '<div class="tree-leaf-sprite">' + sprite + '</div>' +
+        '<div>' +
+          '<div class="tree-leaf-name">' + escapeHtml(node.name || node.scientificName || "Unnamed taxon") + '</div>' +
+          '<div class="tree-leaf-meta"><em>' + escapeHtml(node.scientificName || "") + '</em></div>' +
+          '<div class="tree-leaf-meta">' + escapeHtml((node.rank || "taxon") + " / " + (node.iconicTaxonName || "Life")) + ' / taxon ' + Number(node.taxonId || 0) + '</div>' +
+        '</div>' +
+        '<a class="manual-result-link" href="' + escapeAttr(node.sprite?.url || "#") + '" target="_blank" rel="noreferrer">Open</a>' +
+      '</div>';
     }
 
     async function loadBatchQueue(showStatus) {
       if (!state.userId) return;
 
-      const res = await apiFetch("/api/sprite-jobs?status=queued&userId=" + encodeURIComponent(state.userId));
-      state.batchJobs = (res.jobs || []).slice(0, 12);
+      const res = await apiFetch(
+        "/api/sprite-jobs?status=queued&userId=" +
+          encodeURIComponent(state.userId) +
+          "&limit=" +
+          DEV_BATCH_SUBMIT_LIMIT
+      );
+      state.batchJobs = res.jobs || [];
 
       if (showStatus) {
         setStatus(state.batchJobs.length
@@ -3354,6 +4908,30 @@ function renderAppHtml() {
       }
 
       renderBatchQueue();
+    }
+
+    async function hydrateGlobalSeedStatus() {
+      try {
+        const res = await apiFetch("/api/global-seed/status");
+        state.seedStatus = res || null;
+        await loadGlobalSeedQueue();
+      } catch (error) {
+        console.warn("Could not hydrate global seed status", error);
+        renderGlobalSeedQueue();
+      }
+    }
+
+    async function loadGlobalSeedQueue() {
+      try {
+        const status = await apiFetch("/api/global-seed/status");
+        const queue = await apiFetch("/api/global-seed/jobs?limit=" + GLOBAL_SEED_BATCH_LIMIT);
+        state.seedStatus = status || null;
+        state.seedJobs = queue.jobs || [];
+        renderGlobalSeedQueue();
+      } catch (error) {
+        setStatus("Global seed status failed: " + error.message);
+        renderGlobalSeedQueue();
+      }
     }
 
     function renderBatchQueue() {
@@ -3367,7 +4945,9 @@ function renderAppHtml() {
           '<span>' + escapeHtml(state.lastBatch.batchId) + '</span>' +
           '<span>' + escapeHtml(batchStatusText(state.lastBatch)) + '</span>' +
           (state.batchSyncing ? '<span>Syncing outputs to R2...</span>' : '') +
-        '</div>' + (count ? renderBatchJobList(state.batchJobs) : "");
+        '</div>' + (count
+          ? '<div class="batch-item"><strong>Pending next batch</strong><span>' + count + ' queued sprites are not in the last synced batch.</span></div>' + renderBatchJobList(state.batchJobs)
+          : "");
         return;
       }
 
@@ -3382,6 +4962,103 @@ function renderAppHtml() {
       }
 
       els.batchQueueList.innerHTML = renderBatchJobList(state.batchJobs);
+    }
+
+    function renderGlobalSeedQueue() {
+      const count = state.seedJobs.length;
+      els.seedQueueCount.textContent = count + " queued";
+      els.seedSubmitButton.disabled = count === 0;
+
+      const status = state.seedStatus;
+      if (!status || Number(status.totals?.seedCount || 0) === 0) {
+        els.seedQueueList.textContent = "Click Import Plants + Animals to load the top seed taxa from iNaturalist.";
+        return;
+      }
+
+      const totals = status.totals || {};
+      const summary = '<div class="batch-item">' +
+        '<strong>Seed catalog</strong>' +
+        '<span>' + Number(totals.seedCount || 0) + ' taxa / ' +
+          Number(totals.readyCount || 0) + ' ready / ' +
+          Number(totals.batchSubmittedCount || 0) + ' submitted / ' +
+          Number(totals.queuedCount || 0) + ' queued / ' +
+          Number(totals.missingCount || 0) + ' missing</span>' +
+        renderSeedGroupStatus(status.groups || []) +
+      '</div>';
+
+      els.seedQueueList.innerHTML = summary + (count
+        ? '<div class="batch-item"><strong>Next seed batch</strong><span>' + count + ' queued sprites ready to submit.</span></div>' + renderBatchJobList(state.seedJobs)
+        : '<div class="batch-item"><strong>No queued seed jobs</strong><span>Click Queue 200 to prepare the next missing global seed sprites.</span></div>');
+    }
+
+    function renderSeedGroupStatus(groups) {
+      return groups.map((group) => (
+        '<span>' + escapeHtml(group.label || group.key) + ': ' +
+        Number(group.seedCount || 0) + ' taxa, ' +
+        Number(group.readyCount || 0) + ' ready, ' +
+        Number(group.missingCount || 0) + ' missing</span>'
+      )).join("");
+    }
+
+    async function uploadManualSprite() {
+      const file = els.manualSpriteFile.files && els.manualSpriteFile.files[0];
+      const hasTaxonLabel = els.manualTaxonId.value.trim() ||
+        els.manualScientificName.value.trim() ||
+        els.manualCommonName.value.trim();
+
+      if (!file) {
+        setStatus("Choose a sprite sheet image first.");
+        return;
+      }
+
+      if (!hasTaxonLabel) {
+        setStatus("Add a taxon ID, scientific name, or common name.");
+        return;
+      }
+
+      const formData = new FormData(els.manualSpriteForm);
+      formData.set("addToRoster", els.manualAddToRoster.checked ? "true" : "false");
+      if (state.userId) formData.set("userId", state.userId);
+
+      setBusy(true, "Uploading manual sprite");
+      els.manualUploadState.textContent = "uploading";
+
+      try {
+        const result = await apiFetch("/api/manual-sprites/upload", {
+          method: "POST",
+          body: formData
+        });
+
+        els.manualUploadState.textContent = "ready";
+        els.manualUploadResult.innerHTML = renderManualUploadResult(result);
+        setStatus("Uploaded manual sprite for " + (result.commonName || result.scientificName));
+
+        if (state.userId) {
+          await loadRoster();
+        }
+
+        if (state.activeView === "tree") {
+          await loadSpriteTree(false);
+        }
+      } catch (error) {
+        els.manualUploadState.textContent = "failed";
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function renderManualUploadResult(result) {
+      const size = result.width && result.height
+        ? result.width + " x " + result.height
+        : "size unknown";
+
+      return '<div class="batch-item">' +
+        '<strong>' + escapeHtml(result.commonName || result.scientificName || "Uploaded sprite") + '</strong>' +
+        '<span><em>' + escapeHtml(result.scientificName || "") + '</em></span>' +
+        '<span>taxon ' + Number(result.taxonId || 0) + ' / ' + escapeHtml(size) + ' / ' + escapeHtml(result.contentType || "") + '</span>' +
+        '<a class="manual-result-link" href="' + escapeAttr(result.url || "#") + '" target="_blank" rel="noreferrer">Open asset</a>' +
+      '</div>';
     }
 
     async function hydrateBatchTracker() {
@@ -3567,6 +5244,35 @@ function renderAppHtml() {
       )).join("");
     }
 
+    function pruneSelectedTaxa() {
+      const readyIds = new Set(state.taxa
+        .filter((taxon) => taxon.sprite && taxon.sprite.status === "ready")
+        .map((taxon) => String(taxon.taxonId)));
+
+      state.selectedTaxa = new Set(Array.from(state.selectedTaxa).filter((taxonId) => readyIds.has(String(taxonId))));
+    }
+
+    function toggleTeamSelection(taxonId) {
+      const normalized = String(taxonId || "");
+      const taxon = state.taxa.find((candidate) => String(candidate.taxonId) === normalized);
+      if (!taxon || taxon.sprite.status !== "ready") {
+        setStatus("Only ready sprites can join the combat team.");
+        return;
+      }
+
+      if (state.selectedTaxa.has(normalized)) {
+        state.selectedTaxa.delete(normalized);
+      } else {
+        if (state.selectedTaxa.size >= 5) {
+          setStatus("Five creatures are already selected.");
+          return;
+        }
+        state.selectedTaxa.add(normalized);
+      }
+
+      render();
+    }
+
     function toggleCardFlip(taxonId) {
       if (!taxonId) return;
 
@@ -3584,6 +5290,7 @@ function renderAppHtml() {
       const isReady = status === "ready";
       const taxonId = String(taxon.taxonId);
       const isFlipped = state.flippedTaxa.has(taxonId);
+      const isSelected = state.selectedTaxa.has(taxonId);
       const imageUrl = isReady ? taxon.sprite.url : taxon.defaultPhotoUrl;
       const image = isReady && imageUrl
         ? renderSheetSprite(imageUrl, "anim-idle")
@@ -3593,8 +5300,9 @@ function renderAppHtml() {
       const badge = isReady ? "ready" : status;
       const types = Array.isArray(taxon.types) ? taxon.types.join(" / ") : (taxon.iconicTaxon || "Life");
 
-      return '<article class="card ' + (isFlipped ? "flipped" : "") + '" data-taxon-card data-taxon-id="' + escapeAttr(taxonId) + '" tabindex="0" role="button" aria-pressed="' + String(isFlipped) + '" aria-label="' + escapeAttr((taxon.name || taxon.scientificName || "Taxon") + " battle details") + '">' +
+      return '<article class="card ' + (isFlipped ? "flipped " : "") + (isSelected ? "selected " : "") + (!isReady ? "unselectable" : "") + '" data-taxon-card data-taxon-id="' + escapeAttr(taxonId) + '" tabindex="0" role="button" aria-pressed="' + String(isSelected) + '" aria-label="' + escapeAttr((taxon.name || taxon.scientificName || "Taxon") + " combat selection") + '">' +
         '<div class="card-inner">' +
+          '<div class="select-mark" aria-hidden="true">' + (isSelected ? "OK" : "") + '</div>' +
           '<div class="card-face card-front">' +
             '<div class="sprite ' + (isReady ? "ready" : "") + '">' +
               image +
@@ -3610,9 +5318,15 @@ function renderAppHtml() {
                 '<span class="chip">Affinity ' + Number(affinityLevel(taxon) || 0) + '</span>' +
               '</div>' +
             '</div>' +
+            '<div class="card-actions">' +
+              '<button class="card-action" type="button" data-card-details data-taxon-id="' + escapeAttr(taxonId) + '">Details</button>' +
+            '</div>' +
           '</div>' +
           '<div class="card-face card-back">' +
             renderCardBack(taxon, types) +
+            '<div class="card-actions">' +
+              '<button class="card-action" type="button" data-card-details data-taxon-id="' + escapeAttr(taxonId) + '">Roster</button>' +
+            '</div>' +
           '</div>' +
         '</div>' +
       '</article>';
@@ -3672,6 +5386,39 @@ function renderAppHtml() {
           '<div class="ability-power">' + escapeHtml(score) + '</div>' +
         '</div>';
       }).join("");
+    }
+
+    async function startNpcBattle() {
+      if (!state.userId || state.selectedTaxa.size !== 5) {
+        setStatus("Select 5 ready sprites first.");
+        return;
+      }
+
+      const taxonIds = Array.from(state.selectedTaxa).map(Number);
+      setBusy(true, "Starting NPC battle");
+
+      try {
+        await apiFetch("/api/users/" + encodeURIComponent(state.userId) + "/teams", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "Field Team", taxonIds })
+        });
+
+        const battle = await apiFetch("/api/battles/npc/start", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId: state.userId, taxonIds, npcTemplate: "random_ready" })
+        });
+
+        state.battle = battle;
+        state.battleAnimation = "anim-idle";
+        setStatus("NPC battle ready");
+        renderBattle();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
     }
 
     async function startDemoBattle() {
@@ -3738,7 +5485,7 @@ function renderAppHtml() {
 
       els.battlePanel.innerHTML =
         '<div class="roster-head">' +
-          '<h2>5v5 Test Battle</h2>' +
+          '<h2>NPC Battle</h2>' +
           '<span class="subtle">' + escapeHtml(battle.status) + ' / turn ' + Number(battle.turn || 1) + '</span>' +
         '</div>' +
         '<div class="battle-stage">' +
@@ -3812,12 +5559,32 @@ function renderAppHtml() {
       els.queueMoreButton.disabled = isBusy || !state.userId;
       els.batchPreviewButton.disabled = isBusy || !state.userId;
       els.batchSubmitButton.disabled = isBusy || !state.userId || state.batchJobs.length === 0;
-      els.startBattleButton.disabled = isBusy;
+      els.seedImportButton.disabled = isBusy;
+      els.seedQueueButton.disabled = isBusy;
+      els.seedSubmitButton.disabled = isBusy || state.seedJobs.length === 0;
+      els.manualUploadButton.disabled = isBusy;
+      els.manualTaxonId.disabled = isBusy;
+      els.manualScientificName.disabled = isBusy;
+      els.manualCommonName.disabled = isBusy;
+      els.manualSpriteFile.disabled = isBusy;
+      els.manualAddToRoster.disabled = isBusy;
+      els.treeSearchInput.disabled = isBusy;
+      els.treeRefreshButton.disabled = isBusy;
+      els.clearTeamButton.disabled = isBusy || state.selectedTaxa.size === 0;
+      els.startBattleButton.disabled = isBusy || !state.userId || state.selectedTaxa.size !== 5;
       if (message) setStatus(message);
     }
 
     function delay(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function debounce(fn, waitMs) {
+      let timeoutId;
+      return (...args) => {
+        if (timeoutId) clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => fn(...args), waitMs);
+      };
     }
 
     function setStatus(message) {
