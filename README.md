@@ -10,6 +10,22 @@ Cloudflare Worker app for importing public iNaturalist species counts, showing a
 4. Missing top species enqueue global sprite jobs.
 5. The queue consumer dedupes again, checks the daily generation budget, calls OpenAI Images, saves WebP output to R2, and writes `sprite_assets`.
 
+## R2 Naming
+
+Generated global sprite keys include both the stable iNaturalist taxon id and a readable scientific-name slug:
+
+```text
+species/v1/<taxon_id>-<scientific-name-slug>/<prompt_hash>/sprite_sheet.webp
+```
+
+Example:
+
+```text
+species/v1/13858-passer-domesticus/4d2a1c89e4b7a311/sprite_sheet.webp
+```
+
+The taxon id stays first because scientific names can change, while D1 stores the final `sprite_assets.r2_key` used by the app.
+
 ## D1 vs R2
 
 Generated sprite image bytes belong in R2.
@@ -92,6 +108,23 @@ The production generator uses `gpt-image-2` by default. When references are enab
 
 `gpt-image-2` currently does not support transparent backgrounds, so generated sheets request an opaque plain/auto background and the UI treats each sheet as a 4x4 grid.
 
+For development/backfill, `SPRITE_GENERATION_MODE=batch` leaves Cloudflare Queue messages acknowledged but keeps D1 `sprite_jobs` queued for OpenAI Batch submission. This uses `/v1/images/edits` with `gpt-image-2`, the iNaturalist default photo URL when available, and the House Sparrow style sheet served from R2.
+
+Submit a small batch:
+
+```sh
+curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/sprite-batches/dev-submit \
+  -H "content-type: application/json" \
+  -d '{"userId":"inat:mycolocore","limit":2}'
+```
+
+Check and sync it:
+
+```sh
+curl https://inat-battler.intrinsic3141.workers.dev/api/sprite-batches/<batch_id>
+curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/sprite-batches/<batch_id>/sync
+```
+
 ## iNaturalist Rate Limits
 
 Username imports use one `species_counts` page by default to avoid bursty API usage. Successful responses are cached in KV for six hours. If iNaturalist returns `429 Too Many Requests`, the Worker retries once, then uses cached/D1 roster data when available; otherwise the UI asks the user to wait and retry.
@@ -109,7 +142,7 @@ curl -X POST http://127.0.0.1:8787/api/sprite-jobs/dev-generate-next
 This writes an SVG sprite sheet to R2 at a key like:
 
 ```text
-species/v1/<taxon_id>/<prompt_hash>/sprite_sheet.svg
+species/v1/<taxon_id>-<scientific-name-slug>/<prompt_hash>/sprite_sheet.svg
 ```
 
 and marks the matching `sprite_assets` row as ready in D1.

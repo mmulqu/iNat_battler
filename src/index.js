@@ -44,6 +44,11 @@ export default {
       }
 
       try {
+        if (spriteGenerationMode(env) === "batch") {
+          message.ack();
+          continue;
+        }
+
         await processSpriteJob(env, body);
         message.ack();
       } catch (error) {
@@ -126,6 +131,23 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "GET" && url.pathname === "/api/sprite-jobs") {
     const status = url.searchParams.get("status") ?? "queued";
     return jsonResponse(await listSpriteJobs(env, status));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-submit") {
+    const payload = await readJson(request);
+    const limit = clampInt(payload.limit, 1, 25, 2);
+    const userId = payload.userId ? String(payload.userId) : "";
+    return jsonResponse(await submitDevSpriteBatch(env, request.url, { limit, userId }));
+  }
+
+  const spriteBatchSyncMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)\/sync$/);
+  if (request.method === "POST" && spriteBatchSyncMatch) {
+    return jsonResponse(await syncSpriteBatch(env, decodeURIComponent(spriteBatchSyncMatch[1])));
+  }
+
+  const spriteBatchMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)$/);
+  if (request.method === "GET" && spriteBatchMatch) {
+    return jsonResponse(await getSpriteBatch(env, decodeURIComponent(spriteBatchMatch[1])));
   }
 
   if (request.method === "POST" && url.pathname === "/api/sprite-jobs/dev-generate-next") {
@@ -561,7 +583,8 @@ async function processSpriteJob(env, job) {
 
   const referenceImages = await loadSpriteReferenceImages(env, taxon);
   const generated = await generateSpriteWithOpenAI(env, promptSpec, referenceImages);
-  const r2Key = `species/v${job.assetVersion}/${job.taxonId}/${job.promptHash.slice(0, 16)}/${job.assetKind}.${generated.extension}`;
+  const speciesPrefix = speciesAssetPrefix(job.assetVersion, job.taxonId, taxon.scientific_name);
+  const r2Key = `${speciesPrefix}/${job.promptHash.slice(0, 16)}/${job.assetKind}.${generated.extension}`;
 
   await env.ASSETS.put(r2Key, generated.bytes, {
     httpMetadata: {
@@ -572,7 +595,9 @@ async function processSpriteJob(env, job) {
       taxonId: String(job.taxonId),
       promptHash: job.promptHash,
       assetKind: job.assetKind,
-      assetVersion: String(job.assetVersion)
+      assetVersion: String(job.assetVersion),
+      scientificName: String(taxon.scientific_name ?? ""),
+      speciesSlug: slugifyScientificName(taxon.scientific_name)
     }
   });
 
@@ -671,6 +696,540 @@ async function listSpriteJobs(env, status) {
   return { jobs: rows.results ?? [] };
 }
 
+async function submitDevSpriteBatch(env, requestUrl, options) {
+  if (!env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is not configured");
+  }
+
+  if (options.userId) {
+    await queueMissingSpritesForUser(env, options.userId, options.limit, 80);
+  }
+
+  const jobs = await selectQueuedSpriteJobsForBatch(env, options.limit, options.userId);
+  if (jobs.length === 0) {
+    return { submitted: false, message: "No queued sprite jobs available for batch submission" };
+  }
+
+  const endpoint = "/v1/images/edits";
+  const jsonlLines = [];
+  const items = [];
+
+  for (const job of jobs) {
+    const reserved = await reserveGlobalGenerationAttempt(env);
+    if (!reserved) break;
+
+    const promptSpec = await getOrCreatePromptSpec(env, Number(job.taxon_id));
+    const references = buildBatchReferenceImages(env, requestUrl, job);
+    const customId = customIdForBatchItem(job);
+    const body = openAIImageEditJsonBody(env, promptSpec, references);
+
+    jsonlLines.push(JSON.stringify({
+      custom_id: customId,
+      method: "POST",
+      url: endpoint,
+      body
+    }));
+
+    items.push({ customId, job });
+  }
+
+  if (items.length === 0) {
+    throw new Error("Daily sprite generation cap reached");
+  }
+
+  const inputFile = await uploadOpenAIBatchFile(
+    env,
+    `${jsonlLines.join("\n")}\n`,
+    `sprite-batch-${Date.now()}.jsonl`
+  );
+
+  const batch = await createOpenAIBatch(env, inputFile.id, endpoint, {
+    kind: "sprite_generation",
+    model: imageModel(env),
+    item_count: String(items.length)
+  });
+
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    INSERT INTO openai_sprite_batches (
+      batch_id, input_file_id, output_file_id, error_file_id,
+      endpoint, model, status, item_count, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    batch.id,
+    inputFile.id,
+    batch.output_file_id ?? null,
+    batch.error_file_id ?? null,
+    endpoint,
+    imageModel(env),
+    batch.status ?? "submitted",
+    items.length,
+    now,
+    now
+  ).run();
+
+  for (const item of items) {
+    await env.DB.prepare(`
+      INSERT INTO openai_sprite_batch_items (
+        batch_id, custom_id, job_id, taxon_id, status,
+        created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, 'submitted', ?, ?)
+    `).bind(
+      batch.id,
+      item.customId,
+      item.job.job_id,
+      item.job.taxon_id,
+      now,
+      now
+    ).run();
+
+    await env.DB.prepare(`
+      UPDATE sprite_jobs
+      SET status = 'batch_submitted',
+          attempts = attempts + 1,
+          error = NULL,
+          updated_at = ?
+      WHERE job_id = ?
+    `).bind(now, item.job.job_id).run();
+  }
+
+  return {
+    submitted: true,
+    batchId: batch.id,
+    status: batch.status,
+    inputFileId: inputFile.id,
+    endpoint,
+    itemCount: items.length,
+    items: items.map((item) => ({
+      customId: item.customId,
+      jobId: item.job.job_id,
+      taxonId: item.job.taxon_id,
+      scientificName: item.job.scientific_name,
+      references: buildBatchReferenceImages(env, requestUrl, item.job).map((reference) => ({
+        kind: reference.kind,
+        imageUrl: reference.imageUrl
+      }))
+    }))
+  };
+}
+
+async function selectQueuedSpriteJobsForBatch(env, limit, userId = "") {
+  const baseSelect = `
+    SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name, t.default_photo_url
+    FROM sprite_jobs sj
+    JOIN taxa t ON t.taxon_id = sj.taxon_id
+  `;
+  const readyAssetJoin = `
+    LEFT JOIN sprite_assets sa
+      ON sa.taxon_id = sj.taxon_id
+      AND sa.asset_kind = sj.asset_kind
+      AND sa.asset_version = sj.asset_version
+      AND sa.prompt_hash = sj.prompt_hash
+      AND sa.status = 'ready'
+  `;
+  const whereClause = `
+    WHERE sj.status = 'queued'
+      AND sa.asset_id IS NULL
+    ORDER BY sj.priority ASC, sj.created_at ASC
+    LIMIT ?
+  `;
+
+  const statement = userId
+    ? env.DB.prepare(`
+        ${baseSelect}
+        JOIN user_taxa ut
+          ON ut.taxon_id = sj.taxon_id
+          AND ut.user_id = ?
+        ${readyAssetJoin}
+        ${whereClause}
+      `).bind(userId, limit)
+    : env.DB.prepare(`
+        ${baseSelect}
+        ${readyAssetJoin}
+        ${whereClause}
+      `).bind(limit);
+
+  const rows = await statement.all();
+  return rows.results ?? [];
+}
+
+function buildBatchReferenceImages(env, requestUrl, taxon) {
+  const references = [];
+  const mode = String(env.IMAGE_REFERENCE_MODE ?? "default_photo").toLowerCase();
+
+  if (mode !== "off" && mode !== "style_only" && isSafeReferenceImageUrl(taxon.default_photo_url)) {
+    references.push({
+      kind: "species_photo",
+      imageUrl: taxon.default_photo_url
+    });
+  }
+
+  if (mode !== "off" && env.IMAGE_STYLE_REFERENCE_R2_KEY) {
+    references.push({
+      kind: "style_sheet",
+      imageUrl: new URL(
+        `/api/assets/${encodeR2Key(env.IMAGE_STYLE_REFERENCE_R2_KEY)}`,
+        requestUrl
+      ).toString()
+    });
+  }
+
+  return references;
+}
+
+function openAIImageEditJsonBody(env, promptSpec, referenceImages) {
+  return {
+    model: imageModel(env),
+    prompt: composeOpenAIImagePrompt(promptSpec, imageModel(env), referenceImages),
+    images: referenceImages.map((reference) => ({ image_url: reference.imageUrl })),
+    size: env.IMAGE_SIZE || "1024x1024",
+    quality: env.IMAGE_QUALITY || "medium",
+    output_format: env.IMAGE_OUTPUT_FORMAT || "webp",
+    background: imageBackgroundForModel(env, imageModel(env))
+  };
+}
+
+async function uploadOpenAIBatchFile(env, jsonl, filename) {
+  const form = new FormData();
+  form.append("purpose", "batch");
+  form.append("file", new Blob([jsonl], { type: "application/jsonl" }), filename);
+
+  const response = await fetch("https://api.openai.com/v1/files", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.OPENAI_API_KEY}`
+    },
+    body: form
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI batch file upload failed: ${response.status} ${text}`);
+  }
+
+  return response.json();
+}
+
+async function createOpenAIBatch(env, inputFileId, endpoint, metadata) {
+  const response = await fetch("https://api.openai.com/v1/batches", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      input_file_id: inputFileId,
+      endpoint,
+      completion_window: "24h",
+      metadata
+    })
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI batch creation failed: ${response.status} ${text}`);
+  }
+
+  return response.json();
+}
+
+async function getSpriteBatch(env, batchId) {
+  const remote = env.OPENAI_API_KEY ? await retrieveOpenAIBatch(env, batchId) : null;
+  if (remote) await updateStoredSpriteBatch(env, remote);
+
+  const batch = await env.DB.prepare(`
+    SELECT *
+    FROM openai_sprite_batches
+    WHERE batch_id = ?
+  `).bind(batchId).first();
+
+  if (!batch) throw new Error("Sprite batch not found");
+
+  const items = await env.DB.prepare(`
+    SELECT bi.*, t.scientific_name, t.common_name
+    FROM openai_sprite_batch_items bi
+    JOIN taxa t ON t.taxon_id = bi.taxon_id
+    WHERE bi.batch_id = ?
+    ORDER BY bi.created_at ASC
+  `).bind(batchId).all();
+
+  return {
+    batch: {
+      ...batch,
+      remoteStatus: remote?.status ?? null,
+      requestCounts: remote?.request_counts ?? null
+    },
+    items: items.results ?? []
+  };
+}
+
+async function syncSpriteBatch(env, batchId) {
+  if (!env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is not configured");
+  }
+
+  const remote = await retrieveOpenAIBatch(env, batchId);
+  await updateStoredSpriteBatch(env, remote);
+
+  if (remote.status !== "completed") {
+    return {
+      synced: false,
+      batchId,
+      status: remote.status,
+      requestCounts: remote.request_counts ?? null
+    };
+  }
+
+  let ready = 0;
+  let failed = 0;
+
+  if (remote.output_file_id) {
+    const outputText = await fetchOpenAIFileContent(env, remote.output_file_id);
+    for (const line of parseJsonl(outputText)) {
+      const result = await syncSpriteBatchOutputLine(env, batchId, line);
+      if (result === "ready") ready += 1;
+      if (result === "failed") failed += 1;
+    }
+  }
+
+  if (remote.error_file_id) {
+    const errorText = await fetchOpenAIFileContent(env, remote.error_file_id);
+    for (const line of parseJsonl(errorText)) {
+      const result = await markSpriteBatchItemFailed(
+        env,
+        batchId,
+        line.custom_id,
+        line.error?.message ?? JSON.stringify(line.error ?? line)
+      );
+      if (result) failed += 1;
+    }
+  }
+
+  return {
+    synced: true,
+    batchId,
+    status: remote.status,
+    ready,
+    failed,
+    requestCounts: remote.request_counts ?? null
+  };
+}
+
+async function retrieveOpenAIBatch(env, batchId) {
+  const response = await fetch(`https://api.openai.com/v1/batches/${encodeURIComponent(batchId)}`, {
+    headers: {
+      "Authorization": `Bearer ${env.OPENAI_API_KEY}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI batch retrieve failed: ${response.status} ${text}`);
+  }
+
+  return response.json();
+}
+
+async function updateStoredSpriteBatch(env, batch) {
+  await env.DB.prepare(`
+    UPDATE openai_sprite_batches
+    SET status = ?,
+        output_file_id = ?,
+        error_file_id = ?,
+        updated_at = ?
+    WHERE batch_id = ?
+  `).bind(
+    batch.status ?? "unknown",
+    batch.output_file_id ?? null,
+    batch.error_file_id ?? null,
+    new Date().toISOString(),
+    batch.id
+  ).run();
+}
+
+async function fetchOpenAIFileContent(env, fileId) {
+  const response = await fetch(`https://api.openai.com/v1/files/${encodeURIComponent(fileId)}/content`, {
+    headers: {
+      "Authorization": `Bearer ${env.OPENAI_API_KEY}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI file content fetch failed: ${response.status} ${text}`);
+  }
+
+  return response.text();
+}
+
+async function syncSpriteBatchOutputLine(env, batchId, line) {
+  if (line.error) {
+    const didMark = await markSpriteBatchItemFailed(
+      env,
+      batchId,
+      line.custom_id,
+      line.error.message ?? JSON.stringify(line.error)
+    );
+    return didMark ? "failed" : "ignored";
+  }
+
+  if (line.response?.status_code < 200 || line.response?.status_code >= 300) {
+    const didMark = await markSpriteBatchItemFailed(
+      env,
+      batchId,
+      line.custom_id,
+      JSON.stringify(line.response?.body ?? line.response ?? line)
+    );
+    return didMark ? "failed" : "ignored";
+  }
+
+  const item = await env.DB.prepare(`
+    SELECT
+      bi.custom_id,
+      bi.job_id,
+      sj.taxon_id,
+      sj.asset_kind,
+      sj.asset_version,
+      sj.prompt_hash,
+      t.scientific_name
+    FROM openai_sprite_batch_items bi
+    JOIN sprite_jobs sj ON sj.job_id = bi.job_id
+    JOIN taxa t ON t.taxon_id = sj.taxon_id
+    WHERE bi.batch_id = ?
+      AND bi.custom_id = ?
+  `).bind(batchId, line.custom_id).first();
+
+  if (!item) return "ignored";
+
+  const body = line.response?.body ?? {};
+  const b64 = body.data?.[0]?.b64_json;
+  if (!b64) {
+    const didMark = await markSpriteBatchItemFailed(env, batchId, line.custom_id, "Batch output did not include b64_json");
+    return didMark ? "failed" : "ignored";
+  }
+
+  const outputFormat = body.output_format ?? env.IMAGE_OUTPUT_FORMAT ?? "webp";
+  const contentType = contentTypeForOutputFormat(outputFormat);
+  const extension = extensionForOutputFormat(outputFormat);
+  const r2Key = `${speciesAssetPrefix(item.asset_version, item.taxon_id, item.scientific_name)}/${String(item.prompt_hash).slice(0, 16)}/${item.asset_kind}.${extension}`;
+  const usage = {
+    ...(body.usage ?? {}),
+    endpoint: "images.edits.batch",
+    openai_batch_id: batchId,
+    custom_id: line.custom_id
+  };
+  const costEstimateUsd = estimateOpenAICostUsd(
+    env,
+    usage,
+    floatEnv(env, "OPENAI_BATCH_DISCOUNT_MULTIPLIER", 0.5)
+  );
+  const assetId = await sha256Hex(`${item.taxon_id}|${item.asset_kind}|${item.asset_version}|${item.prompt_hash}`);
+  const now = new Date().toISOString();
+
+  await env.ASSETS.put(r2Key, base64ToArrayBuffer(b64), {
+    httpMetadata: {
+      contentType,
+      cacheControl: "public, max-age=31536000, immutable"
+    },
+    customMetadata: {
+      taxonId: String(item.taxon_id),
+      promptHash: String(item.prompt_hash),
+      assetKind: String(item.asset_kind),
+      assetVersion: String(item.asset_version),
+      scientificName: String(item.scientific_name ?? ""),
+      speciesSlug: slugifyScientificName(item.scientific_name),
+      openaiBatchId: batchId
+    }
+  });
+
+  await env.DB.prepare(`
+    INSERT INTO sprite_assets (
+      asset_id, taxon_id, asset_kind, asset_version,
+      model, prompt_hash, r2_key, status,
+      content_type, cost_estimate_usd, usage_json, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)
+    ON CONFLICT(taxon_id, asset_kind, asset_version, prompt_hash)
+    DO UPDATE SET
+      r2_key = excluded.r2_key,
+      status = 'ready',
+      content_type = excluded.content_type,
+      cost_estimate_usd = excluded.cost_estimate_usd,
+      usage_json = excluded.usage_json
+  `).bind(
+    assetId,
+    item.taxon_id,
+    item.asset_kind,
+    item.asset_version,
+    body.model ?? imageModel(env),
+    item.prompt_hash,
+    r2Key,
+    contentType,
+    costEstimateUsd,
+    JSON.stringify(usage),
+    now
+  ).run();
+
+  await addGlobalGenerationCost(env, costEstimateUsd ?? 0);
+  await markSpriteJobReady(env, item.job_id);
+
+  await env.DB.prepare(`
+    UPDATE openai_sprite_batch_items
+    SET status = 'ready',
+        r2_key = ?,
+        usage_json = ?,
+        error = NULL,
+        updated_at = ?
+    WHERE batch_id = ?
+      AND custom_id = ?
+  `).bind(r2Key, JSON.stringify(usage), now, batchId, line.custom_id).run();
+
+  return "ready";
+}
+
+async function markSpriteBatchItemFailed(env, batchId, customId, error) {
+  if (!customId) return false;
+
+  const item = await env.DB.prepare(`
+    SELECT job_id
+    FROM openai_sprite_batch_items
+    WHERE batch_id = ?
+      AND custom_id = ?
+  `).bind(batchId, customId).first();
+
+  if (!item) return false;
+
+  const message = String(error ?? "Batch item failed").slice(0, 2000);
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    UPDATE openai_sprite_batch_items
+    SET status = 'failed',
+        error = ?,
+        updated_at = ?
+    WHERE batch_id = ?
+      AND custom_id = ?
+  `).bind(message, now, batchId, customId).run();
+
+  await markSpriteJobFailed(env, item.job_id, new Error(message));
+  return true;
+}
+
+function parseJsonl(text) {
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function customIdForBatchItem(job) {
+  return `sprite_${job.taxon_id}_${String(job.prompt_hash).slice(0, 16)}`;
+}
+
 async function devGenerateNextSpriteJob(env) {
   const row = await env.DB.prepare(`
     SELECT job_id
@@ -704,7 +1263,8 @@ async function devGenerateSpriteForJob(env, jobId) {
   const promptSpec = await getOrCreatePromptSpec(env, Number(job.taxon_id));
   const genome = promptSpec.genome ?? createGenome(taxon);
   const svg = buildDevSvgSpriteSheet(genome);
-  const r2Key = `species/v${job.asset_version}/${job.taxon_id}/${String(job.prompt_hash).slice(0, 16)}/${job.asset_kind}.svg`;
+  const speciesPrefix = speciesAssetPrefix(job.asset_version, job.taxon_id, job.scientific_name);
+  const r2Key = `${speciesPrefix}/${String(job.prompt_hash).slice(0, 16)}/${job.asset_kind}.svg`;
 
   await env.ASSETS.put(r2Key, svg, {
     httpMetadata: {
@@ -716,6 +1276,8 @@ async function devGenerateSpriteForJob(env, jobId) {
       promptHash: String(job.prompt_hash),
       assetKind: String(job.asset_kind),
       assetVersion: String(job.asset_version),
+      scientificName: String(job.scientific_name ?? ""),
+      speciesSlug: slugifyScientificName(job.scientific_name),
       devGenerated: "true"
     }
   });
@@ -1302,7 +1864,7 @@ async function generateSpriteWithOpenAI(env, promptSpec, referenceImages = []) {
   if (!apiKey) throw new Error("OPENAI_API_KEY is not configured");
 
   const imageReferences = Array.isArray(referenceImages) ? referenceImages : [];
-  const model = env.IMAGE_MODEL || "gpt-image-2";
+  const model = imageModel(env);
   const outputFormat = env.IMAGE_OUTPUT_FORMAT || "webp";
   const prompt = composeOpenAIImagePrompt(promptSpec, model, imageReferences);
   const size = env.IMAGE_SIZE || "1024x1024";
@@ -1514,6 +2076,14 @@ function imageBackgroundForModel(env, model) {
   return isGptImage2(model) ? "auto" : "transparent";
 }
 
+function imageModel(env) {
+  return env.IMAGE_MODEL || "gpt-image-2";
+}
+
+function spriteGenerationMode(env) {
+  return String(env.SPRITE_GENERATION_MODE ?? "on_demand").toLowerCase();
+}
+
 function isGptImage2(model) {
   return String(model ?? "").toLowerCase() === "gpt-image-2";
 }
@@ -1604,7 +2174,7 @@ async function addGlobalGenerationCost(env, costEstimateUsd) {
   `).bind(day, costEstimateUsd).run();
 }
 
-function estimateOpenAICostUsd(env, usage) {
+function estimateOpenAICostUsd(env, usage, multiplier = 1) {
   if (!usage || typeof usage !== "object") return null;
 
   const inputTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0);
@@ -1615,7 +2185,7 @@ function estimateOpenAICostUsd(env, usage) {
   const inputRate = floatEnv(env, "OPENAI_IMAGE_INPUT_USD_PER_1M", 5);
   const outputRate = floatEnv(env, "OPENAI_IMAGE_OUTPUT_USD_PER_1M", 40);
 
-  return (inputTokens * inputRate + outputTokens * outputRate) / 1_000_000;
+  return ((inputTokens * inputRate + outputTokens * outputRate) / 1_000_000) * multiplier;
 }
 
 function placeholderFor(iconicTaxonName) {
@@ -1643,6 +2213,21 @@ function normalizeInatLogin(rawLogin) {
 
 function encodeR2Key(key) {
   return String(key).split("/").map(encodeURIComponent).join("/");
+}
+
+function speciesAssetPrefix(assetVersion, taxonId, scientificName) {
+  const slug = slugifyScientificName(scientificName) || "unknown";
+  return `species/v${assetVersion}/${taxonId}-${slug}`;
+}
+
+function slugifyScientificName(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
 }
 
 function isAllowedAssetKey(key) {
