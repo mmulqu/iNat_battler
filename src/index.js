@@ -130,14 +130,20 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "GET" && url.pathname === "/api/sprite-jobs") {
     const status = url.searchParams.get("status") ?? "queued";
-    return jsonResponse(await listSpriteJobs(env, status));
+    const userId = url.searchParams.get("userId") ?? "";
+    return jsonResponse(await listSpriteJobs(env, status, userId));
   }
 
   if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-submit") {
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, 25, 2);
     const userId = payload.userId ? String(payload.userId) : "";
-    return jsonResponse(await submitDevSpriteBatch(env, request.url, { limit, userId }));
+    const queueMissing = payload.queueMissing !== false;
+    return jsonResponse(await submitDevSpriteBatch(env, request.url, { limit, userId, queueMissing }));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/sprite-batches/latest") {
+    return jsonResponse(await getLatestSpriteBatch(env));
   }
 
   const spriteBatchSyncMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)\/sync$/);
@@ -683,15 +689,29 @@ async function markSpriteJobFailed(env, jobId, error) {
   return Number(row?.attempts ?? 0);
 }
 
-async function listSpriteJobs(env, status) {
-  const rows = await env.DB.prepare(`
-    SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name
-    FROM sprite_jobs sj
-    JOIN taxa t ON t.taxon_id = sj.taxon_id
-    WHERE sj.status = ?
-    ORDER BY sj.priority ASC, sj.created_at ASC
-    LIMIT 100
-  `).bind(status).all();
+async function listSpriteJobs(env, status, userId = "") {
+  const statement = userId
+    ? env.DB.prepare(`
+        SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name, t.default_photo_url, ut.obs_count
+        FROM sprite_jobs sj
+        JOIN taxa t ON t.taxon_id = sj.taxon_id
+        JOIN user_taxa ut
+          ON ut.taxon_id = sj.taxon_id
+          AND ut.user_id = ?
+        WHERE sj.status = ?
+        ORDER BY sj.priority ASC, ut.obs_count DESC, sj.created_at ASC
+        LIMIT 100
+      `).bind(userId, status)
+    : env.DB.prepare(`
+        SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name, t.default_photo_url, NULL AS obs_count
+        FROM sprite_jobs sj
+        JOIN taxa t ON t.taxon_id = sj.taxon_id
+        WHERE sj.status = ?
+        ORDER BY sj.priority ASC, sj.created_at ASC
+        LIMIT 100
+      `).bind(status);
+
+  const rows = await statement.all();
 
   return { jobs: rows.results ?? [] };
 }
@@ -701,7 +721,7 @@ async function submitDevSpriteBatch(env, requestUrl, options) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
 
-  if (options.userId) {
+  if (options.userId && options.queueMissing !== false) {
     await queueMissingSpritesForUser(env, options.userId, options.limit, 80);
   }
 
@@ -964,6 +984,21 @@ async function getSpriteBatch(env, batchId) {
     },
     items: items.results ?? []
   };
+}
+
+async function getLatestSpriteBatch(env) {
+  const row = await env.DB.prepare(`
+    SELECT batch_id
+    FROM openai_sprite_batches
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).first();
+
+  if (!row?.batch_id) {
+    return { batch: null, items: [] };
+  }
+
+  return getSpriteBatch(env, row.batch_id);
 }
 
 async function syncSpriteBatch(env, batchId) {
@@ -2531,6 +2566,52 @@ function renderAppHtml() {
       font-size: 0.9rem;
     }
 
+    .dev-batch {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .dev-batch-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .batch-list {
+      display: grid;
+      gap: 6px;
+      max-height: 190px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      background: #fbfcf9;
+      font-size: 0.78rem;
+    }
+
+    .batch-item {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #e5e9e2;
+    }
+
+    .batch-item:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .batch-item strong,
+    .batch-item span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
     .roster-head {
       display: flex;
       justify-content: space-between;
@@ -3045,6 +3126,15 @@ function renderAppHtml() {
           </div>
         </div>
         <button class="secondary" id="queueMoreButton" type="button" disabled>Queue More</button>
+        <div class="dev-batch">
+          <div class="dev-batch-head">
+            <h2>Dev Batch</h2>
+            <span class="subtle" id="batchQueueCount">0 queued</span>
+          </div>
+          <button class="secondary" id="batchPreviewButton" type="button" disabled>Show Batch Queue</button>
+          <button class="secondary" id="batchSubmitButton" type="button" disabled>Submit Batch</button>
+          <div class="batch-list" id="batchQueueList">Load a roster, then click Queue More.</div>
+        </div>
         <button class="secondary" id="startBattleButton" type="button">5v5 Test Battle</button>
         <p class="status" id="statusLine"></p>
       </aside>
@@ -3062,11 +3152,19 @@ function renderAppHtml() {
   </main>
 
   <script>
+    const LAST_BATCH_STORAGE_KEY = "inatBattler:lastBatch";
+    const BATCH_POLL_MS = 60000;
+    const ACTIVE_BATCH_STATUSES = new Set(["submitted", "validating", "in_progress", "finalizing", "cancelling"]);
+
     const state = {
       userId: localStorage.getItem("inatBattler:userId") || "",
       inatLogin: localStorage.getItem("inatBattler:inatLogin") || "",
       taxa: [],
       flippedTaxa: new Set(),
+      batchJobs: [],
+      lastBatch: readStoredBatch(),
+      batchPolling: null,
+      batchSyncing: false,
       battle: null,
       battleAnimation: "anim-idle",
       battleBusy: false,
@@ -3078,6 +3176,10 @@ function renderAppHtml() {
       input: document.getElementById("inatLogin"),
       importButton: document.getElementById("importButton"),
       queueMoreButton: document.getElementById("queueMoreButton"),
+      batchPreviewButton: document.getElementById("batchPreviewButton"),
+      batchSubmitButton: document.getElementById("batchSubmitButton"),
+      batchQueueCount: document.getElementById("batchQueueCount"),
+      batchQueueList: document.getElementById("batchQueueList"),
       startBattleButton: document.getElementById("startBattleButton"),
       statusLine: document.getElementById("statusLine"),
       accountLabel: document.getElementById("accountLabel"),
@@ -3113,6 +3215,41 @@ function renderAppHtml() {
           ? "Queued " + res.queued + " sprite jobs"
           : "No new sprite jobs queued. Existing jobs may still be running, or today's queue cap may be reached.");
         await loadRoster();
+        await loadBatchQueue();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    els.batchPreviewButton.addEventListener("click", async () => {
+      await loadBatchQueue(true);
+    });
+
+    els.batchSubmitButton.addEventListener("click", async () => {
+      if (!state.userId || state.batchJobs.length === 0) return;
+      setBusy(true, "Submitting OpenAI batch");
+
+      try {
+        const res = await apiFetch("/api/sprite-batches/dev-submit", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            userId: state.userId,
+            limit: Math.min(12, state.batchJobs.length),
+            queueMissing: false
+          })
+        });
+
+        state.lastBatch = res.submitted ? normalizeSubmittedBatch(res) : null;
+        saveLastBatch();
+        setStatus(res.submitted
+          ? "Submitted batch " + res.batchId + " with " + res.itemCount + " sprites"
+          : (res.message || "No queued sprite jobs available for batch submission"));
+        if (res.submitted) scheduleBatchPolling(5000);
+        await loadBatchQueue();
+        await loadRoster();
       } catch (error) {
         setStatus(error.message);
       } finally {
@@ -3147,6 +3284,9 @@ function renderAppHtml() {
     if (state.userId) {
       loadRoster();
     }
+
+    renderBatchQueue();
+    hydrateBatchTracker();
 
     async function importRoster(inatLogin) {
       setBusy(true, "Importing roster");
@@ -3194,8 +3334,237 @@ function renderAppHtml() {
       els.queuedCount.textContent = String(queuedCount);
       els.bondCount.textContent = String(bondCount);
       els.queueMoreButton.disabled = !state.userId;
+      els.batchPreviewButton.disabled = !state.userId;
+      els.batchSubmitButton.disabled = !state.userId || state.batchJobs.length === 0;
       els.refreshLabel.textContent = state.taxa.length ? "Top " + state.taxa.length : "";
+      renderBatchQueue();
       renderBattle();
+    }
+
+    async function loadBatchQueue(showStatus) {
+      if (!state.userId) return;
+
+      const res = await apiFetch("/api/sprite-jobs?status=queued&userId=" + encodeURIComponent(state.userId));
+      state.batchJobs = (res.jobs || []).slice(0, 12);
+
+      if (showStatus) {
+        setStatus(state.batchJobs.length
+          ? state.batchJobs.length + " queued sprite jobs ready for batch"
+          : "No queued batch jobs. Click Queue More first.");
+      }
+
+      renderBatchQueue();
+    }
+
+    function renderBatchQueue() {
+      const count = state.batchJobs.length;
+      els.batchQueueCount.textContent = count + " queued";
+      els.batchSubmitButton.disabled = !state.userId || count === 0;
+
+      if (state.lastBatch) {
+        els.batchQueueList.innerHTML = '<div class="batch-item">' +
+          '<strong>Last batch</strong>' +
+          '<span>' + escapeHtml(state.lastBatch.batchId) + '</span>' +
+          '<span>' + escapeHtml(batchStatusText(state.lastBatch)) + '</span>' +
+          (state.batchSyncing ? '<span>Syncing outputs to R2...</span>' : '') +
+        '</div>' + (count ? renderBatchJobList(state.batchJobs) : "");
+        return;
+      }
+
+      if (!state.userId) {
+        els.batchQueueList.textContent = "Load a roster, then click Queue More.";
+        return;
+      }
+
+      if (count === 0) {
+        els.batchQueueList.textContent = "No queued jobs. Click Queue More to prepare sprites for batch.";
+        return;
+      }
+
+      els.batchQueueList.innerHTML = renderBatchJobList(state.batchJobs);
+    }
+
+    async function hydrateBatchTracker() {
+      if (state.lastBatch && state.lastBatch.batchId) {
+        renderBatchQueue();
+        await refreshBatchStatus(false);
+        return;
+      }
+
+      try {
+        const latest = await apiFetch("/api/sprite-batches/latest");
+        const summary = normalizeBatchStatus(latest);
+        if (!summary) return;
+
+        state.lastBatch = summary;
+        saveLastBatch();
+        renderBatchQueue();
+
+        if (summary.status === "completed" && !summary.synced) {
+          await syncLastBatch(false);
+        } else if (isActiveBatchStatus(summary.status)) {
+          scheduleBatchPolling(5000);
+        }
+      } catch (error) {
+        console.warn("Could not hydrate batch tracker", error);
+      }
+    }
+
+    async function refreshBatchStatus(showStatus) {
+      if (!state.lastBatch || !state.lastBatch.batchId) return;
+
+      try {
+        const res = await apiFetch("/api/sprite-batches/" + encodeURIComponent(state.lastBatch.batchId));
+        state.lastBatch = normalizeBatchStatus(res) || state.lastBatch;
+        saveLastBatch();
+        renderBatchQueue();
+
+        if (state.lastBatch.status === "completed" && !state.lastBatch.synced) {
+          await syncLastBatch(true);
+          return;
+        }
+
+        if (showStatus) {
+          setStatus(batchStatusText(state.lastBatch));
+        }
+
+        if (isActiveBatchStatus(state.lastBatch.status)) {
+          scheduleBatchPolling(BATCH_POLL_MS);
+        }
+      } catch (error) {
+        setStatus("Batch status check failed: " + error.message);
+        scheduleBatchPolling(BATCH_POLL_MS);
+      }
+    }
+
+    async function syncLastBatch(showStatus) {
+      if (!state.lastBatch || !state.lastBatch.batchId || state.batchSyncing) return;
+
+      state.batchSyncing = true;
+      renderBatchQueue();
+
+      try {
+        const res = await apiFetch("/api/sprite-batches/" + encodeURIComponent(state.lastBatch.batchId) + "/sync", {
+          method: "POST"
+        });
+
+        if (res.synced) {
+          state.lastBatch = {
+            ...state.lastBatch,
+            status: res.status || state.lastBatch.status,
+            synced: true,
+            ready: Number(res.ready || 0),
+            failed: Number(res.failed || 0),
+            requestCounts: res.requestCounts || state.lastBatch.requestCounts || null
+          };
+          saveLastBatch();
+          setStatus("Batch synced: " + state.lastBatch.ready + " sprites ready, " + state.lastBatch.failed + " failed");
+          await loadBatchQueue();
+          await loadRoster();
+        } else {
+          state.lastBatch = {
+            ...state.lastBatch,
+            status: res.status || state.lastBatch.status,
+            requestCounts: res.requestCounts || state.lastBatch.requestCounts || null
+          };
+          saveLastBatch();
+          if (showStatus) setStatus(batchStatusText(state.lastBatch));
+          if (isActiveBatchStatus(state.lastBatch.status)) scheduleBatchPolling(BATCH_POLL_MS);
+        }
+      } catch (error) {
+        setStatus("Batch sync failed: " + error.message);
+        scheduleBatchPolling(BATCH_POLL_MS);
+      } finally {
+        state.batchSyncing = false;
+        renderBatchQueue();
+      }
+    }
+
+    function scheduleBatchPolling(delayMs) {
+      if (state.batchPolling) clearTimeout(state.batchPolling);
+      if (!state.lastBatch || !isActiveBatchStatus(state.lastBatch.status)) return;
+
+      state.batchPolling = setTimeout(() => {
+        refreshBatchStatus(false);
+      }, delayMs || BATCH_POLL_MS);
+    }
+
+    function normalizeSubmittedBatch(batch) {
+      return {
+        batchId: batch.batchId,
+        status: batch.status || "submitted",
+        itemCount: Number(batch.itemCount || 0),
+        synced: false,
+        ready: 0,
+        failed: 0,
+        requestCounts: null
+      };
+    }
+
+    function normalizeBatchStatus(response) {
+      const batch = response && response.batch;
+      if (!batch) return null;
+
+      const items = Array.isArray(response.items) ? response.items : [];
+      const ready = items.filter((item) => item.status === "ready").length;
+      const failed = items.filter((item) => item.status === "failed").length;
+      const itemCount = Number(batch.item_count ?? batch.itemCount ?? items.length ?? 0);
+
+      return {
+        batchId: batch.batch_id || batch.batchId,
+        status: batch.remoteStatus || batch.status || "submitted",
+        itemCount,
+        synced: itemCount > 0 && ready + failed >= itemCount,
+        ready,
+        failed,
+        requestCounts: batch.requestCounts || batch.request_counts || null
+      };
+    }
+
+    function batchStatusText(batch) {
+      const status = batch.status || "submitted";
+      const itemCount = Number(batch.itemCount || 0);
+      const counts = batch.requestCounts;
+      const progress = counts
+        ? " / " + Number(counts.completed || 0) + " completed, " + Number(counts.failed || 0) + " failed"
+        : "";
+      const synced = batch.synced
+        ? " / synced " + Number(batch.ready || 0) + " ready, " + Number(batch.failed || 0) + " failed"
+        : "";
+
+      return status + " / " + itemCount + " sprites" + progress + synced;
+    }
+
+    function isActiveBatchStatus(status) {
+      return ACTIVE_BATCH_STATUSES.has(String(status || "").toLowerCase());
+    }
+
+    function saveLastBatch() {
+      if (!state.lastBatch || !state.lastBatch.batchId) {
+        localStorage.removeItem(LAST_BATCH_STORAGE_KEY);
+        return;
+      }
+
+      localStorage.setItem(LAST_BATCH_STORAGE_KEY, JSON.stringify(state.lastBatch));
+    }
+
+    function readStoredBatch() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(LAST_BATCH_STORAGE_KEY) || "null");
+        return parsed && parsed.batchId ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function renderBatchJobList(jobs) {
+      return jobs.map((job) => (
+        '<div class="batch-item">' +
+          '<strong>' + escapeHtml(job.common_name || job.scientific_name || "Unnamed taxon") + '</strong>' +
+          '<span><em>' + escapeHtml(job.scientific_name || "") + '</em></span>' +
+          '<span>' + Number(job.obs_count || 0) + ' obs / taxon ' + Number(job.taxon_id || 0) + '</span>' +
+        '</div>'
+      )).join("");
     }
 
     function toggleCardFlip(taxonId) {
@@ -3441,6 +3810,8 @@ function renderAppHtml() {
     function setBusy(isBusy, message) {
       els.importButton.disabled = isBusy;
       els.queueMoreButton.disabled = isBusy || !state.userId;
+      els.batchPreviewButton.disabled = isBusy || !state.userId;
+      els.batchSubmitButton.disabled = isBusy || !state.userId || state.batchJobs.length === 0;
       els.startBattleButton.disabled = isBusy;
       if (message) setStatus(message);
     }
