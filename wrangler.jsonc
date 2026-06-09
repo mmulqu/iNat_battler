@@ -1,0 +1,56 @@
+{
+  "name": "inat-battler",
+  "main": "src/index.js",
+  "compatibility_date": "2026-05-03",
+  "vars": {
+    "IMAGE_MODEL": "gpt-image-2",
+    "IMAGE_QUALITY": "medium",
+    "IMAGE_SIZE": "1024x1024",
+    "IMAGE_OUTPUT_FORMAT": "webp",
+    "IMAGE_BACKGROUND": "auto",
+    "IMAGE_REFERENCE_MODE": "default_photo",
+    "IMAGE_STYLE_REFERENCE_R2_KEY": "species/v1/13858/manual/sprite_sheet.png",
+    "MAX_REFERENCE_IMAGE_BYTES": "8000000",
+    "MAX_IMPORT_PAGES": "1",
+    "MAX_INITIAL_SPRITE_JOBS": "12",
+    "MAX_USER_DAILY_QUEUED_JOBS": "24",
+    "MAX_GLOBAL_DAILY_GENERATIONS": "250",
+    "MAX_OPENAI_ATTEMPTS": "3",
+    "OPENAI_IMAGE_INPUT_USD_PER_1M": "5",
+    "OPENAI_IMAGE_OUTPUT_USD_PER_1M": "40"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "inat_battler",
+      "database_id": "68f56b1f-bec1-46a2-93bd-829b00aa6756"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ASSETS",
+      "bucket_name": "inat-battler-assets"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "CACHE",
+      "id": "2d85172f04db48d58320bae869b57234"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "SPRITE_QUEUE",
+        "queue": "sprite-generation"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "sprite-generation",
+        "max_batch_size": 3,
+        "max_batch_timeout": 30
+      }
+    ]
+  }
+}

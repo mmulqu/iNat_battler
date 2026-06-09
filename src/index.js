@@ -1,0 +1,2887 @@
+import {
+  chooseNpcMove,
+  createBattleCreature,
+  createGenome,
+  createNpcTeam,
+  createSeededRng,
+  resolveTurn
+} from "./game.js";
+
+const ASSET_VERSION = 1;
+const DEFAULT_ASSET_KIND = "sprite_sheet";
+const INAT_SPECIES_CACHE_TTL_SECONDS = 6 * 60 * 60;
+const DEMO_USER_ID = "demo:birds";
+const DEMO_PLAYER_TAXON_IDS = [13858, 12727, 8229, 7428, 1965];
+const DEMO_DUMMY_TAXA = [
+  { taxonId: -101, commonName: "Gray Box Alpha", scientificName: "Placeholder alpha", iconicTaxonName: "Life", obsCount: 10, bondLevel: 8 },
+  { taxonId: -102, commonName: "Gray Box Beta", scientificName: "Placeholder beta", iconicTaxonName: "Life", obsCount: 10, bondLevel: 8 },
+  { taxonId: -103, commonName: "Gray Box Gamma", scientificName: "Placeholder gamma", iconicTaxonName: "Life", obsCount: 10, bondLevel: 8 },
+  { taxonId: -104, commonName: "Gray Box Delta", scientificName: "Placeholder delta", iconicTaxonName: "Life", obsCount: 10, bondLevel: 8 },
+  { taxonId: -105, commonName: "Gray Box Epsilon", scientificName: "Placeholder epsilon", iconicTaxonName: "Life", obsCount: 10, bondLevel: 8 }
+];
+
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      return await routeRequest(request, env, ctx);
+    } catch (error) {
+      console.error(error);
+      return jsonResponse(
+        { error: error instanceof Error ? error.message : "Unexpected error" },
+        500
+      );
+    }
+  },
+
+  async queue(batch, env) {
+    for (const message of batch.messages) {
+      const body = message.body;
+      const jobId = body?.jobId;
+
+      if (!jobId) {
+        message.ack();
+        continue;
+      }
+
+      try {
+        await processSpriteJob(env, body);
+        message.ack();
+      } catch (error) {
+        console.error(error);
+        const attempts = await markSpriteJobFailed(env, jobId, error);
+        const maxAttempts = intEnv(env, "MAX_OPENAI_ATTEMPTS", 3);
+
+        if (attempts >= maxAttempts) {
+          message.ack();
+        } else {
+          message.retry();
+        }
+      }
+    }
+  }
+};
+
+async function routeRequest(request, env, ctx) {
+  const url = new URL(request.url);
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders() });
+  }
+
+  if (request.method === "GET" && url.pathname === "/") {
+    return htmlResponse(renderAppHtml());
+  }
+
+  if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/health")) {
+    return jsonResponse({ ok: true, service: "inat-battler" });
+  }
+
+  if (url.pathname.startsWith("/api/assets/")) {
+    return serveAsset(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/import") {
+    const payload = await readJson(request);
+    const result = await importUserByLogin(env, String(payload.inatLogin ?? payload.login ?? ""));
+    return jsonResponse(result);
+  }
+
+  const rosterMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/roster$/);
+  if (request.method === "GET" && rosterMatch) {
+    const userId = decodeURIComponent(rosterMatch[1]);
+    const limit = clampInt(url.searchParams.get("limit"), 1, 250, 100);
+    const q = String(url.searchParams.get("q") ?? "");
+    return jsonResponse(await getRoster(env, userId, limit, q));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/roster") {
+    const userId = url.searchParams.get("userId");
+    if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
+
+    const limit = clampInt(url.searchParams.get("limit"), 1, 250, 100);
+    const q = String(url.searchParams.get("q") ?? "");
+    return jsonResponse(await getRoster(env, userId, limit, q));
+  }
+
+  const queueMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/queue-missing$/);
+  if (request.method === "POST" && queueMatch) {
+    const userId = decodeURIComponent(queueMatch[1]);
+    const payload = await readJson(request);
+    const limit = clampInt(payload.limit, 1, 48, 12);
+    const queued = await queueMissingSpritesForUser(env, userId, limit, 80);
+    return jsonResponse({ queued });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/sprite-jobs") {
+    const payload = await readJson(request);
+    const userId = String(payload.userId ?? "");
+    const limit = clampInt(payload.limit, 1, 48, 12);
+
+    if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
+
+    const queued = await queueMissingSpritesForUser(env, userId, limit, 80);
+    return jsonResponse({ queued });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/sprite-jobs") {
+    const status = url.searchParams.get("status") ?? "queued";
+    return jsonResponse(await listSpriteJobs(env, status));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/sprite-jobs/dev-generate-next") {
+    return jsonResponse(await devGenerateNextSpriteJob(env));
+  }
+
+  const devGenerateMatch = url.pathname.match(/^\/api\/sprite-jobs\/([^/]+)\/dev-generate$/);
+  if (request.method === "POST" && devGenerateMatch) {
+    const jobId = decodeURIComponent(devGenerateMatch[1]);
+    return jsonResponse(await devGenerateSpriteForJob(env, jobId));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/sprite-status") {
+    const taxonIds = (url.searchParams.get("taxonIds") ?? "")
+      .split(",")
+      .map((value) => Number.parseInt(value, 10))
+      .filter(Number.isFinite)
+      .slice(0, 100);
+
+    return jsonResponse(await getSpriteStatus(env, taxonIds));
+  }
+
+  const teamMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/teams$/);
+  if (teamMatch && request.method === "GET") {
+    const userId = decodeURIComponent(teamMatch[1]);
+    return jsonResponse({ teams: await listTeams(env, userId) });
+  }
+
+  if (teamMatch && request.method === "POST") {
+    const userId = decodeURIComponent(teamMatch[1]);
+    const payload = await readJson(request);
+    const name = String(payload.name ?? "Field Team");
+    const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
+    return jsonResponse(await saveTeam(env, userId, name, taxonIds));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/battles/npc/start") {
+    const payload = await readJson(request);
+    const userId = String(payload.userId ?? "");
+    const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
+    const npcTemplate = String(payload.npcTemplate ?? "backyard_beginner");
+
+    if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
+    return jsonResponse(await startNpcBattle(env, userId, taxonIds, npcTemplate));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/battles/demo/start") {
+    return jsonResponse(await startDemoBattle(env));
+  }
+
+  const battleMatch = url.pathname.match(/^\/api\/battles\/([^/]+)$/);
+  if (battleMatch && request.method === "GET") {
+    const battle = await getBattle(env, decodeURIComponent(battleMatch[1]));
+    return battle ? jsonResponse(battle) : jsonResponse({ error: "Battle not found" }, 404);
+  }
+
+  const battleActionMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/action$/);
+  if (battleActionMatch && request.method === "POST") {
+    const payload = await readJson(request);
+    return jsonResponse(await submitBattleMove(
+      env,
+      decodeURIComponent(battleActionMatch[1]),
+      String(payload.moveId ?? "")
+    ));
+  }
+
+  return jsonResponse({ error: "Not found" }, 404);
+}
+
+async function importUserByLogin(env, rawLogin) {
+  const inatLogin = normalizeInatLogin(rawLogin);
+  const now = new Date().toISOString();
+  const userId = `inat:${inatLogin.toLowerCase()}`;
+
+  await env.DB.prepare(`
+    INSERT INTO users (id, inat_login, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      inat_login = excluded.inat_login,
+      updated_at = excluded.updated_at
+  `).bind(userId, inatLogin, now, now).run();
+
+  let speciesRows;
+  let importWarning = null;
+
+  try {
+    speciesRows = await fetchSpeciesCounts(env, inatLogin);
+  } catch (error) {
+    if (error?.code !== "INAT_RATE_LIMITED") throw error;
+
+    const existingTaxa = await getExistingUserTaxaCount(env, userId);
+    if (existingTaxa <= 0) {
+      throw new Error("iNaturalist is rate limiting imports right now. Wait about a minute, then try again.");
+    }
+
+    const queuedSprites = await queueMissingSpritesForUser(env, userId, 0, 50);
+    return {
+      userId,
+      inatLogin,
+      importedTaxa: existingTaxa,
+      queuedSprites,
+      rateLimited: true,
+      warning: "iNaturalist rate-limited the refresh, so the existing roster was loaded from D1."
+    };
+  }
+
+  for (const row of speciesRows) {
+    const taxon = row.taxon;
+    if (!taxon?.id || !taxon.name) continue;
+
+    await env.DB.prepare(`
+      INSERT INTO taxa (
+        taxon_id, scientific_name, common_name, rank,
+        iconic_taxon_name, ancestry, parent_id, default_photo_url, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(taxon_id) DO UPDATE SET
+        scientific_name = excluded.scientific_name,
+        common_name = excluded.common_name,
+        rank = excluded.rank,
+        iconic_taxon_name = excluded.iconic_taxon_name,
+        ancestry = excluded.ancestry,
+        parent_id = excluded.parent_id,
+        default_photo_url = excluded.default_photo_url,
+        updated_at = excluded.updated_at
+    `).bind(
+      taxon.id,
+      taxon.name,
+      taxon.preferred_common_name ?? taxon.english_common_name ?? null,
+      taxon.rank ?? null,
+      taxon.iconic_taxon_name ?? null,
+      taxon.ancestry ?? null,
+      taxon.parent_id ?? null,
+      taxon.default_photo?.medium_url ??
+        taxon.default_photo?.square_url ??
+        taxon.default_photo?.url ??
+        null,
+      now
+    ).run();
+
+    const obsCount = Number(row.count ?? 0);
+    const bondLevel = Math.floor(10 * Math.log10(1 + obsCount));
+
+    await env.DB.prepare(`
+      INSERT INTO user_taxa (
+        user_id, taxon_id, obs_count, weighted_obs, bond_level, imported_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, taxon_id) DO UPDATE SET
+        obs_count = excluded.obs_count,
+        weighted_obs = excluded.weighted_obs,
+        bond_level = excluded.bond_level,
+        imported_at = excluded.imported_at
+    `).bind(userId, taxon.id, obsCount, obsCount, bondLevel, now).run();
+  }
+
+  const initialLimit = intEnv(env, "MAX_INITIAL_SPRITE_JOBS", 12);
+  const queuedSprites = await queueMissingSpritesForUser(env, userId, initialLimit, 50);
+
+  return {
+    userId,
+    inatLogin,
+    importedTaxa: speciesRows.length,
+    queuedSprites,
+    warning: importWarning
+  };
+}
+
+async function fetchSpeciesCounts(env, inatLogin) {
+  const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:v1`;
+  const cached = await readSpeciesCountsCache(env, cacheKey);
+  if (cached?.fresh) return cached.rows;
+
+  const maxPages = intEnv(env, "MAX_IMPORT_PAGES", 1);
+  const rows = [];
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const url = new URL("https://api.inaturalist.org/v1/observations/species_counts");
+    url.searchParams.set("user_login", inatLogin);
+    url.searchParams.set("verifiable", "true");
+    url.searchParams.set("per_page", "500");
+    url.searchParams.set("page", String(page));
+
+    const res = await fetchInatWithRetry(url.toString());
+
+    if (!res.ok) {
+      const text = await res.text();
+      if (res.status === 429 && cached?.rows?.length) {
+        return cached.rows;
+      }
+
+      if (res.status === 429) {
+        const error = new Error("iNaturalist rate limit reached");
+        error.code = "INAT_RATE_LIMITED";
+        throw error;
+      }
+
+      throw new Error(`iNaturalist species_counts failed: ${res.status} ${text}`);
+    }
+
+    const data = await res.json();
+    const pageRows = Array.isArray(data.results) ? data.results : [];
+    rows.push(...pageRows);
+
+    if (pageRows.length < 500) break;
+    if (page < maxPages) await sleep(1100);
+  }
+
+  await writeSpeciesCountsCache(env, cacheKey, rows);
+  return rows;
+}
+
+async function fetchInatWithRetry(url) {
+  const res = await fetch(url, {
+    headers: {
+      "Accept": "application/json",
+      "User-Agent": "inat-battler/0.1 (Cloudflare Worker; public species_counts import)"
+    }
+  });
+
+  if (res.status !== 429) return res;
+
+  const retryAfter = Number.parseInt(res.headers.get("retry-after") ?? "", 10);
+  const waitMs = Number.isFinite(retryAfter)
+    ? Math.min(10_000, Math.max(1_000, retryAfter * 1000))
+    : 2500;
+  await sleep(waitMs);
+
+  return fetch(url, {
+    headers: {
+      "Accept": "application/json",
+      "User-Agent": "inat-battler/0.1 (Cloudflare Worker; public species_counts import)"
+    }
+  });
+}
+
+async function readSpeciesCountsCache(env, cacheKey) {
+  if (!env.CACHE) return null;
+
+  const raw = await env.CACHE.get(cacheKey);
+  if (!raw) return null;
+
+  try {
+    const cached = JSON.parse(raw);
+    const ageMs = Date.now() - Date.parse(cached.cachedAt ?? 0);
+    return {
+      rows: Array.isArray(cached.rows) ? cached.rows : [],
+      fresh: ageMs >= 0 && ageMs < INAT_SPECIES_CACHE_TTL_SECONDS * 1000
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeSpeciesCountsCache(env, cacheKey, rows) {
+  if (!env.CACHE) return;
+
+  await env.CACHE.put(
+    cacheKey,
+    JSON.stringify({ cachedAt: new Date().toISOString(), rows }),
+    { expirationTtl: INAT_SPECIES_CACHE_TTL_SECONDS }
+  );
+}
+
+async function getExistingUserTaxaCount(env, userId) {
+  const row = await env.DB.prepare(`
+    SELECT COUNT(*) AS count
+    FROM user_taxa
+    WHERE user_id = ?
+  `).bind(userId).first();
+
+  return Number(row?.count ?? 0);
+}
+
+async function queueMissingSpritesForUser(env, userId, limit, priority) {
+  const budgetRemaining = await getUserQueueBudgetRemaining(env, userId);
+  const effectiveLimit = Math.min(limit, budgetRemaining);
+
+  if (effectiveLimit <= 0) return 0;
+
+  const rows = await env.DB.prepare(`
+    SELECT ut.taxon_id
+    FROM user_taxa ut
+    LEFT JOIN sprite_assets sa
+      ON sa.taxon_id = ut.taxon_id
+      AND sa.asset_kind = ?
+      AND sa.asset_version = ?
+      AND sa.status = 'ready'
+    LEFT JOIN sprite_jobs sj
+      ON sj.taxon_id = ut.taxon_id
+      AND sj.asset_kind = ?
+      AND sj.asset_version = ?
+      AND sj.status IN ('queued', 'running', 'ready')
+    WHERE ut.user_id = ?
+      AND sa.asset_id IS NULL
+      AND sj.job_id IS NULL
+    ORDER BY ut.obs_count DESC
+    LIMIT ?
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    userId,
+    effectiveLimit
+  ).all();
+
+  let queued = 0;
+  for (const row of rows.results ?? []) {
+    const didQueue = await ensureSpriteJob(
+      env,
+      Number(row.taxon_id),
+      DEFAULT_ASSET_KIND,
+      ASSET_VERSION,
+      priority
+    );
+
+    if (didQueue) {
+      await incrementUserQueueBudget(env, userId, 1);
+      queued += 1;
+    }
+  }
+
+  return queued;
+}
+
+async function ensureSpriteJob(env, taxonId, assetKind, assetVersion, priority) {
+  const promptSpec = await getOrCreatePromptSpec(env, taxonId);
+  const promptHash = await sha256Hex(promptSpec.sprite_prompt);
+  const jobId = `${assetKind}:v${assetVersion}:${taxonId}:${promptHash}`;
+
+  const existingAsset = await env.DB.prepare(`
+    SELECT asset_id
+    FROM sprite_assets
+    WHERE taxon_id = ?
+      AND asset_kind = ?
+      AND asset_version = ?
+      AND prompt_hash = ?
+      AND status = 'ready'
+  `).bind(taxonId, assetKind, assetVersion, promptHash).first();
+
+  if (existingAsset) return false;
+
+  const now = new Date().toISOString();
+  const result = await env.DB.prepare(`
+    INSERT OR IGNORE INTO sprite_jobs (
+      job_id, taxon_id, asset_kind, asset_version,
+      prompt_hash, status, priority, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+  `).bind(
+    jobId,
+    taxonId,
+    assetKind,
+    assetVersion,
+    promptHash,
+    priority,
+    now,
+    now
+  ).run();
+
+  if ((result.meta?.changes ?? 0) === 0) {
+    const requeued = await env.DB.prepare(`
+      UPDATE sprite_jobs
+      SET status = 'queued',
+          priority = ?,
+          error = NULL,
+          updated_at = ?
+      WHERE job_id = ?
+        AND status = 'failed'
+        AND attempts < ?
+    `).bind(
+      priority,
+      now,
+      jobId,
+      intEnv(env, "MAX_OPENAI_ATTEMPTS", 3)
+    ).run();
+
+    if ((requeued.meta?.changes ?? 0) === 0) return false;
+  }
+
+  await env.SPRITE_QUEUE.send({
+    jobId,
+    taxonId,
+    assetKind,
+    assetVersion,
+    promptHash
+  });
+
+  return true;
+}
+
+async function processSpriteJob(env, job) {
+  if (!job?.jobId || !job?.taxonId) {
+    throw new Error("Invalid sprite job message");
+  }
+
+  const existing = await env.DB.prepare(`
+    SELECT asset_id, r2_key
+    FROM sprite_assets
+    WHERE taxon_id = ?
+      AND asset_kind = ?
+      AND asset_version = ?
+      AND prompt_hash = ?
+      AND status = 'ready'
+  `).bind(
+    job.taxonId,
+    job.assetKind,
+    job.assetVersion,
+    job.promptHash
+  ).first();
+
+  if (existing) {
+    await markSpriteJobReady(env, job.jobId);
+    return;
+  }
+
+  if (!env.OPENAI_API_KEY) {
+    await markSpriteJobFailed(env, job.jobId, new Error("OPENAI_API_KEY is not configured"));
+    return;
+  }
+
+  const claimed = await claimSpriteJob(env, job.jobId);
+  if (!claimed) return;
+
+  const taxon = await getTaxonForSpriteJob(env, job.taxonId);
+  const promptSpec = await getOrCreatePromptSpec(env, job.taxonId);
+  const reserved = await reserveGlobalGenerationAttempt(env);
+  if (!reserved) {
+    await markSpriteJobFailed(env, job.jobId, new Error("Daily sprite generation cap reached"));
+    return;
+  }
+
+  const referenceImages = await loadSpriteReferenceImages(env, taxon);
+  const generated = await generateSpriteWithOpenAI(env, promptSpec, referenceImages);
+  const r2Key = `species/v${job.assetVersion}/${job.taxonId}/${job.promptHash.slice(0, 16)}/${job.assetKind}.${generated.extension}`;
+
+  await env.ASSETS.put(r2Key, generated.bytes, {
+    httpMetadata: {
+      contentType: generated.contentType,
+      cacheControl: "public, max-age=31536000, immutable"
+    },
+    customMetadata: {
+      taxonId: String(job.taxonId),
+      promptHash: job.promptHash,
+      assetKind: job.assetKind,
+      assetVersion: String(job.assetVersion)
+    }
+  });
+
+  const assetId = await sha256Hex(
+    `${job.taxonId}|${job.assetKind}|${job.assetVersion}|${job.promptHash}`
+  );
+  const costEstimateUsd = estimateOpenAICostUsd(env, generated.usage);
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    INSERT INTO sprite_assets (
+      asset_id, taxon_id, asset_kind, asset_version,
+      model, prompt_hash, r2_key, status,
+      content_type, cost_estimate_usd, usage_json, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?)
+    ON CONFLICT(taxon_id, asset_kind, asset_version, prompt_hash)
+    DO UPDATE SET
+      r2_key = excluded.r2_key,
+      status = 'ready',
+      content_type = excluded.content_type,
+      cost_estimate_usd = excluded.cost_estimate_usd,
+      usage_json = excluded.usage_json
+  `).bind(
+    assetId,
+    job.taxonId,
+    job.assetKind,
+    job.assetVersion,
+    generated.model,
+    job.promptHash,
+    r2Key,
+    generated.contentType,
+    costEstimateUsd,
+    generated.usage ? JSON.stringify(generated.usage) : null,
+    now
+  ).run();
+
+  await addGlobalGenerationCost(env, costEstimateUsd ?? 0);
+  await markSpriteJobReady(env, job.jobId);
+}
+
+async function claimSpriteJob(env, jobId) {
+  const now = new Date().toISOString();
+  const maxAttempts = intEnv(env, "MAX_OPENAI_ATTEMPTS", 3);
+
+  const result = await env.DB.prepare(`
+    UPDATE sprite_jobs
+    SET status = 'running',
+        attempts = attempts + 1,
+        error = NULL,
+        updated_at = ?
+    WHERE job_id = ?
+      AND status IN ('queued', 'failed')
+      AND attempts < ?
+  `).bind(now, jobId, maxAttempts).run();
+
+  return (result.meta?.changes ?? 0) > 0;
+}
+
+async function markSpriteJobReady(env, jobId) {
+  await env.DB.prepare(`
+    UPDATE sprite_jobs
+    SET status = 'ready', error = NULL, updated_at = ?
+    WHERE job_id = ?
+  `).bind(new Date().toISOString(), jobId).run();
+}
+
+async function markSpriteJobFailed(env, jobId, error) {
+  const message = error instanceof Error ? error.message : String(error);
+
+  await env.DB.prepare(`
+    UPDATE sprite_jobs
+    SET status = 'failed', error = ?, updated_at = ?
+    WHERE job_id = ?
+  `).bind(message.slice(0, 2000), new Date().toISOString(), jobId).run();
+
+  const row = await env.DB.prepare(`
+    SELECT attempts
+    FROM sprite_jobs
+    WHERE job_id = ?
+  `).bind(jobId).first();
+
+  return Number(row?.attempts ?? 0);
+}
+
+async function listSpriteJobs(env, status) {
+  const rows = await env.DB.prepare(`
+    SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name
+    FROM sprite_jobs sj
+    JOIN taxa t ON t.taxon_id = sj.taxon_id
+    WHERE sj.status = ?
+    ORDER BY sj.priority ASC, sj.created_at ASC
+    LIMIT 100
+  `).bind(status).all();
+
+  return { jobs: rows.results ?? [] };
+}
+
+async function devGenerateNextSpriteJob(env) {
+  const row = await env.DB.prepare(`
+    SELECT job_id
+    FROM sprite_jobs
+    WHERE status IN ('queued', 'failed')
+    ORDER BY priority ASC, created_at ASC
+    LIMIT 1
+  `).first();
+
+  if (!row?.job_id) {
+    return { generated: false, message: "No queued jobs" };
+  }
+
+  return {
+    generated: true,
+    ...(await devGenerateSpriteForJob(env, row.job_id))
+  };
+}
+
+async function devGenerateSpriteForJob(env, jobId) {
+  const job = await env.DB.prepare(`
+    SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name, t.ancestry
+    FROM sprite_jobs sj
+    JOIN taxa t ON t.taxon_id = sj.taxon_id
+    WHERE sj.job_id = ?
+  `).bind(jobId).first();
+
+  if (!job) throw new Error("Job not found");
+
+  const taxon = taxonSummaryFromRow(job);
+  const promptSpec = await getOrCreatePromptSpec(env, Number(job.taxon_id));
+  const genome = promptSpec.genome ?? createGenome(taxon);
+  const svg = buildDevSvgSpriteSheet(genome);
+  const r2Key = `species/v${job.asset_version}/${job.taxon_id}/${String(job.prompt_hash).slice(0, 16)}/${job.asset_kind}.svg`;
+
+  await env.ASSETS.put(r2Key, svg, {
+    httpMetadata: {
+      contentType: "image/svg+xml",
+      cacheControl: "public, max-age=31536000, immutable"
+    },
+    customMetadata: {
+      taxonId: String(job.taxon_id),
+      promptHash: String(job.prompt_hash),
+      assetKind: String(job.asset_kind),
+      assetVersion: String(job.asset_version),
+      devGenerated: "true"
+    }
+  });
+
+  const assetId = await sha256Hex(`${job.taxon_id}|${job.asset_kind}|${job.asset_version}|${job.prompt_hash}`);
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    INSERT INTO sprite_assets (
+      asset_id, taxon_id, asset_kind, asset_version,
+      model, prompt_hash, r2_key, status,
+      width, height, content_type, cost_estimate_usd, usage_json, created_at
+    )
+    VALUES (?, ?, ?, ?, 'dev-svg', ?, ?, 'ready', 512, 512, 'image/svg+xml', 0, '{}', ?)
+    ON CONFLICT(taxon_id, asset_kind, asset_version, prompt_hash)
+    DO UPDATE SET
+      model = excluded.model,
+      r2_key = excluded.r2_key,
+      status = 'ready',
+      width = excluded.width,
+      height = excluded.height,
+      content_type = excluded.content_type,
+      cost_estimate_usd = excluded.cost_estimate_usd,
+      usage_json = excluded.usage_json
+  `).bind(
+    assetId,
+    job.taxon_id,
+    job.asset_kind,
+    job.asset_version,
+    job.prompt_hash,
+    r2Key,
+    now
+  ).run();
+
+  await markSpriteJobReady(env, jobId);
+
+  return { assetId, r2Key, url: `/api/assets/${encodeR2Key(r2Key)}` };
+}
+
+async function getRoster(env, userId, limit, q = "") {
+  const rows = await env.DB.prepare(`
+    SELECT
+      t.taxon_id,
+      t.scientific_name,
+      t.common_name,
+      t.iconic_taxon_name,
+      t.ancestry,
+      t.default_photo_url,
+      ut.obs_count,
+      ut.bond_level,
+      sa.r2_key,
+      (
+        SELECT sj.status
+        FROM sprite_jobs sj
+        WHERE sj.taxon_id = t.taxon_id
+          AND sj.asset_kind = ?
+          AND sj.asset_version = ?
+        ORDER BY
+          CASE sj.status
+            WHEN 'running' THEN 1
+            WHEN 'queued' THEN 2
+            WHEN 'failed' THEN 3
+            WHEN 'ready' THEN 4
+            ELSE 5
+          END,
+          sj.updated_at DESC
+        LIMIT 1
+      ) AS sprite_job_status
+    FROM user_taxa ut
+    JOIN taxa t ON t.taxon_id = ut.taxon_id
+    LEFT JOIN sprite_assets sa
+      ON sa.taxon_id = t.taxon_id
+      AND sa.asset_kind = ?
+      AND sa.asset_version = ?
+      AND sa.status = 'ready'
+    WHERE ut.user_id = ?
+      AND (
+        ? = ''
+        OR lower(t.scientific_name) LIKE '%' || lower(?) || '%'
+        OR lower(COALESCE(t.common_name, '')) LIKE '%' || lower(?) || '%'
+      )
+    ORDER BY ut.obs_count DESC
+    LIMIT ?
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    userId,
+    q,
+    q,
+    q,
+    limit
+  ).all();
+
+  return {
+    userId,
+    taxa: (rows.results ?? []).map((row) => {
+      const spriteReady = Boolean(row.r2_key);
+      const spriteUrl = spriteReady ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
+      const taxon = taxonSummaryFromRow(row, spriteUrl);
+      const genome = createGenome(taxon);
+      const battleCreature = createBattleCreature(taxon, "roster");
+
+      return {
+        taxonId: row.taxon_id,
+        name: row.common_name || row.scientific_name,
+        scientificName: row.scientific_name,
+        iconicTaxon: row.iconic_taxon_name,
+        iconicTaxonName: row.iconic_taxon_name,
+        obsCount: row.obs_count,
+        bondLevel: row.bond_level,
+        affinityLevel: row.bond_level,
+        defaultPhotoUrl: row.default_photo_url,
+        sprite: spriteReady
+          ? { status: "ready", url: spriteUrl }
+          : {
+              status: row.sprite_job_status || "missing",
+              url: null,
+              placeholder: placeholderFor(row.iconic_taxon_name)
+            },
+        bodyPlan: genome.bodyPlan,
+        types: genome.types,
+        role: genome.role,
+        baseStats: genome.baseStats,
+        stats: battleCreature.stats,
+        maxHp: battleCreature.maxHp,
+        moves: battleCreature.moves
+      };
+    })
+  };
+}
+
+async function getSpriteStatus(env, taxonIds) {
+  if (taxonIds.length === 0) return { sprites: [] };
+
+  const placeholders = taxonIds.map(() => "?").join(",");
+  const rows = await env.DB.prepare(`
+    SELECT taxon_id, r2_key, status
+    FROM sprite_assets
+    WHERE taxon_id IN (${placeholders})
+      AND asset_kind = ?
+      AND asset_version = ?
+  `).bind(...taxonIds, DEFAULT_ASSET_KIND, ASSET_VERSION).all();
+
+  return {
+    sprites: (rows.results ?? []).map((row) => ({
+      taxonId: row.taxon_id,
+      status: row.status,
+      url: row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null
+    }))
+  };
+}
+
+async function saveTeam(env, userId, name, taxonIds) {
+  const cleanTaxonIds = taxonIds
+    .map((taxonId) => Number.parseInt(taxonId, 10))
+    .filter(Number.isFinite)
+    .slice(0, 3);
+
+  if (cleanTaxonIds.length !== 3) {
+    throw new Error("Teams must contain exactly 3 taxa");
+  }
+
+  await assertUserOwnsTaxa(env, userId, cleanTaxonIds);
+
+  const now = new Date().toISOString();
+  const existing = await env.DB.prepare(`
+    SELECT team_id
+    FROM teams
+    WHERE user_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).bind(userId).first();
+  const teamId = existing?.team_id ?? randomId("team");
+
+  await env.DB.prepare(`
+    INSERT INTO teams (team_id, user_id, name, slots_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(team_id) DO UPDATE SET
+      name = excluded.name,
+      slots_json = excluded.slots_json,
+      updated_at = excluded.updated_at
+  `).bind(teamId, userId, name.slice(0, 80), JSON.stringify(cleanTaxonIds), now, now).run();
+
+  return { teamId, userId, name: name.slice(0, 80), taxonIds: cleanTaxonIds };
+}
+
+async function listTeams(env, userId) {
+  const rows = await env.DB.prepare(`
+    SELECT *
+    FROM teams
+    WHERE user_id = ?
+    ORDER BY updated_at DESC
+  `).bind(userId).all();
+
+  return (rows.results ?? []).map((row) => ({
+    teamId: row.team_id,
+    userId: row.user_id,
+    name: row.name,
+    taxonIds: JSON.parse(row.slots_json),
+    updatedAt: row.updated_at
+  }));
+}
+
+async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
+  const cleanTaxonIds = taxonIds
+    .map((taxonId) => Number.parseInt(taxonId, 10))
+    .filter(Number.isFinite)
+    .slice(0, 3);
+
+  if (cleanTaxonIds.length !== 3) {
+    throw new Error("Choose exactly 3 creatures");
+  }
+
+  const placeholders = cleanTaxonIds.map(() => "?").join(",");
+  const rows = await env.DB.prepare(`
+    SELECT
+      t.taxon_id,
+      t.scientific_name,
+      t.common_name,
+      t.iconic_taxon_name,
+      t.ancestry,
+      ut.obs_count,
+      ut.bond_level,
+      sa.r2_key
+    FROM user_taxa ut
+    JOIN taxa t ON t.taxon_id = ut.taxon_id
+    LEFT JOIN sprite_assets sa
+      ON sa.taxon_id = t.taxon_id
+      AND sa.asset_kind = ?
+      AND sa.asset_version = ?
+      AND sa.status = 'ready'
+    WHERE ut.user_id = ?
+      AND t.taxon_id IN (${placeholders})
+  `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION, userId, ...cleanTaxonIds).all();
+
+  const byId = new Map((rows.results ?? []).map((row) => [Number(row.taxon_id), row]));
+  const creatures = cleanTaxonIds.map((taxonId, index) => {
+    const row = byId.get(taxonId);
+    if (!row) throw new Error(`Taxon ${taxonId} is not in this user's roster`);
+
+    const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
+    return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `p-${index}`);
+  });
+
+  const now = new Date().toISOString();
+  const battleId = randomId("battle");
+  const seed = randomId("seed");
+  const state = {
+    battleId,
+    mode: "npc",
+    seed,
+    turn: 1,
+    player: { userId, name: "Your Team", activeIndex: 0, creatures },
+    opponent: createNpcTeam(npcTemplate),
+    log: [{ turn: 0, text: `A ${npcTemplate.replaceAll("_", " ")} challenges your field team.` }],
+    status: "active"
+  };
+
+  await env.DB.prepare(`
+    INSERT INTO battle_instances (
+      battle_id, mode, attacker_user_id, npc_template_id,
+      state_json, seed, turn, status, created_at, updated_at
+    )
+    VALUES (?, 'npc', ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    battleId,
+    userId,
+    npcTemplate,
+    JSON.stringify(state),
+    seed,
+    state.turn,
+    state.status,
+    now,
+    now
+  ).run();
+
+  return state;
+}
+
+async function startDemoBattle(env) {
+  const placeholders = DEMO_PLAYER_TAXON_IDS.map(() => "?").join(",");
+  const rows = await env.DB.prepare(`
+    SELECT
+      t.taxon_id,
+      t.scientific_name,
+      t.common_name,
+      t.iconic_taxon_name,
+      t.ancestry,
+      ut.obs_count,
+      ut.bond_level,
+      sa.r2_key
+    FROM user_taxa ut
+    JOIN taxa t ON t.taxon_id = ut.taxon_id
+    LEFT JOIN sprite_assets sa
+      ON sa.taxon_id = t.taxon_id
+      AND sa.asset_kind = ?
+      AND sa.asset_version = ?
+      AND sa.status = 'ready'
+    WHERE ut.user_id = ?
+      AND t.taxon_id IN (${placeholders})
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEMO_USER_ID,
+    ...DEMO_PLAYER_TAXON_IDS
+  ).all();
+
+  const byId = new Map((rows.results ?? []).map((row) => [Number(row.taxon_id), row]));
+  const creatures = DEMO_PLAYER_TAXON_IDS.map((taxonId, index) => {
+    const row = byId.get(taxonId);
+    if (!row) throw new Error("Demo sprite seed data is missing. Run D1 migrations.");
+
+    const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
+    return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `demo-${index}`);
+  });
+  const dummies = DEMO_DUMMY_TAXA.map((taxon, index) => ({
+    ...createBattleCreature(taxon, `dummy-${index}`),
+    placeholder: "gray-box",
+    spriteUrl: null
+  }));
+
+  const now = new Date().toISOString();
+  const battleId = randomId("battle");
+  const seed = randomId("seed");
+  const state = {
+    battleId,
+    mode: "npc",
+    seed,
+    turn: 1,
+    player: { userId: DEMO_USER_ID, name: "Manual Sprite Team", activeIndex: 0, creatures },
+    opponent: { name: "Gray Box Bench", activeIndex: 0, creatures: dummies },
+    log: [{ turn: 0, text: "A 5v5 sprite animation test battle begins." }],
+    status: "active",
+    demo: true
+  };
+
+  await env.DB.prepare(`
+    INSERT INTO battle_instances (
+      battle_id, mode, attacker_user_id, npc_template_id,
+      state_json, seed, turn, status, created_at, updated_at
+    )
+    VALUES (?, 'npc', ?, 'graybox_5v5', ?, ?, ?, ?, ?, ?)
+  `).bind(
+    battleId,
+    DEMO_USER_ID,
+    JSON.stringify(state),
+    seed,
+    state.turn,
+    state.status,
+    now,
+    now
+  ).run();
+
+  return state;
+}
+
+async function getBattle(env, battleId) {
+  const row = await env.DB.prepare(`
+    SELECT state_json
+    FROM battle_instances
+    WHERE battle_id = ?
+  `).bind(battleId).first();
+
+  return row?.state_json ? JSON.parse(row.state_json) : null;
+}
+
+async function submitBattleMove(env, battleId, moveId) {
+  if (!moveId) throw new Error("Missing moveId");
+
+  const state = await getBattle(env, battleId);
+  if (!state) throw new Error("Battle not found");
+  if (state.status !== "active") return state;
+
+  const active = state.player.creatures[state.player.activeIndex];
+  if (!active.moves.some((move) => move.id === moveId)) {
+    throw new Error("Move is not available to the active creature");
+  }
+
+  const rng = createSeededRng(`${state.seed}:${state.turn}`);
+  const npcMoveId = chooseNpcMove(state, "normal", rng);
+  const next = resolveTurn(
+    state,
+    { kind: "move", moveId },
+    { kind: "move", moveId: npcMoveId },
+    rng
+  );
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    UPDATE battle_instances
+    SET state_json = ?, turn = ?, status = ?, updated_at = ?
+    WHERE battle_id = ?
+  `).bind(JSON.stringify(next), next.turn, next.status, now, battleId).run();
+
+  if (next.status !== "active") {
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO battle_results (
+        battle_id, winner_user_id, loser_user_id, result_json, created_at
+      )
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(
+      battleId,
+      next.status === "won" ? next.player.userId ?? null : null,
+      next.status === "lost" ? next.player.userId ?? null : null,
+      JSON.stringify({ status: next.status, turns: next.turn - 1 }),
+      now
+    ).run();
+  }
+
+  return next;
+}
+
+async function assertUserOwnsTaxa(env, userId, taxonIds) {
+  const placeholders = taxonIds.map(() => "?").join(",");
+  const rows = await env.DB.prepare(`
+    SELECT taxon_id
+    FROM user_taxa
+    WHERE user_id = ?
+      AND taxon_id IN (${placeholders})
+  `).bind(userId, ...taxonIds).all();
+
+  if ((rows.results ?? []).length !== taxonIds.length) {
+    throw new Error("Team includes a taxon outside this user's roster");
+  }
+}
+
+async function serveAsset(request, env) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return jsonResponse({ error: "Method not allowed" }, 405);
+  }
+
+  const url = new URL(request.url);
+  const key = decodeURIComponent(url.pathname.replace("/api/assets/", ""));
+
+  if (!isAllowedAssetKey(key)) {
+    return jsonResponse({ error: "Invalid asset key" }, 400);
+  }
+
+  const object = await env.ASSETS.get(key);
+  if (!object) return new Response("Not found", { status: 404 });
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  headers.set("cache-control", "public, max-age=31536000, immutable");
+
+  return new Response(request.method === "HEAD" ? null : object.body, { headers });
+}
+
+async function getOrCreatePromptSpec(env, taxonId) {
+  const existing = await env.DB.prepare(`
+    SELECT prompt_json
+    FROM creature_genomes
+    WHERE taxon_id = ?
+      AND genome_version = ?
+  `).bind(taxonId, ASSET_VERSION).first();
+
+  if (existing?.prompt_json) return JSON.parse(existing.prompt_json);
+
+  const taxon = await env.DB.prepare(`
+    SELECT *
+    FROM taxa
+    WHERE taxon_id = ?
+  `).bind(taxonId).first();
+
+  if (!taxon) throw new Error(`Missing taxon ${taxonId}`);
+
+  const promptSpec = buildSpritePromptFromTaxon(taxon);
+
+  await env.DB.prepare(`
+    INSERT INTO creature_genomes (
+      taxon_id, genome_version, body_plan,
+      ecological_types_json, battle_role,
+      prompt_json, genome_json, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    taxonId,
+    ASSET_VERSION,
+    promptSpec.body_plan,
+    JSON.stringify(promptSpec.ecological_types),
+    promptSpec.battle_role,
+    JSON.stringify(promptSpec),
+    JSON.stringify(promptSpec.genome),
+    new Date().toISOString()
+  ).run();
+
+  return promptSpec;
+}
+
+function buildSpritePromptFromTaxon(taxon) {
+  const genome = createGenome(taxonSummaryFromRow(taxon));
+
+  return {
+    body_plan: genome.bodyPlan,
+    ecological_types: genome.types,
+    battle_role: genome.role,
+    reference_image_url: taxon.default_photo_url ?? null,
+    negative_prompt: genome.negativePrompt,
+    genome,
+    sprite_prompt: genome.prompt
+  };
+}
+
+async function getTaxonForSpriteJob(env, taxonId) {
+  const taxon = await env.DB.prepare(`
+    SELECT taxon_id, scientific_name, common_name, iconic_taxon_name, default_photo_url
+    FROM taxa
+    WHERE taxon_id = ?
+  `).bind(taxonId).first();
+
+  if (!taxon) throw new Error(`Missing taxon ${taxonId}`);
+  return taxon;
+}
+
+function taxonSummaryFromRow(row, spriteUrl = null) {
+  return {
+    taxonId: Number(row.taxon_id),
+    scientificName: row.scientific_name,
+    commonName: row.common_name ?? null,
+    iconicTaxonName: row.iconic_taxon_name ?? null,
+    ancestry: row.ancestry ?? null,
+    obsCount: row.obs_count === undefined ? undefined : Number(row.obs_count),
+    bondLevel: row.bond_level === undefined ? undefined : Number(row.bond_level),
+    spriteUrl
+  };
+}
+
+function buildDevSvgSpriteSheet(genome) {
+  const type = genome.types?.[0] ?? "Urban";
+  const palette = {
+    Sky: { bg: "#e8f4ff", body: "#7b5c42", accent: "#d8ccb8", dark: "#28231f" },
+    Urban: { bg: "#f0ede8", body: "#70625a", accent: "#d1b48c", dark: "#24201e" },
+    Bloom: { bg: "#f2fff0", body: "#4e8a4b", accent: "#f5cf4a", dark: "#244423" },
+    Fungus: { bg: "#fff5e8", body: "#d98f43", accent: "#fff0b3", dark: "#5a3218" },
+    Wetland: { bg: "#e9fbff", body: "#3c7a70", accent: "#89d2c4", dark: "#1b3834" },
+    Stone: { bg: "#f4f4f4", body: "#6f7378", accent: "#c9ced4", dark: "#34373b" },
+    Swarm: { bg: "#fffbea", body: "#514335", accent: "#f1d45a", dark: "#201914" },
+    Night: { bg: "#e9e8ff", body: "#35314f", accent: "#a8a0ff", dark: "#151323" }
+  };
+  const p = palette[type] ?? palette.Urban;
+  const cell = 128;
+  const parts = [];
+
+  for (let row = 0; row < 4; row += 1) {
+    for (let col = 0; col < 4; col += 1) {
+      const x = col * cell;
+      const y = row * cell;
+      const bob = Math.sin((col / 4) * Math.PI * 2) * 4;
+      const wing = row === 3 ? 16 + col * 2 : row === 1 ? 4 + col : 0;
+      const lean = row === 2 ? col * 3 : 0;
+      const scale = 1 + (row === 3 && col === 2 ? 0.08 : 0);
+      const special = row === 3
+        ? `<path d="M28 80 C12 52, 28 34, 50 26" fill="none" stroke="${p.accent}" stroke-width="5" opacity="0.55"/>`
+        : "";
+
+      parts.push(`
+        <g transform="translate(${x} ${y})">
+          <rect width="128" height="128" fill="${p.bg}" opacity="0.22"/>
+          <g transform="translate(${64 + lean} ${70 + bob}) scale(${scale})">
+            <ellipse cx="0" cy="0" rx="31" ry="24" fill="${p.body}" stroke="${p.dark}" stroke-width="5"/>
+            <circle cx="26" cy="-18" r="18" fill="${p.body}" stroke="${p.dark}" stroke-width="5"/>
+            <circle cx="32" cy="-22" r="3" fill="${p.dark}"/>
+            <path d="M42 -16 L62 -10 L42 -5 Z" fill="${p.accent}" stroke="${p.dark}" stroke-width="3"/>
+            <ellipse cx="-6" cy="-2" rx="22" ry="13" fill="${p.accent}" opacity="0.85" stroke="${p.dark}" stroke-width="3" transform="rotate(${-8 - wing})"/>
+            <path d="M-30 6 L-56 16 L-34 23 Z" fill="${p.body}" stroke="${p.dark}" stroke-width="4"/>
+            <path d="M-8 23 L-12 38 M12 23 L16 38" stroke="${p.dark}" stroke-width="4" stroke-linecap="round"/>
+            <circle cx="-14" cy="-10" r="4" fill="${p.accent}" opacity="0.9"/>
+            <circle cx="0" cy="-13" r="3" fill="${p.accent}" opacity="0.85"/>
+            <circle cx="13" cy="-9" r="3" fill="${p.accent}" opacity="0.85"/>
+          </g>
+          ${special}
+        </g>`);
+    }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">${parts.join("\n")}</svg>`;
+}
+
+async function generateSpriteWithOpenAI(env, promptSpec, referenceImages = []) {
+  const apiKey = env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY is not configured");
+
+  const imageReferences = Array.isArray(referenceImages) ? referenceImages : [];
+  const model = env.IMAGE_MODEL || "gpt-image-2";
+  const outputFormat = env.IMAGE_OUTPUT_FORMAT || "webp";
+  const prompt = composeOpenAIImagePrompt(promptSpec, model, imageReferences);
+  const size = env.IMAGE_SIZE || "1024x1024";
+  const quality = env.IMAGE_QUALITY || "medium";
+  const background = imageBackgroundForModel(env, model);
+
+  const endpoint = imageReferences.length > 0
+    ? "https://api.openai.com/v1/images/edits"
+    : "https://api.openai.com/v1/images/generations";
+
+  const request = imageReferences.length > 0
+    ? openAIImageEditRequest(apiKey, model, prompt, size, quality, outputFormat, background, imageReferences)
+    : openAIImageGenerationRequest(apiKey, model, prompt, size, quality, outputFormat, background);
+
+  const res = await fetch(endpoint, request);
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`OpenAI image generation failed: ${res.status} ${text}`);
+  }
+
+  const json = await res.json();
+  const b64 = json.data?.[0]?.b64_json;
+  if (!b64) throw new Error("OpenAI response did not include b64_json");
+
+  return {
+    model,
+    bytes: base64ToArrayBuffer(b64),
+    usage: {
+      ...(json.usage ?? {}),
+      endpoint: imageReferences.length > 0 ? "images.edits" : "images.generations",
+      reference_image_count: imageReferences.length,
+      reference_images: imageReferences.map((image) => ({
+        kind: image.kind,
+        source: image.source,
+        content_type: image.contentType,
+        byte_length: image.bytes.byteLength
+      }))
+    },
+    extension: extensionForOutputFormat(outputFormat),
+    contentType: contentTypeForOutputFormat(outputFormat)
+  };
+}
+
+function openAIImageGenerationRequest(apiKey, model, prompt, size, quality, outputFormat, background) {
+  return {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      prompt,
+      size,
+      quality,
+      output_format: outputFormat,
+      background
+    })
+  };
+}
+
+function openAIImageEditRequest(apiKey, model, prompt, size, quality, outputFormat, background, referenceImages) {
+  const form = new FormData();
+  form.append("model", model);
+  form.append("prompt", prompt);
+  form.append("size", size);
+  form.append("quality", quality);
+  form.append("output_format", outputFormat);
+  form.append("background", background);
+
+  for (const referenceImage of referenceImages) {
+    form.append(
+      "image[]",
+      new Blob([referenceImage.bytes], { type: referenceImage.contentType }),
+      referenceImage.filename
+    );
+  }
+
+  return {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: form
+  };
+}
+
+function composeOpenAIImagePrompt(promptSpec, model, referenceImages) {
+  let prompt = String(promptSpec?.sprite_prompt ?? "");
+
+  if (isGptImage2(model)) {
+    prompt = prompt.replace(/transparent or very plain background/gi, "plain light neutral opaque background");
+  }
+
+  const parts = [prompt];
+
+  const speciesReference = referenceImages.find((image) => image.kind === "species_photo");
+  const styleReference = referenceImages.find((image) => image.kind === "style_sheet");
+
+  if (speciesReference) {
+    parts.push("Use the species photo reference for real anatomy, colors, proportions, and field marks.");
+  }
+
+  if (styleReference) {
+    parts.push("Use the example sprite sheet reference for grid structure, sprite scale, outline weight, readability, and animation-frame consistency. Do not copy the House Sparrow creature design unless the target species is House Sparrow.");
+  }
+
+  if (referenceImages.length > 0) {
+    parts.push(
+      "Transform the references into an original 4x4 pixel-art battler sprite sheet for the target species; do not copy photo backgrounds, labels, or unrelated details."
+    );
+  }
+
+  if (promptSpec?.negative_prompt) {
+    parts.push(`Avoid: ${promptSpec.negative_prompt}`);
+  }
+
+  if (isGptImage2(model)) {
+    parts.push("Use an opaque plain background. Do not request or create transparency.");
+  }
+
+  return parts.filter(Boolean).join("\n\n");
+}
+
+async function loadSpriteReferenceImages(env, taxon) {
+  const references = [];
+  const mode = String(env.IMAGE_REFERENCE_MODE ?? "default_photo").toLowerCase();
+  if (mode === "off") return references;
+
+  if (mode !== "style_only") {
+    const speciesReference = await loadSpeciesPhotoReferenceImage(env, taxon);
+    if (speciesReference) references.push(speciesReference);
+  }
+
+  const styleReference = await loadStyleSheetReferenceImage(env);
+  if (styleReference) references.push(styleReference);
+
+  return references;
+}
+
+async function loadSpeciesPhotoReferenceImage(env, taxon) {
+  const sourceUrl = taxon?.default_photo_url;
+  if (!sourceUrl || !isSafeReferenceImageUrl(sourceUrl)) return null;
+
+  try {
+    const response = await fetch(sourceUrl, {
+      headers: { "User-Agent": "taxa-battler/0.1" }
+    });
+
+    if (!response.ok) return null;
+
+    const contentType = normalizeImageContentType(response.headers.get("content-type"));
+    if (!contentType) return null;
+
+    const maxBytes = intEnv(env, "MAX_REFERENCE_IMAGE_BYTES", 8_000_000);
+    const contentLength = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) return null;
+
+    const bytes = await response.arrayBuffer();
+    if (bytes.byteLength > maxBytes) return null;
+
+    return {
+      bytes,
+      contentType,
+      kind: "species_photo",
+      source: sourceUrl,
+      filename: `taxon-${taxon.taxon_id}.${extensionForContentType(contentType)}`
+    };
+  } catch (error) {
+    console.warn("Reference image could not be loaded", { taxonId: taxon?.taxon_id, error: String(error) });
+    return null;
+  }
+}
+
+async function loadStyleSheetReferenceImage(env) {
+  const key = env.IMAGE_STYLE_REFERENCE_R2_KEY;
+  if (!key) return null;
+
+  try {
+    const object = await env.ASSETS.get(key);
+    if (!object) return null;
+
+    const contentType = normalizeImageContentType(object.httpMetadata?.contentType) ??
+      contentTypeForAssetKey(key);
+
+    if (!contentType) return null;
+
+    const bytes = await object.arrayBuffer();
+    const maxBytes = intEnv(env, "MAX_REFERENCE_IMAGE_BYTES", 8_000_000);
+    if (bytes.byteLength > maxBytes) return null;
+
+    return {
+      bytes,
+      contentType,
+      kind: "style_sheet",
+      source: `r2:${key}`,
+      filename: `style-reference.${extensionForContentType(contentType)}`
+    };
+  } catch (error) {
+    console.warn("Style reference image could not be loaded", { key, error: String(error) });
+    return null;
+  }
+}
+
+function imageBackgroundForModel(env, model) {
+  const configured = env.IMAGE_BACKGROUND;
+  if (configured) return configured;
+  return isGptImage2(model) ? "auto" : "transparent";
+}
+
+function isGptImage2(model) {
+  return String(model ?? "").toLowerCase() === "gpt-image-2";
+}
+
+function isSafeReferenceImageUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeImageContentType(value) {
+  const contentType = String(value ?? "").split(";")[0].trim().toLowerCase();
+  if (contentType === "image/jpeg" || contentType === "image/png" || contentType === "image/webp") {
+    return contentType;
+  }
+  return null;
+}
+
+function contentTypeForAssetKey(key) {
+  const lower = String(key ?? "").toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return null;
+}
+
+function extensionForContentType(contentType) {
+  if (contentType === "image/jpeg") return "jpg";
+  if (contentType === "image/png") return "png";
+  return "webp";
+}
+
+async function getUserQueueBudgetRemaining(env, userId) {
+  const day = currentDay();
+  const cap = intEnv(env, "MAX_USER_DAILY_QUEUED_JOBS", 24);
+
+  const row = await env.DB.prepare(`
+    SELECT queued_count
+    FROM user_generation_budget_daily
+    WHERE user_id = ?
+      AND day = ?
+  `).bind(userId, day).first();
+
+  return Math.max(0, cap - Number(row?.queued_count ?? 0));
+}
+
+async function incrementUserQueueBudget(env, userId, amount) {
+  const day = currentDay();
+
+  await env.DB.prepare(`
+    INSERT INTO user_generation_budget_daily (user_id, day, queued_count)
+    VALUES (?, ?, ?)
+    ON CONFLICT(user_id, day) DO UPDATE SET
+      queued_count = queued_count + excluded.queued_count
+  `).bind(userId, day, amount).run();
+}
+
+async function reserveGlobalGenerationAttempt(env) {
+  const day = currentDay();
+  const cap = intEnv(env, "MAX_GLOBAL_DAILY_GENERATIONS", 250);
+
+  await env.DB.prepare(`
+    INSERT OR IGNORE INTO generation_budget_daily (day, generated_count, estimated_cost_usd)
+    VALUES (?, 0, 0)
+  `).bind(day).run();
+
+  const result = await env.DB.prepare(`
+    UPDATE generation_budget_daily
+    SET generated_count = generated_count + 1
+    WHERE day = ?
+      AND generated_count < ?
+  `).bind(day, cap).run();
+
+  return (result.meta?.changes ?? 0) > 0;
+}
+
+async function addGlobalGenerationCost(env, costEstimateUsd) {
+  const day = currentDay();
+
+  await env.DB.prepare(`
+    INSERT INTO generation_budget_daily (day, generated_count, estimated_cost_usd)
+    VALUES (?, 0, ?)
+    ON CONFLICT(day) DO UPDATE SET
+      estimated_cost_usd = estimated_cost_usd + excluded.estimated_cost_usd
+  `).bind(day, costEstimateUsd).run();
+}
+
+function estimateOpenAICostUsd(env, usage) {
+  if (!usage || typeof usage !== "object") return null;
+
+  const inputTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0);
+  const outputTokens = Number(usage.output_tokens ?? usage.completion_tokens ?? 0);
+
+  if (!inputTokens && !outputTokens) return null;
+
+  const inputRate = floatEnv(env, "OPENAI_IMAGE_INPUT_USD_PER_1M", 5);
+  const outputRate = floatEnv(env, "OPENAI_IMAGE_OUTPUT_USD_PER_1M", 40);
+
+  return (inputTokens * inputRate + outputTokens * outputRate) / 1_000_000;
+}
+
+function placeholderFor(iconicTaxonName) {
+  const iconic = String(iconicTaxonName ?? "").toLowerCase();
+  if (iconic.includes("bird")) return "bird";
+  if (iconic.includes("mammal")) return "mammal";
+  if (iconic.includes("reptile")) return "reptile";
+  if (iconic.includes("amphibian")) return "amphibian";
+  if (iconic.includes("fish")) return "fish";
+  if (iconic.includes("insect") || iconic.includes("arachnid")) return "arthropod";
+  if (iconic.includes("plant")) return "plant";
+  if (iconic.includes("fung")) return "fungus";
+  return "unknown";
+}
+
+function normalizeInatLogin(rawLogin) {
+  const login = String(rawLogin ?? "").trim();
+
+  if (!/^[A-Za-z0-9_.-]{1,64}$/.test(login)) {
+    throw new Error("Enter a valid iNaturalist username");
+  }
+
+  return login;
+}
+
+function encodeR2Key(key) {
+  return String(key).split("/").map(encodeURIComponent).join("/");
+}
+
+function isAllowedAssetKey(key) {
+  return (
+    typeof key === "string" &&
+    !key.includes("..") &&
+    (key.startsWith("species/") || key.startsWith("users/")) &&
+    /\.(webp|png|jpg|jpeg|svg|json)$/i.test(key)
+  );
+}
+
+function randomId(prefix) {
+  const id = crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+  return `${prefix}_${id.replaceAll("-", "").slice(0, 24)}`;
+}
+
+function extensionForOutputFormat(format) {
+  const safe = String(format || "webp").toLowerCase();
+  if (safe === "jpeg") return "jpg";
+  if (["webp", "png", "jpg"].includes(safe)) return safe;
+  return "webp";
+}
+
+function contentTypeForOutputFormat(format) {
+  const extension = extensionForOutputFormat(format);
+  if (extension === "png") return "image/png";
+  if (extension === "jpg") return "image/jpeg";
+  return "image/webp";
+}
+
+function base64ToArrayBuffer(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes.buffer;
+}
+
+async function sha256Hex(input) {
+  const data = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function currentDay() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function intEnv(env, key, fallback) {
+  const value = Number.parseInt(env[key] ?? "", 10);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function floatEnv(env, key, fallback) {
+  const value = Number.parseFloat(env[key] ?? "");
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function clampInt(value, min, max, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+async function readJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return {};
+  }
+}
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...corsHeaders()
+    }
+  });
+}
+
+function htmlResponse(html) {
+  return new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+function corsHeaders() {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET,POST,HEAD,OPTIONS",
+    "access-control-allow-headers": "content-type"
+  };
+}
+
+function renderAppHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iNat Battler</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f2ea;
+      --surface: #ffffff;
+      --ink: #17201b;
+      --muted: #60706a;
+      --line: #d9ded4;
+      --teal: #047c78;
+      --green: #2f7d42;
+      --amber: #b46b1b;
+      --coral: #c54f45;
+      --blue: #456da8;
+      --shadow: 0 10px 30px rgba(22, 32, 27, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(180deg, rgba(4, 124, 120, 0.08), rgba(245, 242, 234, 0) 320px),
+        var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.58;
+    }
+
+    .shell {
+      width: min(1440px, 100%);
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      min-height: 72px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 8px;
+      background:
+        radial-gradient(circle at 65% 34%, #f2ce72 0 14%, transparent 15%),
+        linear-gradient(135deg, var(--teal), var(--green));
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.55);
+      flex: 0 0 auto;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      line-height: 1.1;
+    }
+
+    .subtle {
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .login {
+      display: grid;
+      grid-template-columns: minmax(180px, 300px) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .login input {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 12px;
+      background: var(--surface);
+      color: var(--ink);
+    }
+
+    .primary,
+    .secondary {
+      min-height: 42px;
+      border-radius: 8px;
+      padding: 0 14px;
+      color: #fff;
+      background: var(--teal);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .secondary {
+      color: var(--ink);
+      background: #e7eee9;
+      border: 1px solid var(--line);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      gap: 20px;
+      padding-top: 20px;
+    }
+
+    .panel,
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: var(--shadow);
+    }
+
+    .panel {
+      position: sticky;
+      top: 20px;
+      align-self: start;
+      padding: 16px;
+    }
+
+    .panel button + button {
+      margin-top: 8px;
+    }
+
+    .panel h2,
+    .roster-head h2 {
+      margin: 0;
+      font-size: 1rem;
+      line-height: 1.2;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin: 16px 0;
+    }
+
+    .stat {
+      min-height: 74px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfcf9;
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 1.35rem;
+      line-height: 1.1;
+    }
+
+    .status {
+      min-height: 22px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .roster-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      border: 0;
+      background: transparent;
+      box-shadow: none;
+      cursor: pointer;
+      overflow: visible;
+      min-width: 0;
+      perspective: 1100px;
+    }
+
+    .card:focus-visible {
+      outline: 3px solid rgba(4, 124, 120, 0.35);
+      outline-offset: 4px;
+    }
+
+    .card-inner {
+      position: relative;
+      display: grid;
+      min-height: 398px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: var(--shadow);
+      transform-style: preserve-3d;
+      transition: transform 260ms ease;
+    }
+
+    .card.flipped .card-inner {
+      transform: rotateY(180deg);
+    }
+
+    .card-face {
+      grid-area: 1 / 1;
+      min-width: 0;
+      overflow: hidden;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.9);
+      backface-visibility: hidden;
+    }
+
+    .card-back {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 10px;
+      padding: 12px;
+      background: #fbfcf9;
+      transform: rotateY(180deg);
+    }
+
+    .card-back-head {
+      display: grid;
+      gap: 4px;
+    }
+
+    .stat-bars,
+    .abilities {
+      display: grid;
+      gap: 7px;
+    }
+
+    .stat-row {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr) 28px;
+      gap: 8px;
+      align-items: center;
+      font-size: 0.74rem;
+      font-weight: 800;
+      color: #344139;
+    }
+
+    .stat-track {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e1e8e2;
+    }
+
+    .stat-fill {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--teal), var(--green));
+    }
+
+    .ability {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 7px 8px;
+      background: #ffffff;
+    }
+
+    .ability strong,
+    .ability span {
+      display: block;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .ability strong {
+      font-size: 0.82rem;
+      line-height: 1.1;
+    }
+
+    .ability span {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      line-height: 1.2;
+    }
+
+    .ability-power {
+      min-width: 34px;
+      border-radius: 999px;
+      padding: 3px 6px;
+      background: #e4f2ef;
+      color: #17433f;
+      font-size: 0.72rem;
+      font-weight: 900;
+      text-align: center;
+    }
+
+    .sprite {
+      position: relative;
+      display: grid;
+      place-items: center;
+      aspect-ratio: 1 / 1;
+      background:
+        linear-gradient(135deg, rgba(4, 124, 120, 0.12), rgba(180, 107, 27, 0.16)),
+        #f8faf6;
+      overflow: hidden;
+    }
+
+    .sprite img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      image-rendering: auto;
+    }
+
+    .sprite.ready img {
+      object-fit: contain;
+      image-rendering: pixelated;
+      padding: 8%;
+    }
+
+    .sheet-sprite {
+      width: 86%;
+      aspect-ratio: 1 / 1;
+      background-repeat: no-repeat;
+      background-size: 400% 400%;
+      background-position: 0 var(--row-pos, 0);
+      image-rendering: pixelated;
+      animation: spriteFrames 900ms steps(1, end) infinite;
+      filter: drop-shadow(0 10px 12px rgba(23, 32, 27, 0.18));
+    }
+
+    .sprite .sheet-sprite {
+      width: 92%;
+    }
+
+    .anim-idle { --row-pos: 0%; }
+    .anim-move { --row-pos: 33.333333%; }
+    .anim-attack { --row-pos: 66.666667%; animation-duration: 520ms; }
+    .anim-special { --row-pos: 100%; animation-duration: 680ms; }
+
+    @keyframes spriteFrames {
+      0%, 24.999% { background-position: 0% var(--row-pos); }
+      25%, 49.999% { background-position: 33.333333% var(--row-pos); }
+      50%, 74.999% { background-position: 66.666667% var(--row-pos); }
+      75%, 100% { background-position: 100% var(--row-pos); }
+    }
+
+    .placeholder-shape {
+      width: 54%;
+      height: 54%;
+      opacity: 0.82;
+      background: var(--teal);
+      clip-path: polygon(50% 0, 88% 18%, 100% 60%, 70% 100%, 30% 100%, 0 60%, 12% 18%);
+    }
+
+    .placeholder-bird { clip-path: polygon(15% 54%, 45% 20%, 55% 45%, 94% 31%, 67% 63%, 76% 93%, 45% 72%, 12% 91%); background: var(--blue); }
+    .placeholder-mammal { border-radius: 45% 45% 34% 34%; background: var(--amber); }
+    .placeholder-reptile { clip-path: polygon(6% 58%, 26% 36%, 72% 31%, 97% 45%, 78% 66%, 32% 72%); background: var(--green); }
+    .placeholder-amphibian { border-radius: 55% 55% 45% 45%; transform: scaleX(1.16); background: var(--green); }
+    .placeholder-fish { clip-path: polygon(0 50%, 18% 25%, 70% 30%, 100% 50%, 70% 70%, 18% 75%); background: var(--blue); }
+    .placeholder-arthropod { clip-path: polygon(50% 4%, 67% 26%, 96% 30%, 76% 52%, 86% 85%, 50% 68%, 14% 85%, 24% 52%, 4% 30%, 33% 26%); background: var(--coral); }
+    .placeholder-plant { clip-path: polygon(46% 98%, 46% 55%, 13% 64%, 35% 38%, 7% 22%, 42% 24%, 50% 0, 58% 24%, 93% 22%, 65% 38%, 87% 64%, 54% 55%, 54% 98%); background: var(--green); }
+    .placeholder-fungus { clip-path: polygon(18% 45%, 22% 22%, 50% 8%, 78% 22%, 82% 45%, 61% 45%, 65% 95%, 35% 95%, 39% 45%); background: var(--coral); }
+
+    .badge {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      min-height: 24px;
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: rgba(23, 32, 27, 0.78);
+      color: white;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .meta {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      min-height: 132px;
+    }
+
+    .name {
+      min-height: 42px;
+      font-weight: 800;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+
+    .sci {
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      font-style: italic;
+      overflow-wrap: anywhere;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .chip {
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: #eef2eb;
+      color: #344139;
+      font-size: 0.78rem;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .empty {
+      display: grid;
+      place-items: center;
+      min-height: 360px;
+      border: 1px dashed #bcc6bc;
+      border-radius: 8px;
+      color: var(--muted);
+      background: rgba(255,255,255,0.56);
+      text-align: center;
+      padding: 24px;
+    }
+
+    .battle {
+      margin-top: 20px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.88);
+      box-shadow: var(--shadow);
+    }
+
+    .battle[hidden] {
+      display: none;
+    }
+
+    .battle-stage {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+      align-items: stretch;
+    }
+
+    .combatant {
+      display: grid;
+      grid-template-rows: auto minmax(180px, 1fr) auto;
+      gap: 10px;
+      min-width: 0;
+      min-height: 310px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcf9;
+      padding: 12px;
+    }
+
+    .combatant-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: start;
+    }
+
+    .combatant-name {
+      min-width: 0;
+      font-weight: 800;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+
+    .combatant-role {
+      color: var(--muted);
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+
+    .combatant-sprite {
+      display: grid;
+      place-items: center;
+      min-height: 180px;
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(69, 109, 168, 0.1), rgba(47, 125, 66, 0.1)),
+        #f6f8f4;
+      overflow: hidden;
+    }
+
+    .combatant-sprite .sheet-sprite {
+      width: min(82%, 240px);
+    }
+
+    .dummy-sprite {
+      display: grid;
+      place-items: center;
+      width: min(68%, 210px);
+      aspect-ratio: 1 / 1;
+      border: 2px dashed #9da6a0;
+      border-radius: 8px;
+      background: repeating-linear-gradient(45deg, #d1d5d1, #d1d5d1 10px, #c1c7c2 10px, #c1c7c2 20px);
+      color: #57605a;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .hp {
+      height: 10px;
+      border-radius: 999px;
+      background: #dfe5df;
+      overflow: hidden;
+    }
+
+    .hp > span {
+      display: block;
+      height: 100%;
+      width: var(--hp, 100%);
+      background: linear-gradient(90deg, var(--green), var(--teal));
+    }
+
+    .bench {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .bench-slot {
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #eef2eb;
+      padding: 6px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      opacity: 0.72;
+    }
+
+    .bench-slot.active {
+      border-color: var(--teal);
+      opacity: 1;
+      background: #e4f2ef;
+    }
+
+    .moves {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .move-button {
+      min-height: 44px;
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: var(--ink);
+      background: #edf1ec;
+      border: 1px solid var(--line);
+      font-weight: 800;
+      text-align: left;
+    }
+
+    .battle-log {
+      display: grid;
+      gap: 6px;
+      max-height: 148px;
+      overflow: auto;
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #17201b;
+      color: #edf4ef;
+      font-size: 0.84rem;
+    }
+
+    @media (max-width: 880px) {
+      .topbar,
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .panel {
+        position: static;
+      }
+
+      .login {
+        grid-template-columns: 1fr auto;
+      }
+    }
+
+    @media (max-width: 520px) {
+      .shell {
+        padding: 14px;
+      }
+
+      .login,
+      .roster-head {
+        grid-template-columns: 1fr;
+        display: grid;
+      }
+
+      .primary,
+      .secondary {
+        width: 100%;
+      }
+
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .battle-stage,
+      .moves {
+        grid-template-columns: 1fr;
+      }
+
+      .meta {
+        padding: 10px;
+      }
+
+      .name {
+        font-size: 0.9rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <h1>iNat Battler</h1>
+          <div class="subtle" id="accountLabel">No roster loaded</div>
+        </div>
+      </div>
+      <form class="login" id="loginForm">
+        <input id="inatLogin" name="inatLogin" autocomplete="username" placeholder="iNaturalist username" maxlength="64" required>
+        <button class="primary" id="importButton" type="submit">Import</button>
+      </form>
+    </header>
+
+    <section class="layout">
+      <aside class="panel">
+        <h2>Account</h2>
+        <div class="stats">
+          <div class="stat">
+            <span class="subtle">Taxa</span>
+            <strong id="taxaCount">0</strong>
+          </div>
+          <div class="stat">
+            <span class="subtle">Sprites</span>
+            <strong id="spriteCount">0</strong>
+          </div>
+          <div class="stat">
+            <span class="subtle">Queued</span>
+            <strong id="queuedCount">0</strong>
+          </div>
+          <div class="stat">
+            <span class="subtle">Affinity</span>
+            <strong id="bondCount">0</strong>
+          </div>
+        </div>
+        <button class="secondary" id="queueMoreButton" type="button" disabled>Queue More</button>
+        <button class="secondary" id="startBattleButton" type="button">5v5 Test Battle</button>
+        <p class="status" id="statusLine"></p>
+      </aside>
+
+      <section>
+        <div class="roster-head">
+          <h2>Roster</h2>
+          <span class="subtle" id="refreshLabel"></span>
+        </div>
+        <div class="grid" id="rosterGrid"></div>
+        <div class="empty" id="emptyState">Import a public iNaturalist roster.</div>
+        <section class="battle" id="battlePanel" hidden></section>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      userId: localStorage.getItem("inatBattler:userId") || "",
+      inatLogin: localStorage.getItem("inatBattler:inatLogin") || "",
+      taxa: [],
+      flippedTaxa: new Set(),
+      battle: null,
+      battleAnimation: "anim-idle",
+      battleBusy: false,
+      polling: null
+    };
+
+    const els = {
+      form: document.getElementById("loginForm"),
+      input: document.getElementById("inatLogin"),
+      importButton: document.getElementById("importButton"),
+      queueMoreButton: document.getElementById("queueMoreButton"),
+      startBattleButton: document.getElementById("startBattleButton"),
+      statusLine: document.getElementById("statusLine"),
+      accountLabel: document.getElementById("accountLabel"),
+      taxaCount: document.getElementById("taxaCount"),
+      spriteCount: document.getElementById("spriteCount"),
+      queuedCount: document.getElementById("queuedCount"),
+      bondCount: document.getElementById("bondCount"),
+      refreshLabel: document.getElementById("refreshLabel"),
+      rosterGrid: document.getElementById("rosterGrid"),
+      emptyState: document.getElementById("emptyState"),
+      battlePanel: document.getElementById("battlePanel")
+    };
+
+    els.input.value = state.inatLogin;
+
+    els.form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await importRoster(els.input.value);
+    });
+
+    els.queueMoreButton.addEventListener("click", async () => {
+      if (!state.userId) return;
+      setBusy(true, "Queueing sprites");
+
+      try {
+        const res = await apiFetch("/api/sprite-jobs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId: state.userId, limit: 12 })
+        });
+
+        setStatus(res.queued > 0
+          ? "Queued " + res.queued + " sprite jobs"
+          : "No new sprite jobs queued. Existing jobs may still be running, or today's queue cap may be reached.");
+        await loadRoster();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    els.startBattleButton.addEventListener("click", startDemoBattle);
+
+    els.battlePanel.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-move-id]");
+      if (!button || state.battleBusy) return;
+      await submitBattleMove(button.getAttribute("data-move-id"));
+    });
+
+    els.rosterGrid.addEventListener("click", (event) => {
+      const card = event.target.closest("[data-taxon-card]");
+      if (!card) return;
+      toggleCardFlip(card.getAttribute("data-taxon-id"));
+    });
+
+    els.rosterGrid.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+
+      const card = event.target.closest("[data-taxon-card]");
+      if (!card) return;
+
+      event.preventDefault();
+      toggleCardFlip(card.getAttribute("data-taxon-id"));
+    });
+
+    if (state.userId) {
+      loadRoster();
+    }
+
+    async function importRoster(inatLogin) {
+      setBusy(true, "Importing roster");
+
+      try {
+        const res = await apiFetch("/api/import", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ inatLogin })
+        });
+
+        state.userId = res.userId;
+        state.inatLogin = res.inatLogin;
+        localStorage.setItem("inatBattler:userId", state.userId);
+        localStorage.setItem("inatBattler:inatLogin", state.inatLogin);
+        setStatus((res.warning ? res.warning + " " : "") + "Imported " + res.importedTaxa + " taxa, queued " + res.queuedSprites + " sprites");
+        await loadRoster();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadRoster() {
+      if (!state.userId) return;
+
+      const res = await apiFetch("/api/roster?userId=" + encodeURIComponent(state.userId) + "&limit=100");
+      state.taxa = res.taxa || [];
+      render();
+      schedulePolling();
+    }
+
+    function render() {
+      els.accountLabel.textContent = state.inatLogin ? "@" + state.inatLogin : "No roster loaded";
+      els.emptyState.style.display = state.taxa.length ? "none" : "grid";
+      els.rosterGrid.innerHTML = state.taxa.map(renderCard).join("");
+
+      const spriteCount = state.taxa.filter((taxon) => taxon.sprite.status === "ready").length;
+      const queuedCount = state.taxa.filter((taxon) => ["queued", "running"].includes(taxon.sprite.status)).length;
+      const bondCount = state.taxa.reduce((sum, taxon) => sum + Number(affinityLevel(taxon) || 0), 0);
+
+      els.taxaCount.textContent = String(state.taxa.length);
+      els.spriteCount.textContent = String(spriteCount);
+      els.queuedCount.textContent = String(queuedCount);
+      els.bondCount.textContent = String(bondCount);
+      els.queueMoreButton.disabled = !state.userId;
+      els.refreshLabel.textContent = state.taxa.length ? "Top " + state.taxa.length : "";
+      renderBattle();
+    }
+
+    function toggleCardFlip(taxonId) {
+      if (!taxonId) return;
+
+      if (state.flippedTaxa.has(taxonId)) {
+        state.flippedTaxa.delete(taxonId);
+      } else {
+        state.flippedTaxa.add(taxonId);
+      }
+
+      render();
+    }
+
+    function renderCard(taxon) {
+      const status = taxon.sprite.status;
+      const isReady = status === "ready";
+      const taxonId = String(taxon.taxonId);
+      const isFlipped = state.flippedTaxa.has(taxonId);
+      const imageUrl = isReady ? taxon.sprite.url : taxon.defaultPhotoUrl;
+      const image = isReady && imageUrl
+        ? renderSheetSprite(imageUrl, "anim-idle")
+        : imageUrl
+        ? '<img alt="" loading="lazy" src="' + escapeAttr(imageUrl) + '">'
+        : '<div class="placeholder-shape placeholder-' + escapeAttr(taxon.sprite.placeholder || "unknown") + '"></div>';
+      const badge = isReady ? "ready" : status;
+      const types = Array.isArray(taxon.types) ? taxon.types.join(" / ") : (taxon.iconicTaxon || "Life");
+
+      return '<article class="card ' + (isFlipped ? "flipped" : "") + '" data-taxon-card data-taxon-id="' + escapeAttr(taxonId) + '" tabindex="0" role="button" aria-pressed="' + String(isFlipped) + '" aria-label="' + escapeAttr((taxon.name || taxon.scientificName || "Taxon") + " battle details") + '">' +
+        '<div class="card-inner">' +
+          '<div class="card-face card-front">' +
+            '<div class="sprite ' + (isReady ? "ready" : "") + '">' +
+              image +
+              '<span class="badge">' + escapeHtml(badge) + '</span>' +
+            '</div>' +
+            '<div class="meta">' +
+              '<div class="name">' + escapeHtml(taxon.name) + '</div>' +
+              '<div class="sci">' + escapeHtml(taxon.scientificName) + '</div>' +
+              '<div class="chips">' +
+                '<span class="chip">' + escapeHtml(types) + '</span>' +
+                '<span class="chip">' + escapeHtml(taxon.role || "scout") + '</span>' +
+                '<span class="chip">' + Number(taxon.obsCount || 0) + ' obs</span>' +
+                '<span class="chip">Affinity ' + Number(affinityLevel(taxon) || 0) + '</span>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="card-face card-back">' +
+            renderCardBack(taxon, types) +
+          '</div>' +
+        '</div>' +
+      '</article>';
+    }
+
+    function renderCardBack(taxon, types) {
+      return '<div class="card-back-head">' +
+          '<div class="name">' + escapeHtml(taxon.name) + '</div>' +
+          '<div class="sci">' + escapeHtml(types + " / " + (taxon.role || "scout")) + '</div>' +
+          '<div class="chips">' +
+            '<span class="chip">HP ' + Number(taxon.maxHp || 0) + '</span>' +
+            '<span class="chip">Affinity ' + Number(affinityLevel(taxon) || 0) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="stat-bars">' +
+          renderStatRow("Vigor", taxon.stats && taxon.stats.vigor) +
+          renderStatRow("Strike", taxon.stats && taxon.stats.strike) +
+          renderStatRow("Guard", taxon.stats && taxon.stats.guard) +
+          renderStatRow("Tempo", taxon.stats && taxon.stats.tempo) +
+          renderStatRow("Sense", taxon.stats && taxon.stats.sense) +
+        '</div>' +
+        '<div class="abilities">' +
+          renderMoveRows(taxon.moves) +
+        '</div>';
+    }
+
+    function renderStatRow(label, rawValue) {
+      const value = Number(rawValue || 0);
+      const width = Math.max(4, Math.min(100, value));
+
+      return '<div class="stat-row">' +
+        '<span>' + escapeHtml(label) + '</span>' +
+        '<div class="stat-track"><span class="stat-fill" style="width:' + width + '%"></span></div>' +
+        '<span>' + value + '</span>' +
+      '</div>';
+    }
+
+    function affinityLevel(taxon) {
+      return Number(taxon.affinityLevel ?? taxon.bondLevel ?? 0);
+    }
+
+    function renderMoveRows(moves) {
+      const safeMoves = Array.isArray(moves) ? moves.slice(0, 4) : [];
+      if (safeMoves.length === 0) {
+        return '<div class="ability"><div><strong>No moves</strong><span>Missing battle data</span></div></div>';
+      }
+
+      return safeMoves.map((move) => {
+        const power = Number(move.power || 0);
+        const score = power > 0 ? power : "ST";
+
+        return '<div class="ability">' +
+          '<div>' +
+            '<strong>' + escapeHtml(move.name || move.id || "Move") + '</strong>' +
+            '<span>' + escapeHtml((move.type || "Life") + " / " + (move.category || "status")) + '</span>' +
+          '</div>' +
+          '<div class="ability-power">' + escapeHtml(score) + '</div>' +
+        '</div>';
+      }).join("");
+    }
+
+    async function startDemoBattle() {
+      setBusy(true, "Starting 5v5 test battle");
+
+      try {
+        const battle = await apiFetch("/api/battles/demo/start", { method: "POST" });
+        state.battle = battle;
+        state.battleAnimation = "anim-idle";
+        setStatus("5v5 test battle ready");
+        renderBattle();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function submitBattleMove(moveId) {
+      if (!state.battle || !moveId) return;
+
+      const active = getActiveCreature(state.battle.player);
+      const move = active.moves.find((candidate) => candidate.id === moveId);
+      state.battleBusy = true;
+      state.battleAnimation = move && move.category === "special" ? "anim-special" : "anim-attack";
+      renderBattle();
+
+      try {
+        await delay(450);
+        state.battle = await apiFetch("/api/battles/" + encodeURIComponent(state.battle.battleId) + "/action", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ moveId })
+        });
+        state.battleAnimation = "anim-idle";
+        renderBattle();
+      } catch (error) {
+        setStatus(error.message);
+        state.battleAnimation = "anim-idle";
+        renderBattle();
+      } finally {
+        state.battleBusy = false;
+        renderBattle();
+      }
+    }
+
+    function renderBattle() {
+      const battle = state.battle;
+      els.battlePanel.hidden = !battle;
+      if (!battle) return;
+
+      const playerActive = getActiveCreature(battle.player);
+      const opponentActive = getActiveCreature(battle.opponent);
+      const moveButtons = battle.status === "active"
+        ? playerActive.moves.map((move) => (
+            '<button class="move-button" type="button" data-move-id="' + escapeAttr(move.id) + '" ' + (state.battleBusy ? "disabled" : "") + '>' +
+              escapeHtml(move.name) + '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + '</span>' +
+            '</button>'
+          )).join("")
+        : '<button class="move-button" type="button" disabled>Battle ' + escapeHtml(battle.status) + '</button>';
+      const recentLog = battle.log.slice(-6).reverse().map((entry) => (
+        '<div>Turn ' + Number(entry.turn || 0) + ': ' + escapeHtml(entry.text) + '</div>'
+      )).join("");
+
+      els.battlePanel.innerHTML =
+        '<div class="roster-head">' +
+          '<h2>5v5 Test Battle</h2>' +
+          '<span class="subtle">' + escapeHtml(battle.status) + ' / turn ' + Number(battle.turn || 1) + '</span>' +
+        '</div>' +
+        '<div class="battle-stage">' +
+          renderCombatant(battle.player, playerActive, "player") +
+          renderCombatant(battle.opponent, opponentActive, "opponent") +
+        '</div>' +
+        '<div class="moves">' + moveButtons + '</div>' +
+        '<div class="battle-log">' + recentLog + '</div>';
+    }
+
+    function renderCombatant(team, creature, side) {
+      const hpPct = creature.maxHp ? Math.max(0, Math.round((creature.hp / creature.maxHp) * 100)) : 0;
+      const animation = side === "player" ? state.battleAnimation : "anim-idle";
+      const sprite = creature.spriteUrl
+        ? renderSheetSprite(creature.spriteUrl, animation)
+        : '<div class="dummy-sprite">Dummy</div>';
+      const bench = team.creatures.map((member, index) => (
+        '<div class="bench-slot ' + (index === team.activeIndex ? "active" : "") + '">' + escapeHtml(member.name) + '</div>'
+      )).join("");
+
+      return '<article class="combatant">' +
+        '<div class="combatant-head">' +
+          '<div class="combatant-name">' + escapeHtml(creature.name) + '</div>' +
+          '<div class="combatant-role">' + escapeHtml((creature.types || []).join(" / ")) + '</div>' +
+        '</div>' +
+        '<div class="combatant-sprite">' + sprite + '</div>' +
+        '<div>' +
+          '<div class="hp" aria-label="HP"><span style="--hp:' + hpPct + '%"></span></div>' +
+          '<div class="subtle">' + Number(creature.hp || 0) + ' / ' + Number(creature.maxHp || 0) + ' HP</div>' +
+          '<div class="bench">' + bench + '</div>' +
+        '</div>' +
+      '</article>';
+    }
+
+    function renderSheetSprite(url, animationClass) {
+      return '<div class="sheet-sprite ' + escapeAttr(animationClass || "anim-idle") + '" style="background-image:url(&quot;' + escapeAttr(url) + '&quot;)"></div>';
+    }
+
+    function getActiveCreature(team) {
+      return team.creatures[team.activeIndex || 0];
+    }
+
+    function schedulePolling() {
+      if (state.polling) clearTimeout(state.polling);
+
+      const hasPending = state.taxa.some((taxon) => ["queued", "running", "missing"].includes(taxon.sprite.status));
+      if (!hasPending) return;
+
+      state.polling = setTimeout(async () => {
+        try {
+          await loadRoster();
+        } catch (error) {
+          setStatus(error.message);
+        }
+      }, 8000);
+    }
+
+    async function apiFetch(path, init) {
+      const res = await fetch(path, init);
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data.error || "Request failed");
+      }
+
+      return data;
+    }
+
+    function setBusy(isBusy, message) {
+      els.importButton.disabled = isBusy;
+      els.queueMoreButton.disabled = isBusy || !state.userId;
+      els.startBattleButton.disabled = isBusy;
+      if (message) setStatus(message);
+    }
+
+    function delay(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function setStatus(message) {
+      els.statusLine.textContent = message || "";
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value).replace(/\\x60/g, "&#96;");
+    }
+  </script>
+</body>
+</html>`;
+}
