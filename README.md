@@ -310,6 +310,29 @@ POST /api/training/respec    {taxonId}
 POST /api/training/nickname  {taxonId, nickname}
 ```
 
+## Species Signature Moves (LLM dossiers)
+
+Move generation is a two-stage pipeline: a text model researches the organism, then the image model illustrates the result. The image model never invents game data.
+
+1. **Dossier (text)**: `MOVE_MODEL` (default `gpt-5.4-nano`) receives the taxon plus its Wikipedia summary (fetched from the iNat taxa API as grounding) and returns JSON: 3-5 real natural-history facts, idle/movement animation lines, and **two signature moves as pure data** (name, type from the 16-type chart, category, power, accuracy, one effect, flavor line, and a 4-frame animation storyboard).
+2. **Validation**: the Worker clamps everything server-side — power 20-60 (26/hit for multihit), accuracy 75-100, status-rider chance <=30% (pure status moves always land), and a power budget (`power x accuracy + effect cost <= 62`) so the LLM cannot emit an overpowered move. Names/flavor are length-capped and sanitized.
+3. **Genome v2**: stored in `creature_genomes` (genome_version 2) as 2 signature moves (animation rows 3-4) + 2 common library moves. Battles, rosters, NPC teams, and ghost teams all prefer genome v2 moves and fall back to the procedural set.
+4. **Sprite prompt v2**: the stored prompt assigns each sheet row explicitly — row 1 idle and row 2 movement from the dossier, rows 3-4 the signature move storyboards — so new sprite generations animate the actual moves. Existing sheets keep working (signature moves map to the generic attack/special rows until regenerated).
+
+Endpoints (`OPENAI_API_KEY` required for generation; batch uses the 50%-discount Batch API):
+
+```sh
+curl -X POST .../api/taxa/13858/moves/dev-generate         # one species, synchronous
+curl .../api/taxa/13858/genome                             # inspect genome + image prompt
+curl -X POST .../api/move-batches/dev-submit -d '{"limit":25}'
+curl .../api/move-batches/<batch_id>
+curl -X POST .../api/move-batches/<batch_id>/sync          # validate + write genomes
+```
+
+### Status effects
+
+The battle engine now consumes statuses (previously decorative): **stunned** skips the creature's next action, **marked** takes +25% damage on the next hit, **poisoned** loses 8% max HP per turn for 3 turns, **shielded** halves the next hit (self-applied). Move effects also include **drain** (heal % of damage dealt), **recoil**, and **multihit** (2-3 strikes). Active statuses show as chips on the battle plates, and the turn replay animates poison ticks, drains, recoil, stuns, and shield blocks with floats and sounds.
+
 ## Battle Arena
 
 Battles run in their own **Battle** tab with two explicit phases: team picking happens in the Roster tab (select exactly 5 ready sprites), then the arena opens on Battle NPC / challenge accept with a "Battle Start!" intro.
