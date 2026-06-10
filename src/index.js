@@ -2333,8 +2333,8 @@ async function getRoster(env, userId, limit, q = "") {
   return {
     userId,
     taxa: (rows.results ?? []).map((row) => {
-      // The roster is the owner's own view, so their latest custom sprite
-      // wins regardless of QA status; opponents are filtered in battle loads.
+      // The roster is the owner's own view, so pending or approved custom
+      // sprites win here; rejected submissions fall back to the global sprite.
       const finalKey = row.custom_r2_key || row.r2_key;
       const spriteReady = Boolean(finalKey);
       const spriteUrl = spriteReady ? `/api/assets/${encodeR2Key(finalKey)}` : null;
@@ -2747,9 +2747,9 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
     const row = byId.get(taxonId);
     if (!row) throw new Error(`Taxon ${taxonId} is not a ready sprite in this user's roster`);
 
-    // Owners always see their own custom sprite (any QA status); everyone
-    // else only sees it once Discord QA approved it, falling back to the
-    // shared global sprite otherwise.
+    // Owners see their own pending or approved custom sprite; everyone else
+    // only sees it once Discord QA approved it. Rejected submissions fall
+    // back to the shared global sprite for all viewers.
     const customKey = personalView === "owner" ? row.own_custom_key : row.approved_custom_key;
     const finalKey = customKey || row.r2_key;
     const spriteUrl = finalKey ? `/api/assets/${encodeR2Key(finalKey)}` : null;
@@ -4335,15 +4335,32 @@ async function uploadUserSprite(request, env, session) {
   if (!contentType) throw httpError("Custom sprite must be PNG, JPEG, or WebP", 400);
 
   const userId = inatUserIdFor(session.inat_login);
-  const owned = await env.DB.prepare(`
+  let owned = await env.DB.prepare(`
     SELECT t.taxon_id, t.scientific_name, t.common_name
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
     WHERE ut.user_id = ? AND ut.taxon_id = ?
   `).bind(userId, taxonId).first();
-  if (!owned) throw httpError("That species is not in your roster", 400);
 
   const now = new Date().toISOString();
+  if (!owned) {
+    const taxon = await resolveInatTaxonForManualUpload({ taxonId: String(taxonId), scientificName: "", commonName: "" });
+    const taxonForDb = {
+      ...taxon,
+      preferred_common_name: taxon.preferred_common_name || taxon.english_common_name || null
+    };
+    await upsertTaxonFromInat(env, taxonForDb, now);
+
+    const addedToRoster = await addManualSpriteToUserRoster(env, userId, taxonForDb, now);
+    if (!addedToRoster) throw httpError("Import your iNaturalist roster before submitting custom sprites", 400);
+
+    owned = {
+      taxon_id: taxon.id,
+      scientific_name: taxon.name,
+      common_name: taxonForDb.preferred_common_name
+    };
+  }
+
   const submissionId = randomId("usprite");
   const fileHash = await sha256ArrayBufferHex(bytes);
   const extension = extensionForContentType(contentType);
@@ -5533,6 +5550,13 @@ function renderAppHtml() {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .bsky-section {
+      display: grid;
+      gap: 8px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
     }
 
     .typeahead {
@@ -7487,6 +7511,8 @@ function renderAppHtml() {
       if (action === "challenge-send") return "Creating and posting the Bluesky challenge.";
       if (action === "challenge-accept") return "Accepting the challenge and opening battle.";
       if (action === "challenge-decline") return "Declining the challenge.";
+      if (action === "sprite-upload") return "Submitting your custom sprite for Discord QA.";
+      if (action === "sprites-sync") return "Checking Discord QA reactions.";
       return "Working.";
     }
 
@@ -7497,6 +7523,8 @@ function renderAppHtml() {
       if (action === "challenge-send") return "Sending...";
       if (action === "challenge-accept") return "Accepting...";
       if (action === "challenge-decline") return "Declining...";
+      if (action === "sprite-upload") return "Submitting...";
+      if (action === "sprites-sync") return "Refreshing...";
       return "Working...";
     }
 
@@ -7661,16 +7689,23 @@ function renderAppHtml() {
     async function uploadCustomSprite() {
       const input = document.getElementById("customSpriteFile");
       const file = input && input.files && input.files[0];
+      const taxonInput = document.getElementById("customSpriteTaxonId");
+      const typedTaxonId = taxonInput ? taxonInput.value.trim() : "";
       if (!file) {
         setStatus("Choose an image file first (PNG, JPEG, or WebP 4x4 sprite sheet).");
         return;
       }
-      if (state.selectedTaxa.size !== 1) {
-        setStatus("Select exactly one creature card in your roster, then upload.");
+      if (!typedTaxonId && state.selectedTaxa.size !== 1) {
+        setStatus("Select one ready creature card or enter an iNaturalist taxon ID.");
         return;
       }
 
-      const taxonId = Array.from(state.selectedTaxa)[0];
+      const taxonId = typedTaxonId || Array.from(state.selectedTaxa)[0];
+      if (!/^\d+$/.test(String(taxonId))) {
+        setStatus("Enter a numeric iNaturalist taxon ID.");
+        return;
+      }
+
       const form = new FormData();
       form.append("sprite", file);
       form.append("taxonId", String(taxonId));
@@ -7700,6 +7735,27 @@ function renderAppHtml() {
         '<div>' + badge + ' <strong>' + escapeHtml(item.name) + '</strong> &mdash; ' + escapeHtml(item.status) +
         (item.discordError ? ' <span class="subtle">(Discord: ' + escapeHtml(item.discordError) + ')</span>' : '') +
         '</div>' +
+      '</div>';
+    }
+
+    function renderCustomSpritePanel(busyAttr) {
+      const list = state.mySprites.length
+        ? state.mySprites.map(renderMySpriteItem).join("")
+        : '<div class="challenge-item"><div class="subtle">No custom sprite submissions yet.</div></div>';
+
+      return '<div class="bsky-section">' +
+        '<div class="bsky-row">' +
+          '<strong>Custom sprites</strong>' +
+          '<button class="secondary" type="button" data-bsky-action="sprites-sync"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "sprites-sync" ? "Refreshing..." : "Refresh QA") +
+          '</button>' +
+        '</div>' +
+        '<input id="customSpriteTaxonId" inputmode="numeric" placeholder="iNaturalist taxon ID">' +
+        '<input id="customSpriteFile" type="file" accept="image/png,image/jpeg,image/webp">' +
+        '<button class="primary" type="button" data-bsky-action="sprite-upload"' + busyAttr + '>' +
+          (state.bskyBusy && state.bskyAction === "sprite-upload" ? "Submitting..." : "Submit for QA") +
+        '</button>' +
+        '<div class="batch-list">' + list + '</div>' +
       '</div>';
     }
 
@@ -8130,7 +8186,8 @@ function renderAppHtml() {
           '<input id="challengeMessageInput" placeholder="Optional taunt (140 chars)" maxlength="140">' +
           '<button class="primary" type="button" data-bsky-action="challenge-send"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "challenge-send" ? "Sending..." : "Send Challenge via Bluesky") +
-          '</button>';
+          '</button>' +
+          renderCustomSpritePanel(busyAttr);
       }
 
       if (state.challenges.length) {

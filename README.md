@@ -182,7 +182,7 @@ No iNat tokens are ever issued or stored.
 
 ### Custom sprites with Discord QA
 
-Signed-in players with a linked iNaturalist account can upload their own sprite sheet for any species in their roster (select one creature card, choose a PNG/JPEG/WebP file in the "Custom sprites" block of the Bluesky panel).
+Signed-in players with a linked iNaturalist account can upload their own sprite sheet for a species in their roster (select one ready creature card) or enter an iNaturalist taxon ID for a missing/new roster species, then choose a PNG/JPEG/WebP file in the "Custom sprites" block of the Bluesky panel.
 
 Moderation works through emoji reactions in a private Discord channel:
 
