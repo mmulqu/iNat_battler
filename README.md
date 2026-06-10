@@ -196,6 +196,7 @@ Visibility rules:
 - **Opponents only see it once approved**; otherwise they see the shared global sprite (or the placeholder if none exists).
 - **Rejected sprites are hidden from everyone, including the submitter** — the roster shows the rejected QA badge but falls back to the shared global sprite.
 - A pending or approved custom sprite also makes that species battle-eligible for its owner even when no global sprite exists yet.
+- If QA approves a custom sprite for a taxon with no ready global sprite, the app also registers that image as the shared global sprite. If a global sprite already exists, the approved upload remains only that user's custom sprite.
 
 Setup: create a Discord application with a bot, invite it to the server with View Channel, Send Messages, Attach Files, and Read Message History permissions on the QA channel, set `DISCORD_QA_CHANNEL_ID` in `wrangler.jsonc` (already pointed at the QA channel), and run:
 

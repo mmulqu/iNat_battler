@@ -4472,6 +4472,84 @@ async function applySubmissionDecision(env, submissionId, decision) {
     SET status = ?, decided_at = ?, updated_at = ?, discord_error = NULL
     WHERE submission_id = ?
   `).bind(decision, now, now, submissionId).run();
+
+  if (decision === "approved") {
+    return promoteApprovedUserSpriteIfMissing(env, submissionId, now);
+  }
+  if (decision === "rejected") {
+    return demoteRejectedUserSpriteAsset(env, submissionId);
+  }
+  return { promoted: false, demoted: false };
+}
+
+async function promoteApprovedUserSpriteIfMissing(env, submissionId, now) {
+  const promptHash = `user-approved:${submissionId}`;
+  const assetId = await sha256Hex(`${DEFAULT_ASSET_KIND}|v${ASSET_VERSION}|${promptHash}`);
+  const usageJson = JSON.stringify({
+    source: "user-approved-sprite",
+    submission_id: submissionId,
+    approved_at: now
+  });
+
+  const result = await env.DB.prepare(`
+    INSERT INTO sprite_assets (
+      asset_id, taxon_id, asset_kind, asset_version,
+      model, prompt_hash, r2_key, status,
+      width, height, content_type, cost_estimate_usd, usage_json, created_at
+    )
+    SELECT
+      ?, uss.taxon_id, ?, ?,
+      'user-approved-upload', ?, uss.r2_key, 'ready',
+      uss.width, uss.height, uss.content_type, 0, ?, ?
+    FROM user_sprite_submissions uss
+    WHERE uss.submission_id = ?
+      AND uss.status = 'approved'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM sprite_assets existing
+        WHERE existing.taxon_id = uss.taxon_id
+          AND existing.asset_kind = ?
+          AND existing.asset_version = ?
+          AND existing.status = 'ready'
+      )
+    ON CONFLICT(taxon_id, asset_kind, asset_version, prompt_hash)
+    DO UPDATE SET
+      model = excluded.model,
+      r2_key = excluded.r2_key,
+      status = 'ready',
+      width = excluded.width,
+      height = excluded.height,
+      content_type = excluded.content_type,
+      cost_estimate_usd = excluded.cost_estimate_usd,
+      usage_json = excluded.usage_json
+  `).bind(
+    assetId,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    promptHash,
+    usageJson,
+    now,
+    submissionId,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION
+  ).run();
+
+  return { promoted: Number(result.meta?.changes ?? 0) > 0, demoted: false };
+}
+
+async function demoteRejectedUserSpriteAsset(env, submissionId) {
+  const promptHash = `user-approved:${submissionId}`;
+  const result = await env.DB.prepare(`
+    UPDATE sprite_assets
+    SET status = 'superseded'
+    WHERE asset_kind = ?
+      AND asset_version = ?
+      AND prompt_hash = ?
+      AND model = 'user-approved-upload'
+      AND status = 'ready'
+  `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION, promptHash).run();
+
+  return { promoted: false, demoted: Number(result.meta?.changes ?? 0) > 0 };
 }
 
 async function syncSpriteSubmissions(env, limit = 25) {
@@ -4483,7 +4561,7 @@ async function syncSpriteSubmissions(env, limit = 25) {
     LIMIT ?
   `).bind(limit).all();
 
-  const summary = { checked: 0, approved: 0, rejected: 0, reposted: 0, errors: 0 };
+  const summary = { checked: 0, approved: 0, rejected: 0, promoted: 0, reposted: 0, errors: 0 };
 
   for (const row of rows.results ?? []) {
     summary.checked += 1;
@@ -4517,8 +4595,9 @@ async function syncSpriteSubmissions(env, limit = 25) {
 
       const { decision, error } = await fetchDiscordDecision(env, row);
       if (decision) {
-        await applySubmissionDecision(env, row.submission_id, decision);
+        const result = await applySubmissionDecision(env, row.submission_id, decision);
         summary[decision === "approved" ? "approved" : "rejected"] += 1;
+        if (result.promoted) summary.promoted += 1;
       } else if (error) {
         await env.DB.prepare(
           "UPDATE user_sprite_submissions SET discord_error = ?, updated_at = ? WHERE submission_id = ?"
@@ -4551,10 +4630,17 @@ async function syncSingleSubmission(env, submissionId) {
   // Discord overturns an earlier decision.
   const { decision, error } = await fetchDiscordDecision(env, row);
   if (error) throw httpError(error, 502);
+  let result = { promoted: false, demoted: false };
   if (decision && decision !== row.status) {
-    await applySubmissionDecision(env, submissionId, decision);
+    result = await applySubmissionDecision(env, submissionId, decision);
   }
-  return { submissionId, status: decision ?? row.status, changed: Boolean(decision && decision !== row.status) };
+  return {
+    submissionId,
+    status: decision ?? row.status,
+    changed: Boolean(decision && decision !== row.status),
+    globalPromoted: result.promoted,
+    globalDemoted: result.demoted
+  };
 }
 
 async function serveAsset(request, env) {
@@ -7690,20 +7776,21 @@ function renderAppHtml() {
       const input = document.getElementById("customSpriteFile");
       const file = input && input.files && input.files[0];
       const taxonInput = document.getElementById("customSpriteTaxonId");
+      const manualTaxonInput = document.getElementById("manualTaxonId");
       const typedTaxonId = taxonInput ? taxonInput.value.trim() : "";
+      const fallbackTaxonId = !typedTaxonId && manualTaxonInput ? manualTaxonInput.value.trim() : "";
+      const rawTaxonId = typedTaxonId || fallbackTaxonId;
       if (!file) {
-        setStatus("Choose an image file first (PNG, JPEG, or WebP 4x4 sprite sheet).");
-        return;
+        throw new Error("Choose an image file first (PNG, JPEG, or WebP 4x4 sprite sheet).");
       }
-      if (!typedTaxonId && state.selectedTaxa.size !== 1) {
-        setStatus("Select one ready creature card or enter an iNaturalist taxon ID.");
-        return;
+      if (!rawTaxonId && state.selectedTaxa.size !== 1) {
+        throw new Error("Enter an iNaturalist taxon ID in the Custom sprites field, or select one ready creature card.");
       }
 
-      const taxonId = typedTaxonId || Array.from(state.selectedTaxa)[0];
-      if (!/^\d+$/.test(String(taxonId))) {
-        setStatus("Enter a numeric iNaturalist taxon ID.");
-        return;
+      const typedTaxonMatch = rawTaxonId.match(/[0-9]+/);
+      const taxonId = typedTaxonMatch ? typedTaxonMatch[0] : Array.from(state.selectedTaxa)[0];
+      if (!taxonId || !/^[0-9]+$/.test(String(taxonId))) {
+        throw new Error('Could not read a numeric iNaturalist taxon ID from "' + rawTaxonId + '".');
       }
 
       const form = new FormData();
@@ -7712,11 +7799,16 @@ function renderAppHtml() {
 
       setStatus("Uploading custom sprite…");
       const res = await apiFetch("/api/my-sprites/upload", { method: "POST", body: form });
+      const message = res.discordError
+        ? "Sprite saved and live for you, but the Discord QA post failed: " + res.discordError + " (it will retry automatically)"
+        : "Custom sprite for " + res.name + " submitted for QA. It's live for you now; opponents see it once approved on Discord.";
       if (res.discordError) {
-        setStatus("Sprite saved and live for you, but the Discord QA post failed: " + res.discordError + " (it will retry automatically)");
+        state.bskyMessageKind = "error";
       } else {
-        setStatus("Custom sprite for " + res.name + " submitted for QA. It's live for you now; opponents see it once approved on Discord.");
+        state.bskyMessageKind = "success";
       }
+      state.bskyMessage = message;
+      setStatus(message);
       await loadMySprites();
       await loadRoster();
     }
@@ -7750,7 +7842,7 @@ function renderAppHtml() {
             (state.bskyBusy && state.bskyAction === "sprites-sync" ? "Refreshing..." : "Refresh QA") +
           '</button>' +
         '</div>' +
-        '<input id="customSpriteTaxonId" inputmode="numeric" placeholder="iNaturalist taxon ID">' +
+        '<input id="customSpriteTaxonId" inputmode="numeric" placeholder="QA taxon ID, e.g. 145436">' +
         '<input id="customSpriteFile" type="file" accept="image/png,image/jpeg,image/webp">' +
         '<button class="primary" type="button" data-bsky-action="sprite-upload"' + busyAttr + '>' +
           (state.bskyBusy && state.bskyAction === "sprite-upload" ? "Submitting..." : "Submit for QA") +
