@@ -166,6 +166,25 @@ export async function fetchPublicProfile(did) {
   }
 }
 
+export async function searchActorsTypeahead(query, limit = 8) {
+  const q = String(query ?? "").trim().replace(/^@/, "");
+  if (q.length < 2) return [];
+
+  try {
+    const data = await fetchJson(
+      `${PUBLIC_APPVIEW_URL}/xrpc/app.bsky.actor.searchActorsTypeahead?q=${encodeURIComponent(q)}&limit=${limit}`
+    );
+    return (data.actors ?? []).map((actor) => ({
+      did: actor.did,
+      handle: actor.handle,
+      displayName: actor.displayName ?? null,
+      avatar: actor.avatar ?? null
+    }));
+  } catch {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Authorization server discovery
 // ---------------------------------------------------------------------------

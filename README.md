@@ -188,6 +188,7 @@ GET  /oauth/callback
 POST /api/auth/login            {handle, returnTo?}
 POST /api/auth/logout
 GET  /api/me
+GET  /api/bsky/typeahead?q=<partial-handle>
 POST /api/inat/link/start       {inatLogin}
 POST /api/inat/link/confirm
 POST /api/challenges            {opponentHandle, taxonIds[5], message?}

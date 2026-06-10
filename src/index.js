@@ -19,7 +19,8 @@ import {
   pushedAuthorizationRequest,
   randomToken,
   refreshAccessToken,
-  resolveIdentity
+  resolveIdentity,
+  searchActorsTypeahead
 } from "./atproto.js";
 
 const ASSET_VERSION = 1;
@@ -131,6 +132,11 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "GET" && url.pathname === "/api/me") {
     return jsonResponse(await getMe(request, env));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/bsky/typeahead") {
+    const actors = await searchActorsTypeahead(url.searchParams.get("q"), 8);
+    return jsonResponse({ actors });
   }
 
   if (request.method === "POST" && url.pathname === "/api/inat/link/start") {
@@ -4357,6 +4363,64 @@ function renderAppHtml() {
       white-space: nowrap;
     }
 
+    .typeahead {
+      position: relative;
+      min-width: 0;
+    }
+
+    .typeahead-list {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      z-index: 30;
+      display: grid;
+      max-height: 230px;
+      overflow: auto;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    .typeahead-item {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      padding: 7px 10px;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid #eef1ea;
+      text-align: left;
+      font-size: 0.8rem;
+      color: var(--ink);
+    }
+
+    .typeahead-item:last-child {
+      border-bottom: 0;
+    }
+
+    .typeahead-item:hover,
+    .typeahead-item:focus {
+      background: #eef3ec;
+    }
+
+    .typeahead-item img,
+    .typeahead-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+      background: #e3e8e0;
+    }
+
+    .typeahead-item span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .bsky-code {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       background: #eef3ec;
@@ -5537,16 +5601,44 @@ function renderAppHtml() {
     });
 
     els.bskyBody.addEventListener("click", (event) => {
+      const pick = event.target.closest("[data-typeahead-pick]");
+      if (pick) {
+        const input = document.getElementById(pick.getAttribute("data-input-id"));
+        if (input) {
+          input.value = pick.getAttribute("data-typeahead-pick");
+          input.focus();
+        }
+        closeTypeaheadLists();
+        return;
+      }
+
       const button = event.target.closest("[data-bsky-action]");
       if (!button) return;
       handleBskyAction(button.getAttribute("data-bsky-action"), button.getAttribute("data-challenge-id"));
     });
 
+    els.bskyBody.addEventListener("input", (event) => {
+      if (event.target.getAttribute && event.target.getAttribute("data-bsky-typeahead")) {
+        handleTypeaheadInput(event.target);
+      }
+    });
+
     els.bskyBody.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || event.target.tagName !== "INPUT") return;
+      if (event.target.tagName !== "INPUT") return;
+
+      if (event.key === "Escape") {
+        closeTypeaheadLists();
+        return;
+      }
+      if (event.key !== "Enter") return;
       event.preventDefault();
+      closeTypeaheadLists();
       const action = event.target.getAttribute("data-bsky-enter");
       if (action) handleBskyAction(action, null);
+    });
+
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".typeahead")) closeTypeaheadLists();
     });
 
     if (state.userId) {
@@ -5837,6 +5929,73 @@ function renderAppHtml() {
       '</div>';
     }
 
+    function renderTypeaheadInput(inputId, placeholder, enterAction) {
+      return '<div class="typeahead">' +
+        '<input id="' + escapeAttr(inputId) + '" data-bsky-enter="' + escapeAttr(enterAction) + '" data-bsky-typeahead="1"' +
+          ' placeholder="' + escapeAttr(placeholder) + '" autocomplete="off" spellcheck="false">' +
+        '<div class="typeahead-list" hidden></div>' +
+      '</div>';
+    }
+
+    function typeaheadListFor(input) {
+      return input && input.parentElement ? input.parentElement.querySelector(".typeahead-list") : null;
+    }
+
+    function closeTypeaheadLists() {
+      els.bskyBody.querySelectorAll(".typeahead-list").forEach((list) => {
+        list.hidden = true;
+        list.innerHTML = "";
+      });
+    }
+
+    const runTypeahead = debounce(async (inputId, query) => {
+      const input = document.getElementById(inputId);
+      const list = typeaheadListFor(input);
+      if (!input || !list) return;
+      if (input.value.trim() !== query.trim()) return;
+
+      let actors = [];
+      try {
+        const res = await apiFetch("/api/bsky/typeahead?q=" + encodeURIComponent(query.trim()));
+        actors = res.actors || [];
+      } catch (error) {
+        actors = [];
+      }
+
+      if (input.value.trim() !== query.trim()) return;
+      if (!actors.length) {
+        list.hidden = true;
+        list.innerHTML = "";
+        return;
+      }
+
+      list.innerHTML = actors.map((actor) => (
+        '<button type="button" class="typeahead-item" data-typeahead-pick="' + escapeAttr(actor.handle) + '" data-input-id="' + escapeAttr(inputId) + '">' +
+          (actor.avatar
+            ? '<img src="' + escapeAttr(actor.avatar) + '" alt="" loading="lazy">'
+            : '<span class="typeahead-avatar"></span>') +
+          '<span><strong>@' + escapeHtml(actor.handle) + '</strong>' +
+            (actor.displayName ? ' ' + escapeHtml(actor.displayName) : '') +
+          '</span>' +
+        '</button>'
+      )).join("");
+      list.hidden = false;
+    }, 250);
+
+    function handleTypeaheadInput(input) {
+      const query = input.value.trim().replace(/^@/, "");
+      const list = typeaheadListFor(input);
+
+      if (query.length < 2) {
+        if (list) {
+          list.hidden = true;
+          list.innerHTML = "";
+        }
+        return;
+      }
+      runTypeahead(input.id, query);
+    }
+
     function renderBsky() {
       if (!els.bskyBody) return;
       const me = state.me;
@@ -5851,7 +6010,7 @@ function renderAppHtml() {
         els.bskyStateLabel.textContent = "signed out";
         els.bskyBody.innerHTML =
           renderChallengeBanner() +
-          '<input id="bskyHandleInput" data-bsky-enter="login" placeholder="you.bsky.social" autocomplete="username">' +
+          renderTypeaheadInput("bskyHandleInput", "you.bsky.social", "login") +
           '<button class="primary" type="button" data-bsky-action="login">Sign in with Bluesky</button>' +
           '<div class="subtle">Uses Bluesky OAuth and only asks for permission to create posts.</div>';
         return;
@@ -5883,7 +6042,7 @@ function renderAppHtml() {
 
       if (me.inatLogin) {
         html += '<div class="subtle"><strong>Challenge a player</strong> (uses your selected 5)</div>' +
-          '<input id="challengeHandleInput" data-bsky-enter="challenge-send" placeholder="opponent.bsky.social">' +
+          renderTypeaheadInput("challengeHandleInput", "opponent.bsky.social", "challenge-send") +
           '<input id="challengeMessageInput" placeholder="Optional taunt (140 chars)" maxlength="140">' +
           '<button class="primary" type="button" data-bsky-action="challenge-send">Send Challenge via Bluesky</button>';
       }
