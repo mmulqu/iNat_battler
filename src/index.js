@@ -6,6 +6,23 @@ import {
   resolveTurn
 } from "./game.js";
 
+import {
+  buildChallengePostRecord,
+  clientMetadataDocument,
+  exchangeAuthorizationCode,
+  fetchPublicProfile,
+  generateDpopKeyPair,
+  getAuthServerMeta,
+  oauthClientConfig,
+  pdsXrpcCall,
+  pkceChallengeFromVerifier,
+  pushedAuthorizationRequest,
+  randomToken,
+  refreshAccessToken,
+  resolveIdentity,
+  searchActorsTypeahead
+} from "./atproto.js";
+
 const ASSET_VERSION = 1;
 const DEFAULT_ASSET_KIND = "sprite_sheet";
 const INAT_SPECIES_CACHE_TTL_SECONDS = 6 * 60 * 60;
@@ -39,7 +56,7 @@ export default {
       console.error(error);
       return jsonResponse(
         { error: error instanceof Error ? error.message : "Unexpected error" },
-        500
+        Number.isInteger(error?.status) ? error.status : 500
       );
     }
   },
@@ -94,6 +111,74 @@ async function routeRequest(request, env, ctx) {
 
   if (url.pathname.startsWith("/api/assets/")) {
     return serveAsset(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/oauth/client-metadata.json") {
+    return jsonResponse(clientMetadataDocument(env, url.origin));
+  }
+
+  if (request.method === "GET" && url.pathname === "/oauth/callback") {
+    return handleOAuthCallback(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/login") {
+    const payload = await readJson(request);
+    return jsonResponse(await beginBlueskyLogin(env, url.origin, payload));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+    return handleLogout(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/me") {
+    return jsonResponse(await getMe(request, env));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/bsky/typeahead") {
+    const actors = await searchActorsTypeahead(url.searchParams.get("q"), 8);
+    return jsonResponse({ actors });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/inat/link/start") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await startInatLink(env, session, payload.inatLogin));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/inat/link/confirm") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await confirmInatLink(env, session));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/challenges") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await createChallenge(env, url.origin, session, payload));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/challenges") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await listChallengesForSession(env, session));
+  }
+
+  const challengeAcceptMatch = url.pathname.match(/^\/api\/challenges\/([^/]+)\/accept$/);
+  if (request.method === "POST" && challengeAcceptMatch) {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(
+      await acceptChallenge(env, session, decodeURIComponent(challengeAcceptMatch[1]), payload.taxonIds ?? [])
+    );
+  }
+
+  const challengeDeclineMatch = url.pathname.match(/^\/api\/challenges\/([^/]+)\/decline$/);
+  if (request.method === "POST" && challengeDeclineMatch) {
+    const session = await requireSession(request, env);
+    return jsonResponse(await declineChallenge(env, session, decodeURIComponent(challengeDeclineMatch[1])));
+  }
+
+  const challengeMatch = url.pathname.match(/^\/api\/challenges\/([^/]+)$/);
+  if (request.method === "GET" && challengeMatch) {
+    return jsonResponse(await getChallengePublic(env, decodeURIComponent(challengeMatch[1])));
   }
 
   if (request.method === "POST" && url.pathname === "/api/import") {
@@ -2319,7 +2404,7 @@ async function listTeams(env, userId) {
   }));
 }
 
-async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
+async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix) {
   const cleanTaxonIds = taxonIds
     .map((taxonId) => Number.parseInt(taxonId, 10))
     .filter(Number.isFinite)
@@ -2377,13 +2462,18 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
   ).all();
 
   const byId = new Map((rows.results ?? []).map((row) => [Number(row.taxon_id), row]));
-  const creatures = cleanTaxonIds.map((taxonId, index) => {
+  return cleanTaxonIds.map((taxonId, index) => {
     const row = byId.get(taxonId);
     if (!row) throw new Error(`Taxon ${taxonId} is not a ready sprite in this user's roster`);
 
     const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
-    return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `p-${index}`);
+    return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `${idPrefix}-${index}`);
   });
+}
+
+async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
+  const creatures = await loadUserBattleCreatures(env, userId, taxonIds, "p");
+  const cleanTaxonIds = creatures.map((creature) => Number(creature.taxonId)).filter(Number.isFinite);
   const opponent = await createRandomReadyNpcTeam(env, cleanTaxonIds, 5);
 
   const now = new Date().toISOString();
@@ -2628,11 +2718,15 @@ async function submitBattleMove(env, battleId, moveId) {
       VALUES (?, ?, ?, ?, ?)
     `).bind(
       battleId,
-      next.status === "won" ? next.player.userId ?? null : null,
-      next.status === "lost" ? next.player.userId ?? null : null,
+      next.status === "won" ? next.player.userId ?? null : next.opponent?.userId ?? null,
+      next.status === "won" ? next.opponent?.userId ?? null : next.player.userId ?? null,
       JSON.stringify({ status: next.status, turns: next.turn - 1 }),
       now
     ).run();
+
+    await env.DB.prepare(`
+      UPDATE challenges SET status = 'completed', updated_at = ? WHERE battle_id = ?
+    `).bind(now, battleId).run();
   }
 
   return next;
@@ -2658,6 +2752,620 @@ async function assertUserOwnsReadyTaxa(env, userId, taxonIds) {
   if ((rows.results ?? []).length !== taxonIds.length) {
     throw new Error("Team must use 5 ready sprites from this user's roster");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Bluesky (atproto) auth, iNaturalist linking, and battle challenges
+// ---------------------------------------------------------------------------
+
+const SESSION_COOKIE = "inatbattler_sid";
+const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const OAUTH_REQUEST_TTL_MS = 15 * 60 * 1000;
+const CHALLENGE_MESSAGE_MAX_LENGTH = 140;
+
+function httpError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function readCookie(request, name) {
+  const header = request.headers.get("cookie") ?? "";
+  for (const part of header.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return rest.join("=");
+  }
+  return null;
+}
+
+function sessionCookieHeader(token, maxAgeSeconds) {
+  return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
+}
+
+async function getSession(request, env) {
+  const token = readCookie(request, SESSION_COOKIE);
+  if (!token) return null;
+
+  const sessionId = await sha256Hex(token);
+  const row = await env.DB.prepare(`
+    SELECT
+      s.*,
+      a.handle, a.display_name, a.avatar_url,
+      a.inat_login, a.inat_user_id,
+      a.inat_pending_login, a.inat_verification_code
+    FROM oauth_sessions s
+    JOIN accounts a ON a.did = s.did
+    WHERE s.session_id = ?
+  `).bind(sessionId).first();
+
+  if (!row) return null;
+  if (Date.parse(row.expires_at) < Date.now()) {
+    await env.DB.prepare("DELETE FROM oauth_sessions WHERE session_id = ?").bind(sessionId).run();
+    return null;
+  }
+  return row;
+}
+
+async function requireSession(request, env) {
+  const session = await getSession(request, env);
+  if (!session) throw httpError("Sign in with Bluesky first", 401);
+  return session;
+}
+
+function inatUserIdFor(login) {
+  return `inat:${String(login).toLowerCase()}`;
+}
+
+async function beginBlueskyLogin(env, origin, payload) {
+  const returnTo =
+    typeof payload.returnTo === "string" && payload.returnTo.startsWith("/") && !payload.returnTo.startsWith("//")
+      ? payload.returnTo.slice(0, 512)
+      : "/";
+
+  const identity = await resolveIdentity(payload.handle);
+  const authMeta = await getAuthServerMeta(identity.pdsUrl);
+  const { clientId, redirectUri, scope } = oauthClientConfig(env, origin);
+
+  const state = randomToken(32);
+  const pkceVerifier = randomToken(48);
+  const codeChallenge = await pkceChallengeFromVerifier(pkceVerifier);
+  const dpopKey = await generateDpopKeyPair();
+
+  const { requestUri } = await pushedAuthorizationRequest({
+    authMeta,
+    clientId,
+    redirectUri,
+    scope,
+    state,
+    handle: identity.handle,
+    codeChallenge,
+    dpopKey
+  });
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "DELETE FROM oauth_requests WHERE created_at < ?"
+  ).bind(new Date(Date.now() - 4 * OAUTH_REQUEST_TTL_MS).toISOString()).run();
+  await env.DB.prepare(`
+    INSERT INTO oauth_requests (
+      state, did, handle, pds_url, issuer, client_id,
+      pkce_verifier, dpop_private_jwk, dpop_public_jwk, return_to, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    state,
+    identity.did,
+    identity.handle,
+    identity.pdsUrl,
+    authMeta.issuer,
+    clientId,
+    pkceVerifier,
+    JSON.stringify(dpopKey.privateJwk),
+    JSON.stringify(dpopKey.publicJwk),
+    returnTo,
+    now
+  ).run();
+
+  const authorizeUrl = `${authMeta.authorization_endpoint}?${new URLSearchParams({
+    client_id: clientId,
+    request_uri: requestUri
+  })}`;
+  return { authorizeUrl, handle: identity.handle, did: identity.did };
+}
+
+async function handleOAuthCallback(request, env) {
+  const url = new URL(request.url);
+
+  try {
+    const oauthErr = url.searchParams.get("error");
+    if (oauthErr) {
+      throw new Error(url.searchParams.get("error_description") || oauthErr);
+    }
+
+    const state = url.searchParams.get("state") ?? "";
+    const code = url.searchParams.get("code") ?? "";
+    const iss = url.searchParams.get("iss") ?? "";
+    if (!state || !code) throw new Error("Missing state or code");
+
+    const row = await env.DB.prepare("SELECT * FROM oauth_requests WHERE state = ?").bind(state).first();
+    await env.DB.prepare("DELETE FROM oauth_requests WHERE state = ?").bind(state).run();
+    if (!row) throw new Error("Login attempt not found or already used. Try signing in again.");
+    if (Date.parse(row.created_at) < Date.now() - OAUTH_REQUEST_TTL_MS) {
+      throw new Error("Login attempt expired. Try signing in again.");
+    }
+    if (iss && iss.replace(/\/$/, "") !== String(row.issuer).replace(/\/$/, "")) {
+      throw new Error("Authorization server mismatch");
+    }
+
+    const authMeta = await getAuthServerMeta(row.pds_url);
+    const dpopKey = {
+      privateJwk: JSON.parse(row.dpop_private_jwk),
+      publicJwk: JSON.parse(row.dpop_public_jwk)
+    };
+    const { tokens, nonce } = await exchangeAuthorizationCode({
+      authMeta,
+      clientId: row.client_id,
+      redirectUri: oauthClientConfig(env, url.origin).redirectUri,
+      code,
+      pkceVerifier: row.pkce_verifier,
+      dpopKey
+    });
+    if (tokens.sub !== row.did) throw new Error("Signed-in account does not match the requested handle");
+
+    const profile = await fetchPublicProfile(row.did);
+    const now = new Date().toISOString();
+    await env.DB.prepare(`
+      INSERT INTO accounts (did, handle, display_name, avatar_url, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(did) DO UPDATE SET
+        handle = excluded.handle,
+        display_name = excluded.display_name,
+        avatar_url = excluded.avatar_url,
+        updated_at = excluded.updated_at
+    `).bind(
+      row.did,
+      profile.handle ?? row.handle,
+      profile.displayName,
+      profile.avatarUrl,
+      now,
+      now
+    ).run();
+
+    const sessionToken = randomToken(32);
+    const sessionId = await sha256Hex(sessionToken);
+    const tokenExpiresAt = new Date(Date.now() + Number(tokens.expires_in ?? 300) * 1000).toISOString();
+    const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString();
+
+    await env.DB.prepare(`
+      INSERT INTO oauth_sessions (
+        session_id, did, pds_url, issuer, client_id,
+        access_token, refresh_token, token_expires_at,
+        dpop_private_jwk, dpop_public_jwk, auth_nonce,
+        expires_at, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      sessionId,
+      row.did,
+      row.pds_url,
+      row.issuer,
+      row.client_id,
+      tokens.access_token,
+      tokens.refresh_token ?? null,
+      tokenExpiresAt,
+      row.dpop_private_jwk,
+      row.dpop_public_jwk,
+      nonce ?? null,
+      sessionExpiresAt,
+      now,
+      now
+    ).run();
+
+    const returnTo = typeof row.return_to === "string" && row.return_to.startsWith("/") ? row.return_to : "/";
+    return new Response(null, {
+      status: 303,
+      headers: {
+        location: returnTo,
+        "set-cookie": sessionCookieHeader(sessionToken, SESSION_TTL_SECONDS)
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    const message = error instanceof Error ? error.message : "Bluesky sign-in failed";
+    return new Response(null, {
+      status: 303,
+      headers: { location: `/?authError=${encodeURIComponent(message)}` }
+    });
+  }
+}
+
+async function handleLogout(request, env) {
+  const token = readCookie(request, SESSION_COOKIE);
+  if (token) {
+    const sessionId = await sha256Hex(token);
+    await env.DB.prepare("DELETE FROM oauth_sessions WHERE session_id = ?").bind(sessionId).run();
+  }
+  return new Response(JSON.stringify({ ok: true }), {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "set-cookie": sessionCookieHeader("", 0)
+    }
+  });
+}
+
+async function getMe(request, env) {
+  const session = await getSession(request, env);
+  if (!session) return { loggedIn: false };
+
+  const pending = await env.DB.prepare(`
+    SELECT COUNT(*) AS pending
+    FROM challenges
+    WHERE opponent_did = ? AND status = 'pending'
+  `).bind(session.did).first();
+
+  return {
+    loggedIn: true,
+    did: session.did,
+    handle: session.handle,
+    displayName: session.display_name,
+    avatarUrl: session.avatar_url,
+    inatLogin: session.inat_login,
+    inatUserId: session.inat_user_id,
+    userId: session.inat_login ? inatUserIdFor(session.inat_login) : null,
+    inatPendingLogin: session.inat_pending_login,
+    inatVerificationCode: session.inat_verification_code,
+    pendingChallenges: Number(pending?.pending ?? 0)
+  };
+}
+
+async function ensureFreshAccessToken(env, session) {
+  const expiresAt = Date.parse(session.token_expires_at ?? "");
+  if (Number.isFinite(expiresAt) && expiresAt - Date.now() > 60_000) return session;
+  if (!session.refresh_token) throw httpError("Bluesky session expired. Sign in again.", 401);
+
+  const authMeta = await getAuthServerMeta(session.pds_url);
+  const dpopKey = {
+    privateJwk: JSON.parse(session.dpop_private_jwk),
+    publicJwk: JSON.parse(session.dpop_public_jwk)
+  };
+
+  let refreshed;
+  try {
+    refreshed = await refreshAccessToken({
+      authMeta,
+      clientId: session.client_id,
+      refreshToken: session.refresh_token,
+      dpopKey,
+      nonce: session.auth_nonce
+    });
+  } catch (error) {
+    if (error?.code === "ATPROTO_REFRESH_FAILED") {
+      await env.DB.prepare("DELETE FROM oauth_sessions WHERE session_id = ?").bind(session.session_id).run();
+      throw httpError("Bluesky session expired. Sign in again.", 401);
+    }
+    throw error;
+  }
+
+  const { tokens, nonce } = refreshed;
+  const now = new Date().toISOString();
+  const tokenExpiresAt = new Date(Date.now() + Number(tokens.expires_in ?? 300) * 1000).toISOString();
+  await env.DB.prepare(`
+    UPDATE oauth_sessions
+    SET access_token = ?, refresh_token = ?, token_expires_at = ?, auth_nonce = ?, updated_at = ?
+    WHERE session_id = ?
+  `).bind(
+    tokens.access_token,
+    tokens.refresh_token ?? session.refresh_token,
+    tokenExpiresAt,
+    nonce ?? session.auth_nonce,
+    now,
+    session.session_id
+  ).run();
+
+  return {
+    ...session,
+    access_token: tokens.access_token,
+    refresh_token: tokens.refresh_token ?? session.refresh_token,
+    token_expires_at: tokenExpiresAt,
+    auth_nonce: nonce ?? session.auth_nonce
+  };
+}
+
+async function createSessionPost(env, session, record) {
+  const fresh = await ensureFreshAccessToken(env, session);
+  const dpopKey = {
+    privateJwk: JSON.parse(fresh.dpop_private_jwk),
+    publicJwk: JSON.parse(fresh.dpop_public_jwk)
+  };
+
+  const result = await pdsXrpcCall(
+    {
+      pdsUrl: fresh.pds_url,
+      accessToken: fresh.access_token,
+      dpopKey,
+      nonce: fresh.pds_nonce
+    },
+    "com.atproto.repo.createRecord",
+    { repo: fresh.did, collection: "app.bsky.feed.post", record }
+  );
+
+  if (result.nonce && result.nonce !== fresh.pds_nonce) {
+    await env.DB.prepare("UPDATE oauth_sessions SET pds_nonce = ? WHERE session_id = ?")
+      .bind(result.nonce, fresh.session_id).run();
+  }
+  if (!result.ok) {
+    throw new Error(`Bluesky post failed: ${result.data?.message || result.data?.error || `status ${result.status}`}`);
+  }
+  return result.data;
+}
+
+function generateVerificationCode() {
+  const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  const suffix = Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+  return `inat-battler-${suffix}`;
+}
+
+async function startInatLink(env, session, rawLogin) {
+  const inatLogin = normalizeInatLogin(rawLogin);
+  const code = generateVerificationCode();
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    UPDATE accounts
+    SET inat_pending_login = ?, inat_verification_code = ?, updated_at = ?
+    WHERE did = ?
+  `).bind(inatLogin, code, now, session.did).run();
+
+  return {
+    inatLogin,
+    code,
+    editProfileUrl: "https://www.inaturalist.org/users/edit",
+    instructions:
+      `Add "${code}" anywhere in the bio/description of the iNaturalist profile "${inatLogin}" ` +
+      "(Account Settings -> Profile), save it, then click Verify. You can remove the code afterwards."
+  };
+}
+
+async function fetchInatUserProfile(login) {
+  // The v2 API returns profile bios (v1 /users/{id} does not) and accepts logins directly.
+  const res = await fetch(
+    `https://api.inaturalist.org/v2/users/${encodeURIComponent(login)}?fields=id,login,description`,
+    { headers: { accept: "application/json" } }
+  );
+  if (res.status === 404) throw httpError(`iNaturalist user "${login}" was not found`, 404);
+  if (!res.ok) throw httpError(`iNaturalist lookup failed (${res.status}). Try again shortly.`, 502);
+
+  const data = await res.json();
+  const profile = (data.results ?? []).find(
+    (candidate) => String(candidate.login ?? "").toLowerCase() === login.toLowerCase()
+  );
+  if (!profile) throw httpError(`iNaturalist user "${login}" was not found`, 404);
+  return profile;
+}
+
+async function confirmInatLink(env, session) {
+  const pendingLogin = session.inat_pending_login;
+  const code = session.inat_verification_code;
+  if (!pendingLogin || !code) throw httpError("Start the iNaturalist link first", 400);
+
+  const profile = await fetchInatUserProfile(pendingLogin);
+  const description = String(profile.description ?? "");
+  if (!description.includes(code)) {
+    throw httpError(
+      `Could not find "${code}" in the iNaturalist profile bio for "${pendingLogin}". ` +
+      "Save the bio with the code included, then verify again.",
+      400
+    );
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    UPDATE accounts
+    SET inat_login = ?, inat_user_id = ?, inat_verified_at = ?,
+        inat_pending_login = NULL, inat_verification_code = NULL, updated_at = ?
+    WHERE did = ?
+  `).bind(profile.login, profile.id, now, now, session.did).run();
+
+  const importResult = await importUserByLogin(env, profile.login);
+  return {
+    ok: true,
+    inatLogin: profile.login,
+    inatUserId: profile.id,
+    userId: importResult.userId,
+    importedTaxa: importResult.importedTaxa,
+    queuedSprites: importResult.queuedSprites,
+    warning: importResult.warning ?? null
+  };
+}
+
+function sanitizeChallengeMessage(rawMessage) {
+  const message = String(rawMessage ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return message ? message.slice(0, CHALLENGE_MESSAGE_MAX_LENGTH) : null;
+}
+
+async function createChallenge(env, origin, session, payload) {
+  if (!session.inat_login) {
+    throw httpError("Link your iNaturalist account before challenging other players", 400);
+  }
+
+  const taxonIds = (payload.taxonIds ?? [])
+    .map((taxonId) => Number.parseInt(taxonId, 10))
+    .filter(Number.isFinite)
+    .slice(0, 5);
+  if (taxonIds.length !== 5) throw httpError("Pick exactly 5 ready creatures for your challenge team", 400);
+
+  const challengerUserId = inatUserIdFor(session.inat_login);
+  await assertUserOwnsReadyTaxa(env, challengerUserId, taxonIds);
+
+  const opponent = await resolveIdentity(payload.opponentHandle);
+  if (opponent.did === session.did) throw httpError("You cannot challenge yourself", 400);
+
+  const challengeId = randomId("chal");
+  const challengeUrl = `${origin}/?challenge=${challengeId}`;
+  const message = sanitizeChallengeMessage(payload.message);
+
+  let postUri = null;
+  let postError = null;
+  try {
+    const record = buildChallengePostRecord({
+      opponentHandle: opponent.handle,
+      opponentDid: opponent.did,
+      challengeUrl,
+      message
+    });
+    const post = await createSessionPost(env, session, record);
+    postUri = post?.uri ?? null;
+  } catch (error) {
+    if (error?.status === 401) throw error;
+    postError = error instanceof Error ? error.message : "Bluesky post failed";
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    INSERT INTO challenges (
+      challenge_id, challenger_did, challenger_handle, challenger_inat_login,
+      opponent_did, opponent_handle, team_json, message,
+      status, post_uri, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+  `).bind(
+    challengeId,
+    session.did,
+    session.handle,
+    session.inat_login,
+    opponent.did,
+    opponent.handle,
+    JSON.stringify(taxonIds),
+    message,
+    postUri,
+    now,
+    now
+  ).run();
+
+  return {
+    challengeId,
+    challengeUrl,
+    opponentHandle: opponent.handle,
+    opponentDid: opponent.did,
+    status: "pending",
+    postUri,
+    postError
+  };
+}
+
+function challengeSummary(row, viewerDid = null) {
+  return {
+    challengeId: row.challenge_id,
+    direction: viewerDid ? (row.challenger_did === viewerDid ? "outgoing" : "incoming") : null,
+    challengerHandle: row.challenger_handle,
+    challengerDid: row.challenger_did,
+    opponentHandle: row.opponent_handle,
+    opponentDid: row.opponent_did,
+    message: row.message,
+    status: row.status,
+    battleId: row.battle_id,
+    postUri: row.post_uri,
+    createdAt: row.created_at
+  };
+}
+
+async function listChallengesForSession(env, session) {
+  const rows = await env.DB.prepare(`
+    SELECT *
+    FROM challenges
+    WHERE challenger_did = ? OR opponent_did = ?
+    ORDER BY created_at DESC
+    LIMIT 25
+  `).bind(session.did, session.did).all();
+
+  return { challenges: (rows.results ?? []).map((row) => challengeSummary(row, session.did)) };
+}
+
+async function getChallengePublic(env, challengeId) {
+  const row = await env.DB.prepare("SELECT * FROM challenges WHERE challenge_id = ?").bind(challengeId).first();
+  if (!row) throw httpError("Challenge not found", 404);
+  return challengeSummary(row);
+}
+
+async function acceptChallenge(env, session, challengeId, rawTaxonIds) {
+  const row = await env.DB.prepare("SELECT * FROM challenges WHERE challenge_id = ?").bind(challengeId).first();
+  if (!row) throw httpError("Challenge not found", 404);
+  if (row.opponent_did !== session.did) throw httpError("This challenge was sent to a different Bluesky account", 403);
+  if (row.status !== "pending") throw httpError(`This challenge is already ${row.status}`, 400);
+  if (!session.inat_login) throw httpError("Link your iNaturalist account before battling", 400);
+
+  const taxonIds = (rawTaxonIds ?? [])
+    .map((taxonId) => Number.parseInt(taxonId, 10))
+    .filter(Number.isFinite)
+    .slice(0, 5);
+  if (taxonIds.length !== 5) throw httpError("Pick exactly 5 ready creatures to battle with", 400);
+
+  const accepterUserId = inatUserIdFor(session.inat_login);
+  await assertUserOwnsReadyTaxa(env, accepterUserId, taxonIds);
+
+  const challengerUserId = inatUserIdFor(row.challenger_inat_login);
+  const challengerTaxonIds = JSON.parse(row.team_json);
+
+  const playerCreatures = await loadUserBattleCreatures(env, accepterUserId, taxonIds, "p");
+  const opponentCreatures = await loadUserBattleCreatures(env, challengerUserId, challengerTaxonIds, "o");
+
+  const now = new Date().toISOString();
+  const battleId = randomId("battle");
+  const seed = randomId("seed");
+  const state = {
+    battleId,
+    mode: "pvp_async",
+    challengeId,
+    seed,
+    turn: 1,
+    player: { userId: accepterUserId, name: `@${session.handle}`, activeIndex: 0, creatures: playerCreatures },
+    opponent: { userId: challengerUserId, name: `@${row.challenger_handle}`, activeIndex: 0, creatures: opponentCreatures },
+    log: [{ turn: 0, text: `@${row.challenger_handle}'s team answers the field. Challenge accepted!` }],
+    status: "active"
+  };
+
+  await env.DB.prepare(`
+    INSERT INTO battle_instances (
+      battle_id, mode, attacker_user_id, defender_user_id,
+      state_json, seed, turn, status, created_at, updated_at
+    )
+    VALUES (?, 'pvp_async', ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    battleId,
+    accepterUserId,
+    challengerUserId,
+    JSON.stringify(state),
+    seed,
+    state.turn,
+    state.status,
+    now,
+    now
+  ).run();
+
+  await env.DB.prepare(`
+    UPDATE challenges SET status = 'accepted', battle_id = ?, updated_at = ? WHERE challenge_id = ?
+  `).bind(battleId, now, challengeId).run();
+
+  return state;
+}
+
+async function declineChallenge(env, session, challengeId) {
+  const row = await env.DB.prepare("SELECT * FROM challenges WHERE challenge_id = ?").bind(challengeId).first();
+  if (!row) throw httpError("Challenge not found", 404);
+  if (row.opponent_did !== session.did) throw httpError("This challenge was sent to a different Bluesky account", 403);
+  if (row.status !== "pending") throw httpError(`This challenge is already ${row.status}`, 400);
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    UPDATE challenges SET status = 'declined', updated_at = ? WHERE challenge_id = ?
+  `).bind(now, challengeId).run();
+
+  return { challengeId, status: "declined" };
 }
 
 async function serveAsset(request, env) {
@@ -3616,6 +4324,148 @@ function renderAppHtml() {
       border-top: 1px solid var(--line);
     }
 
+    .bsky-panel {
+      margin-top: 0;
+      padding-top: 0;
+      border-top: 0;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .bsky-body {
+      display: grid;
+      gap: 8px;
+      font-size: 0.85rem;
+    }
+
+    .bsky-body input {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 10px;
+      background: var(--surface);
+      color: var(--ink);
+    }
+
+    .bsky-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .bsky-row strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .typeahead {
+      position: relative;
+      min-width: 0;
+    }
+
+    .typeahead-list {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      z-index: 30;
+      display: grid;
+      max-height: 230px;
+      overflow: auto;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    .typeahead-item {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      padding: 7px 10px;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid #eef1ea;
+      text-align: left;
+      font-size: 0.8rem;
+      color: var(--ink);
+    }
+
+    .typeahead-item:last-child {
+      border-bottom: 0;
+    }
+
+    .typeahead-item:hover,
+    .typeahead-item:focus {
+      background: #eef3ec;
+    }
+
+    .typeahead-item img,
+    .typeahead-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+      background: #e3e8e0;
+    }
+
+    .typeahead-item span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .bsky-code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #eef3ec;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 4px 8px;
+      user-select: all;
+      overflow-wrap: anywhere;
+    }
+
+    .challenge-banner {
+      border: 1px solid var(--blue);
+      border-radius: 8px;
+      padding: 8px;
+      background: #eef2fa;
+      display: grid;
+      gap: 6px;
+    }
+
+    .challenge-item {
+      display: grid;
+      gap: 4px;
+      padding: 6px 0;
+      border-bottom: 1px solid #e5e9e2;
+      font-size: 0.8rem;
+    }
+
+    .challenge-item:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .challenge-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .challenge-actions .secondary,
+    .bsky-body .secondary,
+    .bsky-body .primary {
+      min-height: 34px;
+      padding: 0 10px;
+      font-size: 0.8rem;
+    }
+
     .dev-batch-head {
       display: flex;
       justify-content: space-between;
@@ -4373,6 +5223,13 @@ function renderAppHtml() {
 
     <section class="layout">
       <aside class="panel">
+        <div class="dev-batch bsky-panel">
+          <div class="dev-batch-head">
+            <h2>Bluesky Battles</h2>
+            <span class="subtle" id="bskyStateLabel">signed out</span>
+          </div>
+          <div id="bskyBody" class="bsky-body">Loading Bluesky session…</div>
+        </div>
         <h2>Account</h2>
         <div class="stats">
           <div class="stat">
@@ -4500,7 +5357,12 @@ function renderAppHtml() {
       battle: null,
       battleAnimation: "anim-idle",
       battleBusy: false,
-      polling: null
+      polling: null,
+      me: null,
+      challenges: [],
+      challengeInfo: null,
+      inatLinkPending: null,
+      bskyBusy: false
     };
 
     const els = {
@@ -4546,7 +5408,9 @@ function renderAppHtml() {
       spriteTreePanel: document.getElementById("spriteTreePanel"),
       rosterGrid: document.getElementById("rosterGrid"),
       emptyState: document.getElementById("emptyState"),
-      battlePanel: document.getElementById("battlePanel")
+      battlePanel: document.getElementById("battlePanel"),
+      bskyStateLabel: document.getElementById("bskyStateLabel"),
+      bskyBody: document.getElementById("bskyBody")
     };
 
     els.input.value = state.inatLogin;
@@ -4736,6 +5600,47 @@ function renderAppHtml() {
       toggleTeamSelection(card.getAttribute("data-taxon-id"));
     });
 
+    els.bskyBody.addEventListener("click", (event) => {
+      const pick = event.target.closest("[data-typeahead-pick]");
+      if (pick) {
+        const input = document.getElementById(pick.getAttribute("data-input-id"));
+        if (input) {
+          input.value = pick.getAttribute("data-typeahead-pick");
+          input.focus();
+        }
+        closeTypeaheadLists();
+        return;
+      }
+
+      const button = event.target.closest("[data-bsky-action]");
+      if (!button) return;
+      handleBskyAction(button.getAttribute("data-bsky-action"), button.getAttribute("data-challenge-id"));
+    });
+
+    els.bskyBody.addEventListener("input", (event) => {
+      if (event.target.getAttribute && event.target.getAttribute("data-bsky-typeahead")) {
+        handleTypeaheadInput(event.target);
+      }
+    });
+
+    els.bskyBody.addEventListener("keydown", (event) => {
+      if (event.target.tagName !== "INPUT") return;
+
+      if (event.key === "Escape") {
+        closeTypeaheadLists();
+        return;
+      }
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      closeTypeaheadLists();
+      const action = event.target.getAttribute("data-bsky-enter");
+      if (action) handleBskyAction(action, null);
+    });
+
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".typeahead")) closeTypeaheadLists();
+    });
+
     if (state.userId) {
       loadRoster();
     }
@@ -4743,6 +5648,7 @@ function renderAppHtml() {
     renderBatchQueue();
     hydrateBatchTracker();
     hydrateGlobalSeedStatus();
+    initBlueskySession();
 
     async function importRoster(inatLogin) {
       setBusy(true, "Importing roster");
@@ -4767,6 +5673,385 @@ function renderAppHtml() {
       } finally {
         setBusy(false);
       }
+    }
+
+    async function initBlueskySession() {
+      const params = new URLSearchParams(window.location.search);
+      const authError = params.get("authError");
+      if (authError) {
+        setStatus("Bluesky sign-in failed: " + authError);
+        window.history.replaceState({}, "", window.location.pathname);
+      }
+
+      const challengeId = params.get("challenge");
+      if (challengeId) {
+        try {
+          state.challengeInfo = await apiFetch("/api/challenges/" + encodeURIComponent(challengeId));
+        } catch (error) {
+          setStatus(error.message);
+        }
+      }
+
+      await refreshMe();
+    }
+
+    async function refreshMe() {
+      try {
+        state.me = await apiFetch("/api/me");
+      } catch (error) {
+        state.me = { loggedIn: false };
+      }
+
+      if (state.me.loggedIn) {
+        try {
+          const res = await apiFetch("/api/challenges");
+          state.challenges = res.challenges || [];
+        } catch (error) {
+          state.challenges = [];
+        }
+
+        if (state.me.userId && state.me.userId !== state.userId) {
+          state.userId = state.me.userId;
+          state.inatLogin = state.me.inatLogin || "";
+          localStorage.setItem("inatBattler:userId", state.userId);
+          localStorage.setItem("inatBattler:inatLogin", state.inatLogin);
+          els.input.value = state.inatLogin;
+          try {
+            await loadRoster();
+          } catch (error) {
+            setStatus(error.message);
+          }
+        }
+      } else {
+        state.challenges = [];
+      }
+
+      renderBsky();
+    }
+
+    function selectedTeamIds() {
+      return Array.from(state.selectedTaxa).map(Number);
+    }
+
+    async function handleBskyAction(action, challengeId) {
+      if (state.bskyBusy) return;
+      state.bskyBusy = true;
+
+      try {
+        if (action === "login") await bskyLogin();
+        else if (action === "logout") await bskyLogout();
+        else if (action === "inat-start") await inatLinkStart();
+        else if (action === "inat-confirm") await inatLinkConfirm();
+        else if (action === "challenge-send") await sendChallenge();
+        else if (action === "challenge-accept") await acceptChallengeAction(challengeId);
+        else if (action === "challenge-decline") await declineChallengeAction(challengeId);
+        else if (action === "battle-open") await openBattle(challengeId);
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.bskyBusy = false;
+        renderBsky();
+      }
+    }
+
+    async function bskyLogin() {
+      const input = document.getElementById("bskyHandleInput");
+      const handle = input ? input.value.trim() : "";
+      if (!handle) {
+        setStatus("Enter your Bluesky handle (like name.bsky.social).");
+        return;
+      }
+
+      setStatus("Contacting your Bluesky host…");
+      const res = await apiFetch("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ handle: handle, returnTo: window.location.pathname + window.location.search })
+      });
+      window.location.href = res.authorizeUrl;
+    }
+
+    async function bskyLogout() {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+      state.me = { loggedIn: false };
+      state.challenges = [];
+      setStatus("Signed out of Bluesky.");
+    }
+
+    async function inatLinkStart() {
+      const input = document.getElementById("inatLinkInput");
+      const login = input ? input.value.trim() : "";
+      if (!login) {
+        setStatus("Enter your iNaturalist username first.");
+        return;
+      }
+
+      await apiFetch("/api/inat/link/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ inatLogin: login })
+      });
+      setStatus("Code created. Add it to your iNaturalist profile bio, save, then click Verify.");
+      await refreshMe();
+    }
+
+    async function inatLinkConfirm() {
+      setStatus("Checking your iNaturalist profile…");
+      const res = await apiFetch("/api/inat/link/confirm", { method: "POST" });
+      setStatus("Linked iNaturalist account " + res.inatLogin + ". Imported " + res.importedTaxa + " taxa. You can remove the code from your bio now.");
+      await refreshMe();
+    }
+
+    async function sendChallenge() {
+      const team = selectedTeamIds();
+      if (team.length !== 5) {
+        setStatus("Select exactly 5 ready sprites for your challenge team first.");
+        return;
+      }
+
+      const handleInput = document.getElementById("challengeHandleInput");
+      const messageInput = document.getElementById("challengeMessageInput");
+      const opponentHandle = handleInput ? handleInput.value.trim() : "";
+      if (!opponentHandle) {
+        setStatus("Enter the opponent's Bluesky handle.");
+        return;
+      }
+
+      setStatus("Creating challenge and posting to Bluesky…");
+      const res = await apiFetch("/api/challenges", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          opponentHandle: opponentHandle,
+          message: messageInput ? messageInput.value : "",
+          taxonIds: team
+        })
+      });
+
+      if (res.postError) {
+        setStatus("Challenge saved, but the Bluesky post failed: " + res.postError);
+      } else {
+        setStatus("Challenge sent! Posted to Bluesky for @" + res.opponentHandle + ".");
+      }
+      await refreshMe();
+    }
+
+    async function acceptChallengeAction(challengeId) {
+      if (!challengeId) return;
+      const team = selectedTeamIds();
+      if (team.length !== 5) {
+        setStatus("Select exactly 5 ready sprites from your roster, then accept.");
+        return;
+      }
+
+      const battle = await apiFetch("/api/challenges/" + encodeURIComponent(challengeId) + "/accept", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ taxonIds: team })
+      });
+
+      state.battle = battle;
+      state.battleAnimation = "anim-idle";
+      if (state.challengeInfo && state.challengeInfo.challengeId === challengeId) {
+        state.challengeInfo = null;
+      }
+      setStatus("Challenge accepted. Battle on!");
+      renderBattle();
+      await refreshMe();
+    }
+
+    async function declineChallengeAction(challengeId) {
+      if (!challengeId) return;
+      await apiFetch("/api/challenges/" + encodeURIComponent(challengeId) + "/decline", { method: "POST" });
+      if (state.challengeInfo && state.challengeInfo.challengeId === challengeId) {
+        state.challengeInfo = null;
+      }
+      setStatus("Challenge declined.");
+      await refreshMe();
+    }
+
+    async function openBattle(battleId) {
+      if (!battleId) return;
+      state.battle = await apiFetch("/api/battles/" + encodeURIComponent(battleId));
+      state.battleAnimation = "anim-idle";
+      renderBattle();
+    }
+
+    function renderChallengeBanner() {
+      const info = state.challengeInfo;
+      if (!info) return "";
+
+      const me = state.me;
+      const body = '<div><strong>@' + escapeHtml(info.challengerHandle) + '</strong> challenged <strong>@' +
+        escapeHtml(info.opponentHandle) + '</strong>' +
+        (info.message ? ': "' + escapeHtml(info.message) + '"' : " to an iNat Battle!") + '</div>';
+
+      if (info.status !== "pending") {
+        return '<div class="challenge-banner">' + body + '<div class="subtle">This challenge is ' + escapeHtml(info.status) + '.</div></div>';
+      }
+      if (!me || !me.loggedIn) {
+        return '<div class="challenge-banner">' + body + '<div class="subtle">Sign in with Bluesky as @' + escapeHtml(info.opponentHandle) + ' to battle.</div></div>';
+      }
+      if (me.did !== info.opponentDid) {
+        return '<div class="challenge-banner">' + body + '<div class="subtle">This challenge was sent to @' + escapeHtml(info.opponentHandle) + ', not your account.</div></div>';
+      }
+
+      const hint = me.inatLogin
+        ? "Select 5 ready sprites from your roster, then accept."
+        : "Link your iNaturalist account below, import your roster, select 5 sprites, then accept.";
+      return '<div class="challenge-banner">' + body +
+        '<div class="subtle">' + hint + '</div>' +
+        '<div class="challenge-actions">' +
+          '<button class="primary" type="button" data-bsky-action="challenge-accept" data-challenge-id="' + escapeAttr(info.challengeId) + '">Accept &amp; Battle</button>' +
+          '<button class="secondary" type="button" data-bsky-action="challenge-decline" data-challenge-id="' + escapeAttr(info.challengeId) + '">Decline</button>' +
+        '</div></div>';
+    }
+
+    function renderChallengeItem(challenge) {
+      const isIncoming = challenge.direction === "incoming";
+      const other = isIncoming ? challenge.challengerHandle : challenge.opponentHandle;
+      let actions = "";
+
+      if (isIncoming && challenge.status === "pending") {
+        actions = '<div class="challenge-actions">' +
+          '<button class="secondary" type="button" data-bsky-action="challenge-accept" data-challenge-id="' + escapeAttr(challenge.challengeId) + '">Accept</button>' +
+          '<button class="secondary" type="button" data-bsky-action="challenge-decline" data-challenge-id="' + escapeAttr(challenge.challengeId) + '">Decline</button>' +
+        '</div>';
+      } else if (challenge.battleId && challenge.status === "accepted") {
+        actions = '<div class="challenge-actions">' +
+          '<button class="secondary" type="button" data-bsky-action="battle-open" data-challenge-id="' + escapeAttr(challenge.battleId) + '">Open Battle</button>' +
+        '</div>';
+      }
+
+      return '<div class="challenge-item">' +
+        '<div>' + (isIncoming ? "From" : "To") + ' <strong>@' + escapeHtml(other) + '</strong> &mdash; ' + escapeHtml(challenge.status) + '</div>' +
+        actions +
+      '</div>';
+    }
+
+    function renderTypeaheadInput(inputId, placeholder, enterAction) {
+      return '<div class="typeahead">' +
+        '<input id="' + escapeAttr(inputId) + '" data-bsky-enter="' + escapeAttr(enterAction) + '" data-bsky-typeahead="1"' +
+          ' placeholder="' + escapeAttr(placeholder) + '" autocomplete="off" spellcheck="false">' +
+        '<div class="typeahead-list" hidden></div>' +
+      '</div>';
+    }
+
+    function typeaheadListFor(input) {
+      return input && input.parentElement ? input.parentElement.querySelector(".typeahead-list") : null;
+    }
+
+    function closeTypeaheadLists() {
+      els.bskyBody.querySelectorAll(".typeahead-list").forEach((list) => {
+        list.hidden = true;
+        list.innerHTML = "";
+      });
+    }
+
+    const runTypeahead = debounce(async (inputId, query) => {
+      const input = document.getElementById(inputId);
+      const list = typeaheadListFor(input);
+      if (!input || !list) return;
+      if (input.value.trim() !== query.trim()) return;
+
+      let actors = [];
+      try {
+        const res = await apiFetch("/api/bsky/typeahead?q=" + encodeURIComponent(query.trim()));
+        actors = res.actors || [];
+      } catch (error) {
+        actors = [];
+      }
+
+      if (input.value.trim() !== query.trim()) return;
+      if (!actors.length) {
+        list.hidden = true;
+        list.innerHTML = "";
+        return;
+      }
+
+      list.innerHTML = actors.map((actor) => (
+        '<button type="button" class="typeahead-item" data-typeahead-pick="' + escapeAttr(actor.handle) + '" data-input-id="' + escapeAttr(inputId) + '">' +
+          (actor.avatar
+            ? '<img src="' + escapeAttr(actor.avatar) + '" alt="" loading="lazy">'
+            : '<span class="typeahead-avatar"></span>') +
+          '<span><strong>@' + escapeHtml(actor.handle) + '</strong>' +
+            (actor.displayName ? ' ' + escapeHtml(actor.displayName) : '') +
+          '</span>' +
+        '</button>'
+      )).join("");
+      list.hidden = false;
+    }, 250);
+
+    function handleTypeaheadInput(input) {
+      const query = input.value.trim().replace(/^@/, "");
+      const list = typeaheadListFor(input);
+
+      if (query.length < 2) {
+        if (list) {
+          list.hidden = true;
+          list.innerHTML = "";
+        }
+        return;
+      }
+      runTypeahead(input.id, query);
+    }
+
+    function renderBsky() {
+      if (!els.bskyBody) return;
+      const me = state.me;
+
+      if (!me) {
+        els.bskyStateLabel.textContent = "loading";
+        els.bskyBody.innerHTML = '<div class="subtle">Loading Bluesky session…</div>';
+        return;
+      }
+
+      if (!me.loggedIn) {
+        els.bskyStateLabel.textContent = "signed out";
+        els.bskyBody.innerHTML =
+          renderChallengeBanner() +
+          renderTypeaheadInput("bskyHandleInput", "you.bsky.social", "login") +
+          '<button class="primary" type="button" data-bsky-action="login">Sign in with Bluesky</button>' +
+          '<div class="subtle">Uses Bluesky OAuth and only asks for permission to create posts.</div>';
+        return;
+      }
+
+      els.bskyStateLabel.textContent = "@" + me.handle;
+
+      let html = '<div class="bsky-row">' +
+        '<strong>' + escapeHtml(me.displayName || "@" + me.handle) + '</strong>' +
+        '<button class="secondary" type="button" data-bsky-action="logout">Sign out</button>' +
+      '</div>';
+
+      if (me.inatLogin) {
+        html += '<div class="subtle">iNaturalist: <strong>' + escapeHtml(me.inatLogin) + '</strong> (verified)</div>';
+      } else {
+        html += '<div class="subtle">Link your iNaturalist account by proving ownership &mdash; no iNat OAuth, no write access:</div>' +
+          '<input id="inatLinkInput" data-bsky-enter="inat-start" placeholder="iNaturalist username" value="' + escapeAttr(me.inatPendingLogin || "") + '">' +
+          '<button class="secondary" type="button" data-bsky-action="inat-start">Get verification code</button>';
+
+        if (me.inatPendingLogin && me.inatVerificationCode) {
+          html += '<div class="bsky-code">' + escapeHtml(me.inatVerificationCode) + '</div>' +
+            '<div class="subtle">Add this code to the profile bio of "' + escapeHtml(me.inatPendingLogin) +
+            '" in <a href="https://www.inaturalist.org/users/edit" target="_blank" rel="noopener">iNaturalist settings</a>, save, then verify. You can remove it afterwards.</div>' +
+            '<button class="primary" type="button" data-bsky-action="inat-confirm">Verify Link</button>';
+        }
+      }
+
+      html += renderChallengeBanner();
+
+      if (me.inatLogin) {
+        html += '<div class="subtle"><strong>Challenge a player</strong> (uses your selected 5)</div>' +
+          renderTypeaheadInput("challengeHandleInput", "opponent.bsky.social", "challenge-send") +
+          '<input id="challengeMessageInput" placeholder="Optional taunt (140 chars)" maxlength="140">' +
+          '<button class="primary" type="button" data-bsky-action="challenge-send">Send Challenge via Bluesky</button>';
+      }
+
+      if (state.challenges.length) {
+        html += '<div class="batch-list">' + state.challenges.map(renderChallengeItem).join("") + '</div>';
+      }
+
+      els.bskyBody.innerHTML = html;
     }
 
     async function loadRoster() {
@@ -5485,7 +6770,7 @@ function renderAppHtml() {
 
       els.battlePanel.innerHTML =
         '<div class="roster-head">' +
-          '<h2>NPC Battle</h2>' +
+          '<h2>' + (battle.mode === "pvp_async" ? "Challenge Battle" : "NPC Battle") + '</h2>' +
           '<span class="subtle">' + escapeHtml(battle.status) + ' / turn ' + Number(battle.turn || 1) + '</span>' +
         '</div>' +
         '<div class="battle-stage">' +

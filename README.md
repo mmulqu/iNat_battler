@@ -145,6 +145,59 @@ curl https://inat-battler.intrinsic3141.workers.dev/api/sprite-batches/<batch_id
 curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/sprite-batches/<batch_id>/sync
 ```
 
+## Bluesky Login & Challenges
+
+Players sign in with their Bluesky account via atproto OAuth, implemented directly in the Worker with WebCrypto (no atproto SDK dependency): handle -> DID -> PDS resolution, authorization server discovery, PAR + PKCE, and DPoP-bound tokens (ES256) with automatic nonce retries and refresh.
+
+The app requests only the granular auth scope it needs:
+
+```text
+atproto repo:app.bsky.feed.post?action=create
+```
+
+so the OAuth consent screen grants nothing beyond creating posts. If a player's PDS predates granular auth scopes, set `OAUTH_SCOPE="atproto transition:generic"` in `wrangler.jsonc` (broad, app-password-equivalent access — avoid unless needed).
+
+Client metadata is served from `/oauth/client-metadata.json` and derived from the request origin. On `localhost`/`127.0.0.1` the Worker automatically switches to the atproto loopback client (`client_id=http://localhost?...`), so `npm run dev` works against real Bluesky accounts with no extra setup.
+
+Sessions are HttpOnly cookies; only a SHA-256 hash of the session token is stored in D1, along with the DPoP key pair and access/refresh tokens.
+
+### Challenge flow
+
+1. A signed-in, iNat-linked player selects 5 ready sprites, enters an opponent's Bluesky handle, and sends a challenge.
+2. The Worker stores the challenge in D1 and writes an `app.bsky.feed.post` record in the challenger's repo with a mention facet (the opponent gets a real Bluesky notification) and a link facet pointing at `/?challenge=<id>`.
+3. The opponent follows the link, signs in with Bluesky, links their iNaturalist account if they haven't, selects 5 ready sprites, and accepts.
+4. The battle starts immediately as an async PvP match: the accepter plays live while the challenger's snapshotted team is piloted by the battle AI. Results land in `battle_results` and the challenge is marked `completed`.
+
+If the Bluesky post fails (e.g. scope rejected), the challenge is still created and the API returns `postError` so the link can be shared manually.
+
+### Linking iNaturalist without iNaturalist OAuth
+
+iNaturalist OAuth is globally scoped, which is far more permission than this app needs — it only ever reads public data. Instead, ownership is proven with a verification code:
+
+1. `POST /api/inat/link/start` returns a one-time code like `inat-battler-x7k2m9pq`.
+2. The player pastes it anywhere in their iNaturalist profile bio and saves.
+3. `POST /api/inat/link/confirm` reads the bio through the public API (`/v2/users/<login>?fields=description`), and on match links the account, imports the roster, and the code can be removed.
+
+No iNat tokens are ever issued or stored.
+
+### Auth & challenge endpoints
+
+```text
+GET  /oauth/client-metadata.json
+GET  /oauth/callback
+POST /api/auth/login            {handle, returnTo?}
+POST /api/auth/logout
+GET  /api/me
+GET  /api/bsky/typeahead?q=<partial-handle>
+POST /api/inat/link/start       {inatLogin}
+POST /api/inat/link/confirm
+POST /api/challenges            {opponentHandle, taxonIds[5], message?}
+GET  /api/challenges
+GET  /api/challenges/:id
+POST /api/challenges/:id/accept {taxonIds[5]}
+POST /api/challenges/:id/decline
+```
+
 ## iNaturalist Rate Limits
 
 Username imports use one `species_counts` page by default to avoid bursty API usage. Successful responses are cached in KV for six hours. If iNaturalist returns `429 Too Many Requests`, the Worker retries once, then uses cached/D1 roster data when available; otherwise the UI asks the user to wait and retry.
