@@ -200,7 +200,7 @@ POST /api/challenges/:id/decline
 
 ## iNaturalist Rate Limits
 
-Username imports use one `species_counts` page by default to avoid bursty API usage. Successful responses are cached in KV for six hours. If iNaturalist returns `429 Too Many Requests`, the Worker retries once, then uses cached/D1 roster data when available; otherwise the UI asks the user to wait and retry.
+Username imports use the iNaturalist v2 `observations/species_counts` endpoint with a narrow `fields` list, one page by default, and a six-hour `ttl`/KV cache to avoid bursty API usage. Manual taxon lookup also uses v2 with trimmed taxon fields and a 24-hour `ttl`. The profile-verification call stays uncached so newly added bio codes can be detected. If iNaturalist returns `429 Too Many Requests`, the Worker retries once, then uses cached/D1 roster data when available; otherwise the UI asks the user to wait and retry.
 
 ## Development Sprites
 

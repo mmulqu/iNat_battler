@@ -25,7 +25,37 @@ import {
 
 const ASSET_VERSION = 1;
 const DEFAULT_ASSET_KIND = "sprite_sheet";
+const INAT_API_BASE_URL = "https://api.inaturalist.org/v2";
+const INAT_USER_AGENT = "inat-battler/0.1 (Cloudflare Worker; https://github.com/mmulqu/iNat_battler)";
 const INAT_SPECIES_CACHE_TTL_SECONDS = 6 * 60 * 60;
+const INAT_TAXON_CACHE_TTL_SECONDS = 24 * 60 * 60;
+const INAT_SPECIES_COUNT_FIELDS = [
+  "count",
+  "taxon.id",
+  "taxon.name",
+  "taxon.preferred_common_name",
+  "taxon.english_common_name",
+  "taxon.rank",
+  "taxon.iconic_taxon_name",
+  "taxon.ancestry",
+  "taxon.parent_id",
+  "taxon.default_photo.medium_url",
+  "taxon.default_photo.square_url",
+  "taxon.default_photo.url"
+].join(",");
+const INAT_TAXON_FIELDS = [
+  "id",
+  "name",
+  "preferred_common_name",
+  "english_common_name",
+  "rank",
+  "iconic_taxon_name",
+  "ancestry",
+  "parent_id",
+  "default_photo.medium_url",
+  "default_photo.square_url",
+  "default_photo.url"
+].join(",");
 const GLOBAL_SEED_KEY = "na_europe_plants_animals_v1";
 const GLOBAL_SEED_LIMIT_PER_GROUP = 1000;
 const GLOBAL_SEED_BATCH_SIZE = 200;
@@ -471,7 +501,7 @@ function prepareTaxonUpsert(env, taxon, now) {
 }
 
 async function fetchSpeciesCounts(env, inatLogin) {
-  const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:v1`;
+  const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:v2:fields:v1`;
   const cached = await readSpeciesCountsCache(env, cacheKey);
   if (cached?.fresh) return cached.rows;
 
@@ -479,11 +509,13 @@ async function fetchSpeciesCounts(env, inatLogin) {
   const rows = [];
 
   for (let page = 1; page <= maxPages; page += 1) {
-    const url = new URL("https://api.inaturalist.org/v1/observations/species_counts");
+    const url = new URL(`${INAT_API_BASE_URL}/observations/species_counts`);
     url.searchParams.set("user_login", inatLogin);
     url.searchParams.set("verifiable", "true");
     url.searchParams.set("per_page", "500");
     url.searchParams.set("page", String(page));
+    url.searchParams.set("fields", INAT_SPECIES_COUNT_FIELDS);
+    url.searchParams.set("ttl", String(INAT_SPECIES_CACHE_TTL_SECONDS));
 
     const res = await fetchInatWithRetry(url.toString());
 
@@ -518,7 +550,7 @@ async function fetchInatWithRetry(url) {
   const res = await fetch(url, {
     headers: {
       "Accept": "application/json",
-      "User-Agent": "inat-battler/0.1 (Cloudflare Worker; public species_counts import)"
+      "User-Agent": INAT_USER_AGENT
     }
   });
 
@@ -533,7 +565,7 @@ async function fetchInatWithRetry(url) {
   return fetch(url, {
     headers: {
       "Accept": "application/json",
-      "User-Agent": "inat-battler/0.1 (Cloudflare Worker; public species_counts import)"
+      "User-Agent": INAT_USER_AGENT
     }
   });
 }
@@ -642,7 +674,7 @@ function prepareGlobalSeedTaxonUpsert(env, group, row, now) {
 }
 
 async function fetchGlobalSeedSpeciesCounts(env, group, limitPerGroup) {
-  const cacheKey = `inat:global_seed:${GLOBAL_SEED_KEY}:${group.key}:${limitPerGroup}:v1`;
+  const cacheKey = `inat:global_seed:${GLOBAL_SEED_KEY}:${group.key}:${limitPerGroup}:v2:fields:v1`;
   const cached = await readSpeciesCountsCache(env, cacheKey);
   if (cached?.fresh) return cached.rows;
 
@@ -651,14 +683,16 @@ async function fetchGlobalSeedSpeciesCounts(env, group, limitPerGroup) {
 
   for (const region of GLOBAL_SEED_REGIONS) {
     for (let page = 1; page <= pages; page += 1) {
-      const url = new URL("https://api.inaturalist.org/v1/observations/species_counts");
+      const url = new URL(`${INAT_API_BASE_URL}/observations/species_counts`);
       url.searchParams.set("place_id", String(region.placeId));
       url.searchParams.set("rank", "species");
       url.searchParams.set("verifiable", "true");
       url.searchParams.set("photos", "true");
       url.searchParams.set("per_page", "500");
       url.searchParams.set("page", String(page));
-      url.searchParams.append("iconic_taxa[]", group.iconicTaxon);
+      url.searchParams.set("iconic_taxa", group.iconicTaxon);
+      url.searchParams.set("fields", INAT_SPECIES_COUNT_FIELDS);
+      url.searchParams.set("ttl", String(INAT_SPECIES_CACHE_TTL_SECONDS));
 
       const res = await fetchInatWithRetry(url.toString());
       if (!res.ok) {
@@ -996,8 +1030,11 @@ async function resolveInatTaxonForManualUpload({ taxonId, scientificName, common
     const id = Number.parseInt(taxonId, 10);
     if (!Number.isFinite(id)) throw new Error("Taxon ID must be a number");
 
-    const url = `https://api.inaturalist.org/v1/taxa/${encodeURIComponent(String(id))}`;
-    const res = await fetchInatWithRetry(url);
+    const url = new URL(`${INAT_API_BASE_URL}/taxa/${encodeURIComponent(String(id))}`);
+    url.searchParams.set("fields", INAT_TAXON_FIELDS);
+    url.searchParams.set("ttl", String(INAT_TAXON_CACHE_TTL_SECONDS));
+
+    const res = await fetchInatWithRetry(url.toString());
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`iNaturalist taxon lookup failed: ${res.status} ${text}`);
@@ -1012,10 +1049,12 @@ async function resolveInatTaxonForManualUpload({ taxonId, scientificName, common
   const query = scientificName || commonName;
   if (!query) throw new Error("Provide a taxon ID, scientific name, or common name");
 
-  const url = new URL("https://api.inaturalist.org/v1/taxa/autocomplete");
+  const url = new URL(`${INAT_API_BASE_URL}/taxa/autocomplete`);
   url.searchParams.set("q", query);
   url.searchParams.set("is_active", "true");
   url.searchParams.set("per_page", "10");
+  url.searchParams.set("fields", INAT_TAXON_FIELDS);
+  url.searchParams.set("ttl", String(INAT_TAXON_CACHE_TTL_SECONDS));
 
   const res = await fetchInatWithRetry(url.toString());
   if (!res.ok) {
@@ -3236,10 +3275,10 @@ async function startInatLink(env, session, rawLogin) {
 
 async function fetchInatUserProfile(login) {
   // The v2 API returns profile bios (v1 /users/{id} does not) and accepts logins directly.
-  const res = await fetch(
-    `https://api.inaturalist.org/v2/users/${encodeURIComponent(login)}?fields=id,login,description`,
-    { headers: { accept: "application/json" } }
-  );
+  const url = new URL(`${INAT_API_BASE_URL}/users/${encodeURIComponent(login)}`);
+  url.searchParams.set("fields", "id,login,description");
+
+  const res = await fetchInatWithRetry(url.toString());
   if (res.status === 404) throw httpError(`iNaturalist user "${login}" was not found`, 404);
   if (!res.ok) throw httpError(`iNaturalist lookup failed (${res.status}). Try again shortly.`, 502);
 
