@@ -1,8 +1,8 @@
 // Species training: point earning, mastery tiers, and allocation rules.
 //
-// All point math is deterministic from current iNaturalist Research Grade
-// data, so re-imports never need grant bookkeeping: earned is recomputed,
-// spent is stored, available = max(0, earned - spent).
+// All point math is deterministic from current iNaturalist observation
+// counts. Research Grade counts are preferred; roster observation counts can
+// be used as a provisional fallback while iNaturalist rate-limits RG refresh.
 
 export const TRAINING_STATS = ["vigor", "strike", "guard", "tempo", "sense"];
 export const STAT_CAP_RATIO = 0.6;
@@ -12,7 +12,7 @@ export const NICKNAME_MAX_LENGTH = 24;
 
 const TIER_ORDER = ["none", "bronze", "silver", "gold", "complete"];
 
-// Distinct Research Grade species observed in the group unlock tiers.
+// Distinct observed species in the group unlock tiers.
 // "complete" needs iNat to report an authoritative species count for the
 // group (complete_species_count), with at least 3 species so monotypic
 // genera are not trivially completable.

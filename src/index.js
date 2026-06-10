@@ -42,7 +42,11 @@ const DEFAULT_ASSET_KIND = "sprite_sheet";
 const INAT_API_BASE_URL = "https://api.inaturalist.org/v2";
 const INAT_USER_AGENT = "inat-battler/0.1 (Cloudflare Worker; https://github.com/mmulqu/iNat_battler)";
 const INAT_SPECIES_CACHE_TTL_SECONDS = 6 * 60 * 60;
+const INAT_SPECIES_STALE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
 const INAT_TAXON_CACHE_TTL_SECONDS = 24 * 60 * 60;
+const INAT_RATE_LIMIT_COOLDOWN_SECONDS = 5 * 60;
+const TRAINING_COUNT_SOURCE_RESEARCH = "research_grade";
+const TRAINING_COUNT_SOURCE_ROSTER_FALLBACK = "roster_fallback";
 const INAT_SPECIES_COUNT_FIELDS = [
   "count",
   "taxon.id",
@@ -69,6 +73,12 @@ const INAT_TAXON_FIELDS = [
   "default_photo.medium_url",
   "default_photo.square_url",
   "default_photo.url"
+].join(",");
+const INAT_TAXON_INFO_FIELDS = [
+  "id",
+  "name",
+  "rank",
+  "complete_species_count"
 ].join(",");
 const GLOBAL_SEED_KEY = "na_europe_plants_animals_v1";
 const GLOBAL_SEED_LIMIT_PER_GROUP = 1000;
@@ -571,8 +581,13 @@ function prepareTaxonUpsert(env, taxon, now) {
 
 async function fetchSpeciesCounts(env, inatLogin) {
   const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:v2:fields:v1`;
+  const cooldownKey = `inat:species_counts:${inatLogin.toLowerCase()}:verifiable:cooldown`;
   const cached = await readSpeciesCountsCache(env, cacheKey);
   if (cached?.fresh) return cached.rows;
+  if (await readInatCooldown(env, cooldownKey)) {
+    if (cached?.rows?.length) return cached.rows;
+    throw inatRateLimitError("iNaturalist rate limit reached");
+  }
 
   const maxPages = intEnv(env, "MAX_IMPORT_PAGES", 1);
   const rows = [];
@@ -591,13 +606,13 @@ async function fetchSpeciesCounts(env, inatLogin) {
     if (!res.ok) {
       const text = await res.text();
       if (res.status === 429 && cached?.rows?.length) {
+        await writeInatCooldown(env, cooldownKey);
         return cached.rows;
       }
 
       if (res.status === 429) {
-        const error = new Error("iNaturalist rate limit reached");
-        error.code = "INAT_RATE_LIMITED";
-        throw error;
+        await writeInatCooldown(env, cooldownKey);
+        throw inatRateLimitError("iNaturalist rate limit reached");
       }
 
       throw new Error(`iNaturalist species_counts failed: ${res.status} ${text}`);
@@ -663,8 +678,26 @@ async function writeSpeciesCountsCache(env, cacheKey, rows) {
   await env.CACHE.put(
     cacheKey,
     JSON.stringify({ cachedAt: new Date().toISOString(), rows }),
-    { expirationTtl: INAT_SPECIES_CACHE_TTL_SECONDS }
+    { expirationTtl: INAT_SPECIES_STALE_CACHE_TTL_SECONDS }
   );
+}
+
+async function readInatCooldown(env, key) {
+  if (!env.CACHE) return false;
+  return Boolean(await env.CACHE.get(key));
+}
+
+async function writeInatCooldown(env, key) {
+  if (!env.CACHE) return;
+  await env.CACHE.put(key, new Date().toISOString(), {
+    expirationTtl: INAT_RATE_LIMIT_COOLDOWN_SECONDS
+  });
+}
+
+function inatRateLimitError(message) {
+  const error = new Error(message);
+  error.code = "INAT_RATE_LIMITED";
+  return error;
 }
 
 async function importGlobalSeedTaxa(env, limitPerGroup = GLOBAL_SEED_LIMIT_PER_GROUP) {
@@ -3686,7 +3719,7 @@ async function declineChallenge(env, session, challengeId) {
 }
 
 // ---------------------------------------------------------------------------
-// Species training: Research Grade points, mastery tiers, stat allocation
+// Species training: observation-derived points, mastery tiers, stat allocation
 // ---------------------------------------------------------------------------
 
 const TRAINING_ANCESTOR_BATCH_SIZE = 30;
@@ -3706,25 +3739,35 @@ function chunkArray(items, size) {
 }
 
 async function fetchRgSpeciesCounts(env, inatLogin) {
-  const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:rg:v1`;
+  const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:rg:v2`;
+  const cooldownKey = `inat:species_counts:${inatLogin.toLowerCase()}:rg:cooldown`;
   const cached = await readSpeciesCountsCache(env, cacheKey);
   if (cached?.fresh) return cached.rows;
+  if (await readInatCooldown(env, cooldownKey)) {
+    if (cached?.rows?.length) return cached.rows;
+    throw inatRateLimitError("iNaturalist Research Grade counts are temporarily rate-limited");
+  }
 
   const maxPages = intEnv(env, "MAX_IMPORT_PAGES", 1);
   const rows = [];
 
   for (let page = 1; page <= maxPages; page += 1) {
-    const url = new URL("https://api.inaturalist.org/v1/observations/species_counts");
+    const url = new URL(`${INAT_API_BASE_URL}/observations/species_counts`);
     url.searchParams.set("user_login", inatLogin);
     url.searchParams.set("quality_grade", "research");
     url.searchParams.set("per_page", "500");
     url.searchParams.set("page", String(page));
+    url.searchParams.set("fields", INAT_SPECIES_COUNT_FIELDS);
+    url.searchParams.set("ttl", String(INAT_SPECIES_CACHE_TTL_SECONDS));
 
     const res = await fetchInatWithRetry(url.toString());
     if (!res.ok) {
-      if (res.status === 429 && cached?.rows?.length) return cached.rows;
+      if (res.status === 429) {
+        await writeInatCooldown(env, cooldownKey);
+        if (cached?.rows?.length) return cached.rows;
+        throw inatRateLimitError(`iNaturalist Research Grade counts failed (${res.status})`);
+      }
       const error = new Error(`iNaturalist Research Grade counts failed (${res.status})`);
-      if (res.status === 429) error.code = "INAT_RATE_LIMITED";
       throw error;
     }
 
@@ -3751,11 +3794,37 @@ async function loadTaxonInfoCache(env, taxonIds) {
   return map;
 }
 
+async function applyTrainingRosterFallback(env, userId) {
+  const row = await env.DB.prepare(`
+    SELECT COUNT(*) AS count
+    FROM user_taxa
+    WHERE user_id = ?
+      AND obs_count > 0
+      AND COALESCE(training_count_source, '') != ?
+  `).bind(userId, TRAINING_COUNT_SOURCE_RESEARCH).first();
+
+  await env.DB.prepare(`
+    UPDATE user_taxa
+    SET rg_obs_count = obs_count,
+        training_count_source = ?
+    WHERE user_id = ?
+      AND obs_count > 0
+      AND COALESCE(training_count_source, '') != ?
+  `).bind(
+    TRAINING_COUNT_SOURCE_ROSTER_FALLBACK,
+    userId,
+    TRAINING_COUNT_SOURCE_RESEARCH
+  ).run();
+
+  return Number(row?.count ?? 0);
+}
+
 async function syncTrainingData(env, session) {
   const userId = requireLinkedUserId(session);
   const now = new Date().toISOString();
   const summary = {
     rgSpeciesUpdated: 0,
+    provisionalSpeciesUpdated: 0,
     taxaResolved: 0,
     unresolvedTaxa: 0,
     ancestorsFetched: 0,
@@ -3763,10 +3832,15 @@ async function syncTrainingData(env, session) {
     warning: null
   };
 
-  // 1. Research Grade counts per species.
+  // 1. Research Grade counts per species, with roster-count fallback during iNat rate limits.
   try {
     const rgRows = await fetchRgSpeciesCounts(env, session.inat_login);
-    await env.DB.prepare("UPDATE user_taxa SET rg_obs_count = 0 WHERE user_id = ?").bind(userId).run();
+    await env.DB.prepare(`
+      UPDATE user_taxa
+      SET rg_obs_count = 0,
+          training_count_source = ?
+      WHERE user_id = ?
+    `).bind(TRAINING_COUNT_SOURCE_RESEARCH, userId).run();
 
     for (const row of rgRows) {
       const taxon = row.taxon;
@@ -3774,10 +3848,14 @@ async function syncTrainingData(env, session) {
       const rgCount = Math.max(0, Number(row.count ?? 0));
       await upsertTaxonFromInat(env, taxon, now);
       await env.DB.prepare(`
-        INSERT INTO user_taxa (user_id, taxon_id, obs_count, weighted_obs, bond_level, rg_obs_count, imported_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO user_taxa (
+          user_id, taxon_id, obs_count, weighted_obs, bond_level,
+          rg_obs_count, training_count_source, imported_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, taxon_id) DO UPDATE SET
-          rg_obs_count = excluded.rg_obs_count
+          rg_obs_count = excluded.rg_obs_count,
+          training_count_source = excluded.training_count_source
       `).bind(
         userId,
         taxon.id,
@@ -3785,12 +3863,18 @@ async function syncTrainingData(env, session) {
         rgCount,
         Math.floor(10 * Math.log10(1 + rgCount)),
         rgCount,
+        TRAINING_COUNT_SOURCE_RESEARCH,
         now
       ).run();
       summary.rgSpeciesUpdated += 1;
     }
   } catch (error) {
-    summary.warning = error instanceof Error ? error.message : "Research Grade fetch failed";
+    if (error?.code === "INAT_RATE_LIMITED") {
+      summary.provisionalSpeciesUpdated = await applyTrainingRosterFallback(env, userId);
+      summary.warning = "iNaturalist Research Grade counts are rate-limited; using existing roster observation counts until RG refresh succeeds";
+    } else {
+      summary.warning = error instanceof Error ? error.message : "Research Grade fetch failed";
+    }
   }
 
   // 2. Resolve genus/family ids for the user's taxa from their ancestry chains.
@@ -3821,9 +3905,12 @@ async function syncTrainingData(env, session) {
     batches += 1;
 
     try {
-      const res = await fetchInatWithRetry(
-        `https://api.inaturalist.org/v1/taxa/${chunk.join(",")}?per_page=${chunk.length}`
-      );
+      const url = new URL(`${INAT_API_BASE_URL}/taxa/${chunk.join(",")}`);
+      url.searchParams.set("per_page", String(chunk.length));
+      url.searchParams.set("fields", INAT_TAXON_INFO_FIELDS);
+      url.searchParams.set("ttl", String(INAT_TAXON_CACHE_TTL_SECONDS));
+
+      const res = await fetchInatWithRetry(url.toString());
       if (!res.ok) {
         summary.warning = summary.warning ?? `iNaturalist taxa lookup failed (${res.status}); sync again later for remaining taxa`;
         break;
@@ -3942,7 +4029,7 @@ async function loadTrainingContext(env, userId) {
     SELECT
       t.taxon_id, t.scientific_name, t.common_name, t.iconic_taxon_name, t.ancestry,
       t.genus_id, t.genus_name, t.family_id, t.family_name,
-      ut.obs_count, ut.bond_level, ut.rg_obs_count,
+      ut.obs_count, ut.bond_level, ut.rg_obs_count, ut.training_count_source,
       st.nickname, st.allocated_json, st.points_spent, st.last_respec_at
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
@@ -4047,6 +4134,7 @@ function buildTrainingEntry(row, context) {
     nickname,
     level: spent,
     rgObsCount: rg,
+    countSource: row.training_count_source ?? null,
     genus: row.genus_id ? { id: row.genus_id, name: row.genus_name, tier: genusTier } : null,
     family: row.family_id ? { id: row.family_id, name: row.family_name, tier: familyTier } : null,
     earned,
@@ -7027,7 +7115,7 @@ function renderAppHtml() {
           </div>
           <div class="empty" id="trainingEmptyState">
             Sign in with Bluesky and link your iNaturalist account, then sync to earn
-            training points from Research Grade observations.
+            training points from iNaturalist observations.
           </div>
           <div id="trainingMasteries" hidden></div>
           <div id="trainingList" class="training-list" hidden></div>
@@ -7878,14 +7966,21 @@ function renderAppHtml() {
 
       state.trainingBusy = true;
       els.trainingSyncButton.disabled = true;
-      setStatus("Syncing Research Grade data from iNaturalist…");
+      setStatus("Syncing iNaturalist training data...");
 
       try {
         const res = await apiFetch("/api/training/sync", { method: "POST" });
         let message = "Synced: " + Number(res.rgSpeciesUpdated || 0) + " RG species, " +
           Number(res.taxaResolved || 0) + " taxa classified, " +
           Number(res.masteriesUpdated || 0) + " masteries updated.";
-        if (res.unresolvedTaxa > 0) message += " " + res.unresolvedTaxa + " taxa pending — sync again to continue.";
+        if (res.provisionalSpeciesUpdated > 0) {
+          message += " " + Number(res.provisionalSpeciesUpdated || 0) + " species using roster-count fallback.";
+        }
+        const rateLimited = /429|rate.?limit/i.test(String(res.warning || ""));
+        if (res.unresolvedTaxa > 0) {
+          message += " " + res.unresolvedTaxa + " taxa pending" +
+            (rateLimited ? " - wait a minute before retrying." : " - sync again to continue.");
+        }
         if (res.warning) message += " (" + res.warning + ")";
         setStatus(message);
         await loadTraining();
@@ -7979,7 +8074,7 @@ function renderAppHtml() {
       const kindLabel = mastery.kind === "genus" ? "Genus" : "Family";
       const progress = mastery.total
         ? mastery.observed + " / " + mastery.total + " species"
-        : mastery.observed + " RG species";
+        : mastery.observed + " observed species";
       const buffPct = Math.round((mastery.buffPct || 0) * 100);
       const extras = [];
       if (mastery.next) extras.push("next: " + mastery.next.tier + " at " + mastery.next.threshold);
@@ -8017,8 +8112,10 @@ function renderAppHtml() {
     }
 
     function renderTrainRow(entry) {
+      const provisional = entry.countSource === "roster_fallback";
+      const countLabel = provisional ? "provisional obs" : "RG";
       const ledger = "Earned " + entry.earned.total + " pts = " +
-        entry.earned.base + " RG (sqrt of " + entry.rgObsCount + " obs) + " +
+        entry.earned.base + " " + countLabel + " (sqrt of " + entry.rgObsCount + " obs) + " +
         entry.earned.firstBonus + " first + " +
         entry.earned.genusSpill + " genus + " +
         entry.earned.familySpill + " family + " +
@@ -8040,7 +8137,7 @@ function renderAppHtml() {
           '<span class="subtle">' + escapeHtml(entry.scientificName) + '</span>' +
           (entry.level > 0 ? '<span class="lv-chip">Lv ' + entry.level + '</span>' : "") +
           '<span class="chip">' + entry.available + ' pts</span>' +
-          '<span class="chip">' + entry.rgObsCount + ' RG</span>' +
+          '<span class="chip">' + entry.rgObsCount + ' ' + escapeHtml(countLabel) + '</span>' +
           (buffPct > 0 ? '<span class="chip">+' + buffPct + '% mastery</span>' : "") +
           groupChips +
         '</div>' +
@@ -8065,8 +8162,8 @@ function renderAppHtml() {
       if (!training) {
         els.trainingTotalsLabel.textContent = "";
         els.trainingEmptyState.textContent = linked
-          ? "Press Sync iNat Data to pull your Research Grade observations and start earning points."
-          : "Sign in with Bluesky and link your iNaturalist account, then sync to earn training points from Research Grade observations.";
+          ? "Press Sync iNat Data to pull your iNaturalist observations and start earning points."
+          : "Sign in with Bluesky and link your iNaturalist account, then sync to earn training points from iNaturalist observations.";
         return;
       }
 
@@ -8077,7 +8174,7 @@ function renderAppHtml() {
 
       els.trainingMasteries.innerHTML = training.masteries.length
         ? '<div class="mastery-grid">' + training.masteries.map(renderMasteryCard).join("") + '</div>'
-        : '<div class="subtle" style="margin-top:10px">No genus or family progress yet. Observe more Research Grade species, then sync.</div>';
+        : '<div class="subtle" style="margin-top:10px">No genus or family progress yet. Observe more species, then sync.</div>';
 
       const filter = state.trainingFilter;
       const visible = filter
@@ -9585,6 +9682,7 @@ function renderAppHtml() {
         '</div>' +
         '<div class="moves">' + moveButtons + '</div>' +
         '<div class="battle-log" id="battleLogPanel">' + recentLog + '</div>';
+      keyBattleSprites();
     }
 
     function renderCombatant(team, creature, side) {
@@ -9616,7 +9714,145 @@ function renderAppHtml() {
     }
 
     function renderSheetSprite(url, animationClass) {
-      return '<div class="sheet-sprite ' + escapeAttr(animationClass || "anim-idle") + '" style="background-image:url(&quot;' + escapeAttr(url) + '&quot;)"></div>';
+      return '<div class="sheet-sprite ' + escapeAttr(animationClass || "anim-idle") + '" data-sprite-url="' + escapeAttr(url) + '" style="background-image:url(&quot;' + escapeAttr(url) + '&quot;)"></div>';
+    }
+
+    const keyedSpriteCache = new Map();
+
+    function keyBattleSprites() {
+      const sprites = els.battlePanel.querySelectorAll(".combatant-sprite .sheet-sprite[data-sprite-url]");
+      sprites.forEach((sprite) => {
+        const url = sprite.getAttribute("data-sprite-url");
+        if (!url) return;
+
+        const cached = keyedSpriteCache.get(url);
+        if (typeof cached === "string") {
+          setSpriteBackground(sprite, cached);
+          return;
+        }
+        if (cached && typeof cached.then === "function") {
+          cached.then((keyedUrl) => {
+            if (sprite.isConnected && sprite.getAttribute("data-sprite-url") === url) {
+              setSpriteBackground(sprite, keyedUrl);
+            }
+          });
+          return;
+        }
+
+        const pending = makeTransparentSpriteUrl(url)
+          .then((keyedUrl) => {
+            keyedSpriteCache.set(url, keyedUrl);
+            return keyedUrl;
+          })
+          .catch(() => {
+            keyedSpriteCache.delete(url);
+            return url;
+          });
+        keyedSpriteCache.set(url, pending);
+        pending.then((keyedUrl) => {
+          if (sprite.isConnected && sprite.getAttribute("data-sprite-url") === url) {
+            setSpriteBackground(sprite, keyedUrl);
+          }
+        });
+      });
+    }
+
+    function setSpriteBackground(sprite, url) {
+      sprite.style.backgroundImage = 'url("' + url + '")';
+      sprite.classList.add("alpha-keyed");
+    }
+
+    function makeTransparentSpriteUrl(url) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => {
+          try {
+            const width = image.naturalWidth || image.width;
+            const height = image.naturalHeight || image.height;
+            if (!width || !height) {
+              resolve(url);
+              return;
+            }
+
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext("2d", { willReadFrequently: true });
+            context.drawImage(image, 0, 0);
+            const imageData = context.getImageData(0, 0, width, height);
+            alphaKeySpriteSheet(imageData.data, width, height);
+            context.putImageData(imageData, 0, 0);
+            canvas.toBlob((blob) => {
+              resolve(blob ? URL.createObjectURL(blob) : url);
+            }, "image/png");
+          } catch (error) {
+            reject(error);
+          }
+        };
+        image.onerror = () => reject(new Error("Sprite image could not be loaded"));
+        image.src = url;
+      });
+    }
+
+    function alphaKeySpriteSheet(data, width, height) {
+      const columns = 4;
+      const rows = 4;
+      const visited = new Uint8Array(width * height);
+
+      for (let row = 0; row < rows; row += 1) {
+        for (let column = 0; column < columns; column += 1) {
+          const x0 = Math.floor((width * column) / columns);
+          const x1 = Math.floor((width * (column + 1)) / columns) - 1;
+          const y0 = Math.floor((height * row) / rows);
+          const y1 = Math.floor((height * (row + 1)) / rows) - 1;
+          const queue = [];
+          let cursor = 0;
+
+          const push = (x, y) => {
+            if (x < x0 || x > x1 || y < y0 || y > y1) return;
+            const index = y * width + x;
+            if (visited[index]) return;
+            if (!isLightCellBackground(data, index * 4)) return;
+            visited[index] = 1;
+            queue.push(index);
+          };
+
+          for (let x = x0; x <= x1; x += 1) {
+            push(x, y0);
+            push(x, y1);
+          }
+          for (let y = y0 + 1; y < y1; y += 1) {
+            push(x0, y);
+            push(x1, y);
+          }
+
+          while (cursor < queue.length) {
+            const index = queue[cursor];
+            cursor += 1;
+            data[index * 4 + 3] = 0;
+
+            const x = index % width;
+            const y = Math.floor(index / width);
+            push(x + 1, y);
+            push(x - 1, y);
+            push(x, y + 1);
+            push(x, y - 1);
+          }
+        }
+      }
+    }
+
+    function isLightCellBackground(data, offset) {
+      const alpha = data[offset + 3];
+      if (alpha === 0) return false;
+
+      const red = data[offset];
+      const green = data[offset + 1];
+      const blue = data[offset + 2];
+      const max = Math.max(red, green, blue);
+      const min = Math.min(red, green, blue);
+
+      return max >= 190 && max - min <= 70 && red + green + blue >= 590;
     }
 
     function getActiveCreature(team) {

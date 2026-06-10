@@ -289,18 +289,18 @@ The player side uses five uploaded bird sheets. The opponent side uses five gray
 
 ## Species Training
 
-Linked players personalize their species in the **Training** tab instead of relying purely on observation-count stats. Points are earned deterministically from current iNaturalist **Research Grade** data (earned is recomputed on every sync; spent is stored; available = max(0, earned − spent), so deleted observations never claw back spent points):
+Linked players personalize their species in the **Training** tab instead of relying purely on observation-count stats. Points are earned deterministically from iNaturalist observation counts. Research Grade counts are preferred; if iNaturalist rate-limits the RG aggregate, the app can temporarily use existing roster observation counts as a provisional fallback. Earned is recomputed on every sync; spent is stored; available = max(0, earned - spent), so deleted observations never claw back spent points:
 
-- Species base: `floor(2 * sqrt(RG obs))`, plus a +5 first-RG bonus.
-- Genus spillover: +2 per other distinct RG species in the same genus.
-- Family spillover: +1 per 2 other distinct RG species in the same family.
+- Species base: `floor(2 * sqrt(training obs))`, plus a +5 first-observation bonus.
+- Genus spillover: +2 per other distinct observed species in the same genus.
+- Family spillover: +1 per 2 other distinct observed species in the same family.
 - Mastery bonuses per species in the group when a tier is reached.
 
-Mastery is hybrid: tiers from distinct RG species (genus bronze/silver/gold at 3/7/15, family at 5/12/25) plus true **completion** when iNat publishes an authoritative `complete_species_count` for the group (min 3 species, so monotypic genera don't count). Gold/complete tiers grant permanent stat buffs (genus +10%/+15%, family +5%/+8%, additive) applied at creature build time. Tiers never downgrade once achieved.
+Mastery is hybrid: tiers from distinct observed species (genus bronze/silver/gold at 3/7/15, family at 5/12/25) plus true **completion** when iNat publishes an authoritative `complete_species_count` for the group (min 3 species, so monotypic genera don't count). Gold/complete tiers grant permanent stat buffs (genus +10%/+15%, family +5%/+8%, additive) applied at creature build time. Tiers never downgrade once achieved.
 
-Allocation: 1 point = +1 to vigor/strike/guard/tempo/sense, capped at +60% of the bond-scaled base per stat. Vigor allocations raise max HP through the existing formula. One free full respec per species per week. Nicknames (24 chars) and a level badge (level = points spent) show on roster cards and battle plates — opponents see your trained stats and nickname in every battle, including async ghost battles.
+Allocation: 1 point = +1 to vigor/strike/guard/tempo/sense, capped at +60% of the bond-scaled base per stat. Vigor allocations raise max HP through the existing formula. One free full respec per species per week. Nicknames (24 chars) and a level badge (level = points spent) show on roster cards and battle plates; opponents see your trained stats and nickname in every battle, including async ghost battles.
 
-`POST /api/training/sync` pulls RG counts (`species_counts?quality_grade=research`, cached 6h), resolves genus/family ids from ancestry chains via batched `/v1/taxa` lookups (capped per sync; re-run to continue), and upserts masteries.
+`POST /api/training/sync` pulls RG counts from iNaturalist v2 (`observations/species_counts?quality_grade=research`, fresh-cached 6h with stale 429 fallback), resolves genus/family ids from ancestry chains via batched v2 `/taxa` lookups (capped per sync; re-run to continue), and upserts masteries.
 
 ```text
 GET  /api/training
