@@ -286,6 +286,29 @@ curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/battles/demo/sta
 
 The player side uses five uploaded bird sheets. The opponent side uses five gray-box dummy placeholders.
 
+## Species Training
+
+Linked players personalize their species in the **Training** tab instead of relying purely on observation-count stats. Points are earned deterministically from current iNaturalist **Research Grade** data (earned is recomputed on every sync; spent is stored; available = max(0, earned − spent), so deleted observations never claw back spent points):
+
+- Species base: `floor(2 * sqrt(RG obs))`, plus a +5 first-RG bonus.
+- Genus spillover: +2 per other distinct RG species in the same genus.
+- Family spillover: +1 per 2 other distinct RG species in the same family.
+- Mastery bonuses per species in the group when a tier is reached.
+
+Mastery is hybrid: tiers from distinct RG species (genus bronze/silver/gold at 3/7/15, family at 5/12/25) plus true **completion** when iNat publishes an authoritative `complete_species_count` for the group (min 3 species, so monotypic genera don't count). Gold/complete tiers grant permanent stat buffs (genus +10%/+15%, family +5%/+8%, additive) applied at creature build time. Tiers never downgrade once achieved.
+
+Allocation: 1 point = +1 to vigor/strike/guard/tempo/sense, capped at +60% of the bond-scaled base per stat. Vigor allocations raise max HP through the existing formula. One free full respec per species per week. Nicknames (24 chars) and a level badge (level = points spent) show on roster cards and battle plates — opponents see your trained stats and nickname in every battle, including async ghost battles.
+
+`POST /api/training/sync` pulls RG counts (`species_counts?quality_grade=research`, cached 6h), resolves genus/family ids from ancestry chains via batched `/v1/taxa` lookups (capped per sync; re-run to continue), and upserts masteries.
+
+```text
+GET  /api/training
+POST /api/training/sync
+POST /api/training/allocate  {taxonId, allocations: {strike: 2, ...}}
+POST /api/training/respec    {taxonId}
+POST /api/training/nickname  {taxonId, nickname}
+```
+
 ## Battle Arena
 
 Battles run in their own **Battle** tab with two explicit phases: team picking happens in the Roster tab (select exactly 5 ready sprites), then the arena opens on Battle NPC / challenge accept with a "Battle Start!" intro.
