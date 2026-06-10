@@ -254,6 +254,18 @@ curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/battles/demo/sta
 
 The player side uses five uploaded bird sheets. The opponent side uses five gray-box dummy placeholders.
 
+## Battle Arena
+
+Battles run in their own **Battle** tab with two explicit phases: team picking happens in the Roster tab (select exactly 5 ready sprites), then the arena opens on Battle NPC / challenge accept with a "Battle Start!" intro.
+
+The arena experience is fully client-side, no assets required:
+
+- **Procedural pixel backdrops**: a deterministic 64x36 SVG scene (sky bands, sun, clouds, hill skyline, dithered ground, tufts) generated from the battle id, with the biome palette (meadow / wetland / forest / urban / night) picked from the combatants' ecological types. Sprites render in the foreground on shadow platforms.
+- **Turn replay**: after a move resolves server-side, the new battle log entries are replayed as timed effects — attack animations, red hit-flashes on the struck sprite, screen shake, floating damage/heal numbers, HP bars draining per hit, a red vignette when *your* creature takes the hit, and faint drop animations.
+- **Synthesized retro sound**: WebAudio square/saw/noise effects for hits (scaled by damage), specials, misses, buffs/debuffs, faints, battle start, and win/lose jingles. Toggle persists in `localStorage`.
+
+The opponent does **not** need to be online: PvP challenge battles are asynchronous "ghost battles" where the challenger's snapshotted team is piloted by the battle AI. Real-time PvP would need a Durable Object per battle relaying both players' moves over WebSockets — not implemented yet.
+
 ## Gameplay API
 
 The scaffold's lightweight battler rules have been ported into `src/game.js`. Roster rows now include derived body plan, ecological types, role, stats, and moves.

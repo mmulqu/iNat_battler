@@ -5134,7 +5134,6 @@ function renderAppHtml() {
     }
 
     .battle {
-      margin-top: 20px;
       padding: 16px;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -5146,23 +5145,95 @@ function renderAppHtml() {
       display: none;
     }
 
+    .battle-head-tools {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .battle-head-tools .secondary {
+      min-height: 34px;
+      padding: 0 10px;
+      font-size: 0.8rem;
+    }
+
     .battle-stage {
+      position: relative;
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 14px;
       align-items: stretch;
+      min-height: 430px;
+      padding: 16px;
+      border-radius: 10px;
+      border: 2px solid #2c3a30;
+      overflow: hidden;
+      background-color: #9fc28a;
+      background-size: cover;
+      background-position: center;
+      image-rendering: pixelated;
+    }
+
+    .battle-stage.shake {
+      animation: stageShake 320ms linear;
+    }
+
+    @keyframes stageShake {
+      10% { transform: translate(-6px, 3px); }
+      30% { transform: translate(6px, -3px); }
+      50% { transform: translate(-4px, -2px); }
+      70% { transform: translate(4px, 2px); }
+      90% { transform: translate(-2px, 0); }
+    }
+
+    .stage-hurt-flash {
+      position: absolute;
+      inset: 0;
+      z-index: 6;
+      pointer-events: none;
+      background: radial-gradient(ellipse at center, rgba(197,79,69,0) 35%, rgba(197,79,69,0.5));
+      animation: hurtFade 360ms forwards;
+    }
+
+    @keyframes hurtFade {
+      from { opacity: 1; }
+      to { opacity: 0; }
     }
 
     .combatant {
+      position: relative;
       display: grid;
-      grid-template-rows: auto minmax(180px, 1fr) auto;
-      gap: 10px;
+      grid-template-rows: auto 1fr;
+      gap: 8px;
       min-width: 0;
-      min-height: 310px;
-      border: 1px solid var(--line);
+      z-index: 2;
+    }
+
+    .combatant.opponent {
+      align-self: start;
+    }
+
+    .combatant.player {
+      align-self: end;
+      margin-top: 56px;
+    }
+
+    .combatant.player .plate {
+      order: 2;
+    }
+
+    .combatant.player .combatant-sprite {
+      order: 1;
+    }
+
+    .plate {
+      display: grid;
+      gap: 6px;
+      padding: 10px;
       border-radius: 8px;
-      background: #fbfcf9;
-      padding: 12px;
+      border: 1px solid rgba(23, 32, 27, 0.25);
+      background: rgba(252, 253, 250, 0.88);
+      box-shadow: 0 4px 0 rgba(23, 32, 27, 0.18);
     }
 
     .combatant-head {
@@ -5186,18 +5257,138 @@ function renderAppHtml() {
     }
 
     .combatant-sprite {
+      position: relative;
       display: grid;
-      place-items: center;
-      min-height: 180px;
-      border-radius: 8px;
-      background:
-        linear-gradient(135deg, rgba(69, 109, 168, 0.1), rgba(47, 125, 66, 0.1)),
-        #f6f8f4;
-      overflow: hidden;
+      place-items: end center;
+      min-height: 200px;
+      overflow: visible;
+    }
+
+    .combatant-sprite .platform {
+      position: absolute;
+      bottom: 2px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 78%;
+      height: 22%;
+      border-radius: 50%;
+      background: radial-gradient(ellipse at center, rgba(20,28,22,0.4), rgba(20,28,22,0.16) 58%, rgba(20,28,22,0) 74%);
     }
 
     .combatant-sprite .sheet-sprite {
-      width: min(82%, 240px);
+      position: relative;
+      z-index: 2;
+      width: min(82%, 250px);
+      margin-bottom: 4%;
+    }
+
+    .combatant-sprite .dummy-sprite {
+      position: relative;
+      z-index: 2;
+      margin-bottom: 4%;
+    }
+
+    .sheet-sprite.hit-flash {
+      animation:
+        spriteFrames 900ms steps(1, end) infinite,
+        hitFlash 380ms steps(2, end) 1;
+    }
+
+    @keyframes hitFlash {
+      0%, 100% { filter: drop-shadow(0 10px 12px rgba(23, 32, 27, 0.18)); }
+      20%, 70% { filter: sepia(1) saturate(9) hue-rotate(-46deg) brightness(1.3); }
+      45% { filter: brightness(2.4) saturate(0.3); }
+    }
+
+    .dummy-sprite.hit-flash {
+      animation: hitFlash 380ms steps(2, end) 1;
+    }
+
+    .sheet-sprite.fainted,
+    .dummy-sprite.fainted {
+      animation: faintDrop 650ms ease-in forwards;
+    }
+
+    @keyframes faintDrop {
+      to {
+        transform: translateY(42%);
+        opacity: 0;
+      }
+    }
+
+    .dmg-float {
+      position: absolute;
+      left: 50%;
+      top: 26%;
+      z-index: 8;
+      transform: translateX(-50%);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1.6rem;
+      font-weight: 900;
+      color: #fff;
+      text-shadow: 2px 2px 0 #a4392f, -1px -1px 0 #a4392f, 1px -1px 0 #a4392f, -1px 1px 0 #a4392f;
+      pointer-events: none;
+      animation: dmgFloat 850ms ease-out forwards;
+    }
+
+    .dmg-float.heal {
+      text-shadow: 2px 2px 0 #2f7d42, -1px -1px 0 #2f7d42, 1px -1px 0 #2f7d42, -1px 1px 0 #2f7d42;
+    }
+
+    @keyframes dmgFloat {
+      0% { opacity: 0; transform: translate(-50%, 10px); }
+      18% { opacity: 1; }
+      100% { opacity: 0; transform: translate(-50%, -48px); }
+    }
+
+    .battle-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 12;
+      display: grid;
+      place-items: center;
+      background: rgba(13, 18, 15, 0.55);
+    }
+
+    .battle-overlay.intro {
+      animation: introPulse 1100ms forwards;
+      pointer-events: none;
+    }
+
+    @keyframes introPulse {
+      0% { opacity: 0; }
+      18% { opacity: 1; }
+      82% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+
+    .overlay-card {
+      display: grid;
+      gap: 12px;
+      text-align: center;
+      justify-items: center;
+    }
+
+    .overlay-title {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: clamp(1.8rem, 5vw, 3rem);
+      font-weight: 900;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: #fff;
+      text-shadow: 4px 4px 0 rgba(0, 0, 0, 0.55);
+    }
+
+    .overlay-title.win { color: #f2ce72; }
+    .overlay-title.lose { color: #ef8d84; }
+
+    .overlay-sub {
+      color: #dfe7e0;
+      font-size: 0.92rem;
+    }
+
+    .hp > span.hp-low {
+      background: linear-gradient(90deg, var(--coral), var(--amber));
     }
 
     .dummy-sprite {
@@ -5459,6 +5650,7 @@ function renderAppHtml() {
       <section>
         <nav class="view-tabs" aria-label="Main views">
           <button class="view-tab active" id="rosterTabButton" type="button" data-view-tab="roster">Roster</button>
+          <button class="view-tab" id="battleTabButton" type="button" data-view-tab="battle">Battle</button>
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
         </nav>
         <section class="view-panel" id="rosterView">
@@ -5468,6 +5660,16 @@ function renderAppHtml() {
           </div>
           <div class="grid" id="rosterGrid"></div>
           <div class="empty" id="emptyState">Import a public iNaturalist roster.</div>
+        </section>
+        <section class="view-panel" id="battleView" hidden>
+          <div class="empty" id="battleEmptyState">
+            <div>
+              <strong>No battle in progress.</strong><br>
+              Phase 1: pick exactly 5 ready sprites in the Roster tab.<br>
+              Phase 2: press Battle NPC, or accept a Bluesky challenge &mdash; the arena opens here.<br><br>
+              <button class="secondary" id="demoBattleButton" type="button">Run 5v5 Test Battle</button>
+            </div>
+          </div>
           <section class="battle" id="battlePanel" hidden></section>
         </section>
         <section class="view-panel" id="treeView" hidden>
@@ -5516,6 +5718,10 @@ function renderAppHtml() {
       battle: null,
       battleAnimation: "anim-idle",
       battleBusy: false,
+      battlePhase: "idle",
+      soundOn: localStorage.getItem("inatBattler:sound") !== "off",
+      backdropCache: null,
+      lastResultBattle: null,
       polling: null,
       me: null,
       challenges: [],
@@ -5568,6 +5774,10 @@ function renderAppHtml() {
       rosterGrid: document.getElementById("rosterGrid"),
       emptyState: document.getElementById("emptyState"),
       battlePanel: document.getElementById("battlePanel"),
+      battleTabButton: document.getElementById("battleTabButton"),
+      battleView: document.getElementById("battleView"),
+      battleEmptyState: document.getElementById("battleEmptyState"),
+      demoBattleButton: document.getElementById("demoBattleButton"),
       bskyStateLabel: document.getElementById("bskyStateLabel"),
       bskyBody: document.getElementById("bskyBody")
     };
@@ -5580,6 +5790,7 @@ function renderAppHtml() {
     });
 
     els.rosterTabButton.addEventListener("click", () => switchView("roster"));
+    els.battleTabButton.addEventListener("click", () => switchView("battle"));
     els.treeTabButton.addEventListener("click", () => switchView("tree"));
 
     els.treeRefreshButton.addEventListener("click", async () => {
@@ -5729,6 +5940,7 @@ function renderAppHtml() {
     });
 
     els.startBattleButton.addEventListener("click", startNpcBattle);
+    els.demoBattleButton.addEventListener("click", startDemoBattle);
 
     els.spriteTreePanel.addEventListener("click", (event) => {
       const button = event.target.closest("[data-tree-toggle]");
@@ -5747,8 +5959,26 @@ function renderAppHtml() {
     });
 
     els.battlePanel.addEventListener("click", async (event) => {
+      const soundButton = event.target.closest("[data-sound-toggle]");
+      if (soundButton) {
+        state.soundOn = !state.soundOn;
+        localStorage.setItem("inatBattler:sound", state.soundOn ? "on" : "off");
+        playSfx("click");
+        renderBattle();
+        return;
+      }
+
+      const exitButton = event.target.closest("[data-battle-exit]");
+      if (exitButton) {
+        state.battle = null;
+        state.battlePhase = "idle";
+        renderBattle();
+        switchView("roster");
+        return;
+      }
+
       const button = event.target.closest("[data-move-id]");
-      if (!button || state.battleBusy) return;
+      if (!button || state.battleBusy || state.battlePhase === "intro") return;
       await submitBattleMove(button.getAttribute("data-move-id"));
     });
 
@@ -6025,13 +6255,11 @@ function renderAppHtml() {
         body: JSON.stringify({ taxonIds: team })
       });
 
-      state.battle = battle;
-      state.battleAnimation = "anim-idle";
       if (state.challengeInfo && state.challengeInfo.challengeId === challengeId) {
         state.challengeInfo = null;
       }
       setStatus("Challenge accepted. Battle on!");
-      renderBattle();
+      enterBattle(battle);
       await refreshMe();
     }
 
@@ -6047,9 +6275,8 @@ function renderAppHtml() {
 
     async function openBattle(battleId) {
       if (!battleId) return;
-      state.battle = await apiFetch("/api/battles/" + encodeURIComponent(battleId));
-      state.battleAnimation = "anim-idle";
-      renderBattle();
+      const battle = await apiFetch("/api/battles/" + encodeURIComponent(battleId));
+      enterBattle(battle, { skipIntro: true });
     }
 
     function renderChallengeBanner() {
@@ -6240,7 +6467,7 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = view === "tree" ? "tree" : "roster";
+      state.activeView = ["tree", "battle"].includes(view) ? view : "roster";
       renderViewTabs();
 
       if (state.activeView === "tree" && !state.spriteTree) {
@@ -6249,11 +6476,14 @@ function renderAppHtml() {
     }
 
     function renderViewTabs() {
-      const isTree = state.activeView === "tree";
-      els.rosterTabButton.classList.toggle("active", !isTree);
-      els.treeTabButton.classList.toggle("active", isTree);
-      els.rosterView.hidden = isTree;
-      els.treeView.hidden = !isTree;
+      const view = state.activeView;
+      els.rosterTabButton.classList.toggle("active", view === "roster");
+      els.battleTabButton.classList.toggle("active", view === "battle");
+      els.treeTabButton.classList.toggle("active", view === "tree");
+      els.rosterView.hidden = view !== "roster";
+      els.battleView.hidden = view !== "battle";
+      els.treeView.hidden = view !== "tree";
+      els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
     }
 
     async function loadSpriteTree(showStatus) {
@@ -6975,10 +7205,8 @@ function renderAppHtml() {
           body: JSON.stringify({ userId: state.userId, taxonIds, npcTemplate: "random_ready" })
         });
 
-        state.battle = battle;
-        state.battleAnimation = "anim-idle";
         setStatus("NPC battle ready");
-        renderBattle();
+        enterBattle(battle);
       } catch (error) {
         setStatus(error.message);
       } finally {
@@ -6991,10 +7219,8 @@ function renderAppHtml() {
 
       try {
         const battle = await apiFetch("/api/battles/demo/start", { method: "POST" });
-        state.battle = battle;
-        state.battleAnimation = "anim-idle";
         setStatus("5v5 test battle ready");
-        renderBattle();
+        enterBattle(battle);
       } catch (error) {
         setStatus(error.message);
       } finally {
@@ -7002,37 +7228,477 @@ function renderAppHtml() {
       }
     }
 
-    async function submitBattleMove(moveId) {
-      if (!state.battle || !moveId) return;
+    function enterBattle(battle, options) {
+      state.battle = battle;
+      state.battleAnimation = "anim-idle";
+      state.battlePhase = battle.status === "active" && !(options && options.skipIntro) ? "intro" : "active";
+      switchView("battle");
+      renderBattle();
 
-      const active = getActiveCreature(state.battle.player);
+      if (state.battlePhase === "intro") {
+        playSfx("start");
+        setTimeout(() => {
+          if (state.battlePhase === "intro") {
+            state.battlePhase = "active";
+            renderBattle();
+          }
+        }, 1150);
+      }
+    }
+
+    async function submitBattleMove(moveId) {
+      if (!state.battle || !moveId || state.battleBusy) return;
+
+      const prev = state.battle;
+      const active = getActiveCreature(prev.player);
       const move = active.moves.find((candidate) => candidate.id === moveId);
       state.battleBusy = true;
       state.battleAnimation = move && move.category === "special" ? "anim-special" : "anim-attack";
+      playSfx("click");
       renderBattle();
 
       try {
-        await delay(450);
-        state.battle = await apiFetch("/api/battles/" + encodeURIComponent(state.battle.battleId) + "/action", {
+        const next = await apiFetch("/api/battles/" + encodeURIComponent(prev.battleId) + "/action", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ moveId })
         });
+        await playTurnEvents(prev, next);
+        state.battle = next;
         state.battleAnimation = "anim-idle";
-        renderBattle();
       } catch (error) {
         setStatus(error.message);
         state.battleAnimation = "anim-idle";
-        renderBattle();
       } finally {
         state.battleBusy = false;
         renderBattle();
+        const finished = state.battle && state.battle.status !== "active";
+        if (finished && state.lastResultBattle !== state.battle.battleId) {
+          state.lastResultBattle = state.battle.battleId;
+          playSfx(state.battle.status === "won" ? "win" : state.battle.status === "lost" ? "lose" : "miss");
+        }
       }
+    }
+
+    // -- Turn sequencing: replay the resolved turn's log as timed effects ----
+
+    function sideForName(name, prev) {
+      const playerActive = getActiveCreature(prev.player).name;
+      const opponentActive = getActiveCreature(prev.opponent).name;
+      if (name === playerActive && name !== opponentActive) return "player";
+      if (name === opponentActive && name !== playerActive) return "opponent";
+      if (prev.player.creatures.some((creature) => creature.name === name)) return "player";
+      return "opponent";
+    }
+
+    function moveCategoryFor(prev, side, moveId) {
+      if (!moveId) return "physical";
+      const creature = getActiveCreature(side === "player" ? prev.player : prev.opponent);
+      const move = (creature.moves || []).find((candidate) => candidate.id === moveId);
+      return move ? move.category : "physical";
+    }
+
+    async function playTurnEvents(prev, next) {
+      const events = (next.log || []).filter((entry) => entry.turn === prev.turn);
+      const hpState = {
+        player: { hp: getActiveCreature(prev.player).hp, max: getActiveCreature(prev.player).maxHp },
+        opponent: { hp: getActiveCreature(prev.opponent).hp, max: getActiveCreature(prev.opponent).maxHp }
+      };
+
+      for (const entry of events) {
+        appendBattleLogLine(entry);
+        const text = entry.text || "";
+
+        const damageMatch = text.match(/^(.+) used (.+) and dealt (\d+) damage\.$/);
+        if (damageMatch) {
+          const actorSide = sideForName(damageMatch[1], prev);
+          const targetSide = actorSide === "player" ? "opponent" : "player";
+          const damage = Number(damageMatch[3]);
+          const category = moveCategoryFor(prev, actorSide, entry.data && entry.data.moveId);
+          triggerAttackVisual(actorSide, category === "special" ? "anim-special" : "anim-attack");
+          if (category === "special") playSfx("special");
+          await delay(280);
+          hitEffect(targetSide, damage, hpState);
+          await delay(640);
+          continue;
+        }
+
+        const missMatch = text.match(/^(.+) used (.+), but it missed\.$/);
+        if (missMatch) {
+          triggerAttackVisual(sideForName(missMatch[1], prev), "anim-attack");
+          await delay(240);
+          playSfx("miss");
+          await delay(420);
+          continue;
+        }
+
+        const faintMatch = text.match(/^(.+) fainted\.$/);
+        if (faintMatch) {
+          const side = sideForName(faintMatch[1], prev);
+          playSfx("faint");
+          faintEffect(side);
+          await delay(720);
+          continue;
+        }
+
+        const healMatch = text.match(/^(.+) recovered (\d+) HP\.$/);
+        if (healMatch) {
+          const side = sideForName(healMatch[1], prev);
+          playSfx("heal");
+          const healed = Number(healMatch[2]);
+          const target = hpState[side];
+          target.hp = Math.min(target.max, target.hp + healed);
+          setHpBar(side, target.hp, target.max);
+          spawnFloat(side, "+" + healed, "heal");
+          await delay(520);
+          continue;
+        }
+
+        if (/ rose\.$/.test(text)) {
+          playSfx("buff");
+          await delay(380);
+          continue;
+        }
+        if (/ fell\.$/.test(text)) {
+          playSfx("debuff");
+          await delay(380);
+          continue;
+        }
+        if (/ became /.test(text)) {
+          playSfx("status");
+          await delay(380);
+          continue;
+        }
+
+        const statusMoveMatch = text.match(/^(.+) used (.+)\.$/);
+        if (statusMoveMatch) {
+          triggerAttackVisual(sideForName(statusMoveMatch[1], prev), "anim-special");
+          playSfx("status");
+          await delay(420);
+          continue;
+        }
+
+        await delay(300);
+      }
+    }
+
+    function spriteEl(side) {
+      return els.battlePanel.querySelector(
+        '[data-sprite-zone="' + side + '"] .sheet-sprite, [data-sprite-zone="' + side + '"] .dummy-sprite'
+      );
+    }
+
+    function triggerAttackVisual(side, animClass) {
+      const el = spriteEl(side);
+      if (!el || !el.classList.contains("sheet-sprite")) return;
+      el.classList.remove("anim-idle", "anim-attack", "anim-special");
+      el.classList.add(animClass);
+      setTimeout(() => {
+        el.classList.remove("anim-attack", "anim-special");
+        el.classList.add("anim-idle");
+      }, 620);
+    }
+
+    function hitEffect(targetSide, damage, hpState) {
+      playSfx("hit", Math.min(1.7, 0.7 + damage / 50));
+
+      const el = spriteEl(targetSide);
+      if (el) {
+        el.classList.remove("hit-flash");
+        void el.offsetWidth;
+        el.classList.add("hit-flash");
+        setTimeout(() => el.classList.remove("hit-flash"), 420);
+      }
+
+      const stage = document.getElementById("battleStage");
+      if (stage) {
+        stage.classList.remove("shake");
+        void stage.offsetWidth;
+        stage.classList.add("shake");
+        setTimeout(() => stage.classList.remove("shake"), 360);
+
+        if (targetSide === "player") {
+          const flash = document.createElement("div");
+          flash.className = "stage-hurt-flash";
+          stage.appendChild(flash);
+          setTimeout(() => flash.remove(), 420);
+        }
+      }
+
+      spawnFloat(targetSide, "-" + damage, "dmg");
+      const target = hpState[targetSide];
+      target.hp = Math.max(0, target.hp - damage);
+      setHpBar(targetSide, target.hp, target.max);
+    }
+
+    function setHpBar(side, hp, max) {
+      const bar = els.battlePanel.querySelector('[data-hp-bar="' + side + '"]');
+      const label = els.battlePanel.querySelector('[data-hp-text="' + side + '"]');
+      const pct = max ? Math.max(0, Math.round((hp / max) * 100)) : 0;
+      if (bar) {
+        bar.style.setProperty("--hp", pct + "%");
+        bar.classList.toggle("hp-low", pct <= 25);
+      }
+      if (label) label.textContent = Math.round(hp) + " / " + Math.round(max) + " HP";
+    }
+
+    function spawnFloat(side, text, kind) {
+      const zone = els.battlePanel.querySelector('[data-sprite-zone="' + side + '"]');
+      if (!zone) return;
+      const el = document.createElement("div");
+      el.className = "dmg-float" + (kind === "heal" ? " heal" : "");
+      el.textContent = text;
+      zone.appendChild(el);
+      setTimeout(() => el.remove(), 900);
+    }
+
+    function faintEffect(side) {
+      const el = spriteEl(side);
+      if (el) el.classList.add("fainted");
+    }
+
+    function appendBattleLogLine(entry) {
+      const panel = document.getElementById("battleLogPanel");
+      if (!panel) return;
+      const line = document.createElement("div");
+      line.textContent = "Turn " + Number(entry.turn || 0) + ": " + (entry.text || "");
+      panel.insertBefore(line, panel.firstChild);
+    }
+
+    // -- Retro sound effects (WebAudio, fully synthesized, no assets) -------
+
+    let audioCtx = null;
+    let audioNoiseBuffer = null;
+
+    function ensureAudio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      return audioCtx;
+    }
+
+    function sfxTone(ctx, out, opts) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const t0 = ctx.currentTime + (opts.delay || 0);
+      const dur = opts.dur || 0.12;
+      osc.type = opts.type || "square";
+      osc.frequency.setValueAtTime(Math.max(20, opts.from), t0);
+      if (opts.to) osc.frequency.exponentialRampToValueAtTime(Math.max(20, opts.to), t0 + dur);
+      gain.gain.setValueAtTime(opts.gain || 0.18, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+      osc.connect(gain);
+      gain.connect(out);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.03);
+    }
+
+    function sfxNoise(ctx, out, opts) {
+      if (!audioNoiseBuffer) {
+        audioNoiseBuffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.3), ctx.sampleRate);
+        const data = audioNoiseBuffer.getChannelData(0);
+        for (let index = 0; index < data.length; index += 1) data[index] = Math.random() * 2 - 1;
+      }
+      const source = ctx.createBufferSource();
+      source.buffer = audioNoiseBuffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = "bandpass";
+      filter.frequency.value = opts.freq || 700;
+      filter.Q.value = 0.8;
+      const gain = ctx.createGain();
+      const t0 = ctx.currentTime + (opts.delay || 0);
+      const dur = opts.dur || 0.1;
+      gain.gain.setValueAtTime(opts.gain || 0.25, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+      source.connect(filter);
+      filter.connect(gain);
+      gain.connect(out);
+      source.start(t0);
+      source.stop(t0 + dur + 0.03);
+    }
+
+    function playSfx(name, intensity) {
+      if (!state.soundOn) return;
+      const k = intensity || 1;
+
+      try {
+        const ctx = ensureAudio();
+        const out = ctx.createGain();
+        out.gain.value = 0.5;
+        out.connect(ctx.destination);
+
+        if (name === "click") {
+          sfxTone(ctx, out, { type: "square", from: 620, to: 740, dur: 0.05, gain: 0.07 });
+        } else if (name === "hit") {
+          sfxNoise(ctx, out, { freq: 600, dur: 0.09, gain: 0.22 * k });
+          sfxTone(ctx, out, { type: "square", from: 190, to: 65, dur: 0.13, gain: 0.2 * k });
+        } else if (name === "special") {
+          sfxTone(ctx, out, { type: "sawtooth", from: 330, dur: 0.09, gain: 0.1 });
+          sfxTone(ctx, out, { type: "sawtooth", from: 440, dur: 0.09, gain: 0.1, delay: 0.07 });
+          sfxTone(ctx, out, { type: "sawtooth", from: 587, dur: 0.12, gain: 0.1, delay: 0.14 });
+        } else if (name === "miss") {
+          sfxTone(ctx, out, { type: "triangle", from: 520, to: 170, dur: 0.18, gain: 0.08 });
+        } else if (name === "heal") {
+          sfxTone(ctx, out, { type: "sine", from: 520, dur: 0.1, gain: 0.12 });
+          sfxTone(ctx, out, { type: "sine", from: 780, dur: 0.14, gain: 0.12, delay: 0.09 });
+        } else if (name === "buff") {
+          sfxTone(ctx, out, { type: "sine", from: 440, to: 660, dur: 0.12, gain: 0.1 });
+        } else if (name === "debuff") {
+          sfxTone(ctx, out, { type: "sine", from: 440, to: 250, dur: 0.14, gain: 0.1 });
+        } else if (name === "status") {
+          sfxTone(ctx, out, { type: "triangle", from: 350, dur: 0.1, gain: 0.09 });
+        } else if (name === "faint") {
+          sfxTone(ctx, out, { type: "square", from: 280, to: 42, dur: 0.45, gain: 0.16 });
+        } else if (name === "start") {
+          sfxTone(ctx, out, { type: "square", from: 392, dur: 0.11, gain: 0.12 });
+          sfxTone(ctx, out, { type: "square", from: 523, dur: 0.16, gain: 0.12, delay: 0.11 });
+        } else if (name === "win") {
+          sfxTone(ctx, out, { type: "square", from: 523, dur: 0.13, gain: 0.12 });
+          sfxTone(ctx, out, { type: "square", from: 659, dur: 0.13, gain: 0.12, delay: 0.12 });
+          sfxTone(ctx, out, { type: "square", from: 784, dur: 0.13, gain: 0.12, delay: 0.24 });
+          sfxTone(ctx, out, { type: "square", from: 1047, dur: 0.3, gain: 0.13, delay: 0.36 });
+        } else if (name === "lose") {
+          sfxTone(ctx, out, { type: "square", from: 220, to: 180, dur: 0.28, gain: 0.13 });
+          sfxTone(ctx, out, { type: "square", from: 165, to: 105, dur: 0.45, gain: 0.13, delay: 0.28 });
+        }
+      } catch (error) {
+        // Audio is best-effort; never break the battle over it.
+      }
+    }
+
+    // -- Procedural pixel-art battle backdrops ------------------------------
+
+    const BATTLE_BIOMES = {
+      meadow: { key: "meadow", sky: ["#9fd4e8", "#b5e0ec", "#cdeaf0"], sun: "#f7d978", cloud: "#f4f9f7", hill: "#6fa06b", ground: "#8fbf6f", groundEdge: "#7aae61", groundDark: "#79a85c", groundLight: "#a3cd82", accent: "#e0788a" },
+      wetland: { key: "wetland", sky: ["#a3c8d8", "#b9d8e0", "#cfe6e6"], sun: "#f2e2a0", cloud: "#eef6f4", hill: "#5d8a72", ground: "#6fa384", groundEdge: "#5d927a", groundDark: "#54806a", groundLight: "#8cb89c", accent: "#4f7f9d" },
+      forest: { key: "forest", sky: ["#7fae9a", "#92bda4", "#a8ccae"], sun: "#e8e3b0", cloud: "#dcebdf", hill: "#3f6b4c", ground: "#5d8752", groundEdge: "#4d7544", groundDark: "#46663c", groundLight: "#739a64", accent: "#b06a45" },
+      urban: { key: "urban", sky: ["#b6c3d4", "#c8d2dd", "#dadfe5"], sun: "#f3e9c5", cloud: "#eff2f4", hill: "#7c8894", ground: "#9aa3a3", groundEdge: "#86908f", groundDark: "#7e8887", groundLight: "#b2baba", accent: "#c2554d" },
+      night: { key: "night", sky: ["#23304e", "#2d3c5e", "#3a4a6e"], sun: "#e8e6cf", cloud: "#46557454", hill: "#1d2a40", ground: "#33485a", groundEdge: "#2a3d4e", groundDark: "#243443", groundLight: "#41586c", accent: "#8ea4c8" }
+    };
+
+    function seededPixelRng(seedString) {
+      let hash = 2166136261;
+      for (let index = 0; index < seedString.length; index += 1) {
+        hash ^= seedString.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return function rng() {
+        hash += 0x6d2b79f5;
+        let value = hash;
+        value = Math.imul(value ^ (value >>> 15), value | 1);
+        value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+        return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    function pickBiome(battle) {
+      const types = []
+        .concat(getActiveCreature(battle.opponent).types || [])
+        .concat(getActiveCreature(battle.player).types || []);
+      if (types.includes("Night")) return BATTLE_BIOMES.night;
+      if (types.includes("Wetland")) return BATTLE_BIOMES.wetland;
+      if (types.includes("Fungus") || types.includes("Decay") || types.includes("Wood")) return BATTLE_BIOMES.forest;
+      if (types.includes("Urban")) return BATTLE_BIOMES.urban;
+      return BATTLE_BIOMES.meadow;
+    }
+
+    function makePixelBackdropSvg(seedString, biome) {
+      const rng = seededPixelRng(seedString + ":" + biome.key);
+      const W = 64;
+      const H = 36;
+      let rects = "";
+      const px = (x, y, w, h, fill) => {
+        rects += '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="' + fill + '"/>';
+      };
+
+      const skyH = Math.floor(H * 0.6);
+      for (let band = 0; band < biome.sky.length; band += 1) {
+        const bandTop = Math.floor((skyH * band) / biome.sky.length);
+        px(0, bandTop, W, Math.ceil(skyH / biome.sky.length) + 1, biome.sky[band]);
+      }
+
+      const sunX = 5 + Math.floor(rng() * 22);
+      const sunY = 3 + Math.floor(rng() * 5);
+      px(sunX, sunY, 4, 4, biome.sun);
+      px(sunX + 1, sunY - 1, 2, 1, biome.sun);
+      px(sunX + 1, sunY + 4, 2, 1, biome.sun);
+      px(sunX - 1, sunY + 1, 1, 2, biome.sun);
+      px(sunX + 4, sunY + 1, 1, 2, biome.sun);
+
+      const cloudCount = 3 + Math.floor(rng() * 3);
+      for (let i = 0; i < cloudCount; i += 1) {
+        const cw = 5 + Math.floor(rng() * 6);
+        const cx = Math.floor(rng() * (W - cw));
+        const cy = 2 + Math.floor(rng() * (skyH - 8));
+        px(cx, cy, cw, 2, biome.cloud);
+        px(cx + 1, cy - 1, cw - 2, 1, biome.cloud);
+      }
+
+      let hillY = skyH - 4 - Math.floor(rng() * 4);
+      for (let x = 0; x < W; x += 2) {
+        hillY += Math.floor(rng() * 3) - 1;
+        hillY = Math.max(skyH - 9, Math.min(skyH - 2, hillY));
+        px(x, hillY, 2, skyH - hillY + 1, biome.hill);
+      }
+
+      px(0, skyH, W, H - skyH, biome.ground);
+      px(0, skyH, W, 1, biome.groundEdge);
+
+      for (let i = 0; i < 150; i += 1) {
+        px(
+          Math.floor(rng() * W),
+          skyH + 1 + Math.floor(rng() * (H - skyH - 1)),
+          1,
+          1,
+          rng() < 0.5 ? biome.groundDark : biome.groundLight
+        );
+      }
+
+      for (let i = 0; i < 9; i += 1) {
+        const tuftX = 1 + Math.floor(rng() * (W - 3));
+        const tuftY = skyH + 2 + Math.floor(rng() * (H - skyH - 5));
+        px(tuftX, tuftY, 1, 2, biome.accent);
+        px(tuftX - 1, tuftY + 1, 1, 1, biome.groundDark);
+        px(tuftX + 1, tuftY + 1, 1, 1, biome.groundDark);
+      }
+
+      return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 36" shape-rendering="crispEdges">' + rects + '</svg>';
+    }
+
+    function battleBackdrop(battle) {
+      const id = battle.battleId || "default";
+      if (state.backdropCache && state.backdropCache.id === id) return state.backdropCache.css;
+      const svg = makePixelBackdropSvg(id, pickBiome(battle));
+      const css = "url(data:image/svg+xml," + encodeURIComponent(svg) + ")";
+      state.backdropCache = { id, css };
+      return css;
+    }
+
+    // -- Battle rendering ----------------------------------------------------
+
+    function battleTitle(battle) {
+      if (battle.mode === "pvp_async") return "Challenge Battle";
+      if (battle.mode === "demo") return "5v5 Test Battle";
+      return "NPC Battle";
+    }
+
+    function renderResultOverlay(battle) {
+      const title = battle.status === "won" ? "Victory!" : battle.status === "lost" ? "Defeat" : "Draw";
+      const cls = battle.status === "won" ? "win" : battle.status === "lost" ? "lose" : "";
+      return '<div class="battle-overlay">' +
+        '<div class="overlay-card">' +
+          '<div class="overlay-title ' + cls + '">' + title + '</div>' +
+          '<div class="overlay-sub">' + escapeHtml(battle.player.name || "Your Team") + " vs " + escapeHtml(battle.opponent.name || "Opponent") +
+            " &middot; " + Math.max(1, Number(battle.turn || 1) - 1) + " turns</div>" +
+          '<button class="primary" type="button" data-battle-exit>Back to Roster</button>' +
+        '</div>' +
+      '</div>';
     }
 
     function renderBattle() {
       const battle = state.battle;
       els.battlePanel.hidden = !battle;
+      if (els.battleEmptyState) els.battleEmptyState.hidden = !!battle;
+      renderViewTabs();
       if (!battle) return;
 
       const playerActive = getActiveCreature(battle.player);
@@ -7044,43 +7710,57 @@ function renderAppHtml() {
             '</button>'
           )).join("")
         : '<button class="move-button" type="button" disabled>Battle ' + escapeHtml(battle.status) + '</button>';
-      const recentLog = battle.log.slice(-6).reverse().map((entry) => (
+      const recentLog = battle.log.slice(-8).reverse().map((entry) => (
         '<div>Turn ' + Number(entry.turn || 0) + ': ' + escapeHtml(entry.text) + '</div>'
       )).join("");
 
+      let overlay = "";
+      if (battle.status !== "active") {
+        overlay = renderResultOverlay(battle);
+      } else if (state.battlePhase === "intro") {
+        overlay = '<div class="battle-overlay intro"><div class="overlay-title">Battle Start!</div></div>';
+      }
+
       els.battlePanel.innerHTML =
         '<div class="roster-head">' +
-          '<h2>' + (battle.mode === "pvp_async" ? "Challenge Battle" : "NPC Battle") + '</h2>' +
-          '<span class="subtle">' + escapeHtml(battle.status) + ' / turn ' + Number(battle.turn || 1) + '</span>' +
+          '<h2>' + battleTitle(battle) + '</h2>' +
+          '<div class="battle-head-tools">' +
+            '<span class="subtle">' + escapeHtml(battle.status) + ' / turn ' + Number(battle.turn || 1) + '</span>' +
+            '<button class="secondary" type="button" data-sound-toggle>' + (state.soundOn ? "Sound: on" : "Sound: off") + '</button>' +
+            '<button class="secondary" type="button" data-battle-exit>Exit</button>' +
+          '</div>' +
         '</div>' +
-        '<div class="battle-stage">' +
+        '<div class="battle-stage" id="battleStage" style="background-image:' + battleBackdrop(battle) + '">' +
           renderCombatant(battle.player, playerActive, "player") +
           renderCombatant(battle.opponent, opponentActive, "opponent") +
+          overlay +
         '</div>' +
         '<div class="moves">' + moveButtons + '</div>' +
-        '<div class="battle-log">' + recentLog + '</div>';
+        '<div class="battle-log" id="battleLogPanel">' + recentLog + '</div>';
     }
 
     function renderCombatant(team, creature, side) {
       const hpPct = creature.maxHp ? Math.max(0, Math.round((creature.hp / creature.maxHp) * 100)) : 0;
       const animation = side === "player" ? state.battleAnimation : "anim-idle";
       const sprite = creature.spriteUrl
-        ? renderSheetSprite(creature.spriteUrl, animation)
-        : '<div class="dummy-sprite">Dummy</div>';
+        ? renderSheetSprite(creature.spriteUrl, animation + (creature.fainted ? " fainted" : ""))
+        : '<div class="dummy-sprite' + (creature.fainted ? " fainted" : "") + '">Dummy</div>';
       const bench = team.creatures.map((member, index) => (
-        '<div class="bench-slot ' + (index === team.activeIndex ? "active" : "") + '">' + escapeHtml(member.name) + '</div>'
+        '<div class="bench-slot ' + (index === team.activeIndex ? "active" : "") + (member.fainted ? '" style="opacity:0.35' : "") + '">' + escapeHtml(member.name) + '</div>'
       )).join("");
 
-      return '<article class="combatant">' +
-        '<div class="combatant-head">' +
-          '<div class="combatant-name">' + escapeHtml(creature.name) + '</div>' +
-          '<div class="combatant-role">' + escapeHtml((creature.types || []).join(" / ")) + '</div>' +
-        '</div>' +
-        '<div class="combatant-sprite">' + sprite + '</div>' +
-        '<div>' +
-          '<div class="hp" aria-label="HP"><span style="--hp:' + hpPct + '%"></span></div>' +
-          '<div class="subtle">' + Number(creature.hp || 0) + ' / ' + Number(creature.maxHp || 0) + ' HP</div>' +
+      return '<article class="combatant ' + side + '">' +
+        '<div class="plate">' +
+          '<div class="combatant-head">' +
+            '<div class="combatant-name">' + escapeHtml(creature.name) + '</div>' +
+            '<div class="combatant-role">' + escapeHtml((creature.types || []).join(" / ")) + '</div>' +
+          '</div>' +
+          '<div class="hp" aria-label="HP"><span data-hp-bar="' + side + '" class="' + (hpPct <= 25 ? "hp-low" : "") + '" style="--hp:' + hpPct + '%"></span></div>' +
+          '<div class="subtle" data-hp-text="' + side + '">' + Number(creature.hp || 0) + ' / ' + Number(creature.maxHp || 0) + ' HP</div>' +
           '<div class="bench">' + bench + '</div>' +
+        '</div>' +
+        '<div class="combatant-sprite" data-sprite-zone="' + side + '">' +
+          '<div class="platform"></div>' + sprite +
         '</div>' +
       '</article>';
     }
