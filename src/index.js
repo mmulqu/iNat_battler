@@ -281,7 +281,8 @@ async function routeRequest(request, env, ctx) {
 
   const spriteBatchSyncMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)\/sync$/);
   if (request.method === "POST" && spriteBatchSyncMatch) {
-    return jsonResponse(await syncSpriteBatch(env, decodeURIComponent(spriteBatchSyncMatch[1])));
+    const maxItems = clampInt(url.searchParams.get("maxItems"), 1, 200, 25);
+    return jsonResponse(await syncSpriteBatch(env, decodeURIComponent(spriteBatchSyncMatch[1]), { maxItems }));
   }
 
   const spriteBatchMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)$/);
@@ -709,41 +710,50 @@ async function fetchGlobalSeedSpeciesCounts(env, group, limitPerGroup) {
 
 async function getGlobalSeedStatus(env) {
   const rows = await env.DB.prepare(`
+    WITH seed_status AS (
+      SELECT
+        gst.group_key,
+        EXISTS (
+          SELECT 1 FROM sprite_assets sa
+          WHERE sa.taxon_id = gst.taxon_id
+            AND sa.asset_kind = ?
+            AND sa.asset_version = ?
+            AND sa.status = 'ready'
+        ) AS has_ready,
+        EXISTS (
+          SELECT 1 FROM sprite_jobs sj
+          WHERE sj.taxon_id = gst.taxon_id
+            AND sj.asset_kind = ?
+            AND sj.asset_version = ?
+            AND sj.status = 'queued'
+        ) AS has_queued,
+        EXISTS (
+          SELECT 1 FROM sprite_jobs sj
+          WHERE sj.taxon_id = gst.taxon_id
+            AND sj.asset_kind = ?
+            AND sj.asset_version = ?
+            AND sj.status = 'batch_submitted'
+        ) AS has_batch_submitted,
+        EXISTS (
+          SELECT 1 FROM sprite_jobs sj
+          WHERE sj.taxon_id = gst.taxon_id
+            AND sj.asset_kind = ?
+            AND sj.asset_version = ?
+            AND sj.status = 'failed'
+        ) AS has_failed
+      FROM global_seed_taxa gst
+      WHERE gst.seed_key = ?
+    )
     SELECT
-      gst.group_key,
+      group_key,
       COUNT(*) AS seed_count,
-      SUM(CASE WHEN EXISTS (
-        SELECT 1 FROM sprite_assets sa
-        WHERE sa.taxon_id = gst.taxon_id
-          AND sa.asset_kind = ?
-          AND sa.asset_version = ?
-          AND sa.status = 'ready'
-      ) THEN 1 ELSE 0 END) AS ready_count,
-      SUM(CASE WHEN EXISTS (
-        SELECT 1 FROM sprite_jobs sj
-        WHERE sj.taxon_id = gst.taxon_id
-          AND sj.asset_kind = ?
-          AND sj.asset_version = ?
-          AND sj.status = 'queued'
-      ) THEN 1 ELSE 0 END) AS queued_count,
-      SUM(CASE WHEN EXISTS (
-        SELECT 1 FROM sprite_jobs sj
-        WHERE sj.taxon_id = gst.taxon_id
-          AND sj.asset_kind = ?
-          AND sj.asset_version = ?
-          AND sj.status = 'batch_submitted'
-      ) THEN 1 ELSE 0 END) AS batch_submitted_count,
-      SUM(CASE WHEN EXISTS (
-        SELECT 1 FROM sprite_jobs sj
-        WHERE sj.taxon_id = gst.taxon_id
-          AND sj.asset_kind = ?
-          AND sj.asset_version = ?
-          AND sj.status = 'failed'
-      ) THEN 1 ELSE 0 END) AS failed_count
-    FROM global_seed_taxa gst
-    WHERE gst.seed_key = ?
-    GROUP BY gst.group_key
-    ORDER BY gst.group_key
+      SUM(CASE WHEN has_ready THEN 1 ELSE 0 END) AS ready_count,
+      SUM(CASE WHEN NOT has_ready AND has_queued THEN 1 ELSE 0 END) AS queued_count,
+      SUM(CASE WHEN NOT has_ready AND has_batch_submitted THEN 1 ELSE 0 END) AS batch_submitted_count,
+      SUM(CASE WHEN NOT has_ready AND NOT has_queued AND NOT has_batch_submitted AND has_failed THEN 1 ELSE 0 END) AS failed_count
+    FROM seed_status
+    GROUP BY group_key
+    ORDER BY group_key
   `).bind(
     DEFAULT_ASSET_KIND,
     ASSET_VERSION,
@@ -773,7 +783,7 @@ async function getGlobalSeedStatus(env) {
       queuedCount,
       batchSubmittedCount,
       failedCount,
-      missingCount: Math.max(0, seedCount - readyCount - activeCount)
+      missingCount: Math.max(0, seedCount - readyCount - activeCount - failedCount)
     };
   });
 
@@ -1673,7 +1683,7 @@ async function getLatestSpriteBatch(env) {
   return getSpriteBatch(env, row.batch_id);
 }
 
-async function syncSpriteBatch(env, batchId) {
+async function syncSpriteBatch(env, batchId, options = {}) {
   if (!env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
@@ -1690,37 +1700,60 @@ async function syncSpriteBatch(env, batchId) {
     };
   }
 
-  let ready = 0;
-  let failed = 0;
+  const pendingCustomIds = await getPendingBatchCustomIds(env, batchId);
+  const maxItems = Math.max(1, Number(options.maxItems || 25));
+  let processed = 0;
+  let outputComplete = true;
+  let errorComplete = true;
 
-  if (remote.output_file_id) {
-    const outputText = await fetchOpenAIFileContent(env, remote.output_file_id);
-    for (const line of parseJsonl(outputText)) {
-      const result = await syncSpriteBatchOutputLine(env, batchId, line);
-      if (result === "ready") ready += 1;
-      if (result === "failed") failed += 1;
+  if (pendingCustomIds.size > 0 && remote.output_file_id) {
+    for await (const rawLine of streamOpenAIFileJsonlLines(env, remote.output_file_id)) {
+      const customId = customIdFromJsonlLine(rawLine);
+      if (customId && !pendingCustomIds.has(customId)) continue;
+
+      const result = await syncSpriteBatchOutputLine(env, batchId, JSON.parse(rawLine));
+      if (customId && (result === "ready" || result === "failed")) pendingCustomIds.delete(customId);
+      if (result === "ready" || result === "failed") processed += 1;
+
+      if (processed >= maxItems) {
+        outputComplete = false;
+        break;
+      }
     }
   }
 
-  if (remote.error_file_id) {
-    const errorText = await fetchOpenAIFileContent(env, remote.error_file_id);
-    for (const line of parseJsonl(errorText)) {
+  if (pendingCustomIds.size > 0 && outputComplete && remote.error_file_id) {
+    for await (const rawLine of streamOpenAIFileJsonlLines(env, remote.error_file_id)) {
+      const line = JSON.parse(rawLine);
       const result = await markSpriteBatchItemFailed(
         env,
         batchId,
         line.custom_id,
         line.error?.message ?? JSON.stringify(line.error ?? line)
       );
-      if (result) failed += 1;
+      if (line.custom_id && result) pendingCustomIds.delete(line.custom_id);
+      if (result) processed += 1;
+
+      if (processed >= maxItems) {
+        errorComplete = false;
+        break;
+      }
     }
   }
 
+  const counts = await getBatchItemSyncCounts(env, batchId);
+  const synced = counts.itemCount > 0 && counts.ready + counts.failed >= counts.itemCount;
+
   return {
-    synced: true,
+    synced,
     batchId,
     status: remote.status,
-    ready,
-    failed,
+    ready: counts.ready,
+    failed: counts.failed,
+    itemCount: counts.itemCount,
+    processed,
+    remaining: Math.max(0, counts.itemCount - counts.ready - counts.failed),
+    partial: !synced || !outputComplete || !errorComplete,
     requestCounts: remote.request_counts ?? null
   };
 }
@@ -1757,7 +1790,7 @@ async function updateStoredSpriteBatch(env, batch) {
   ).run();
 }
 
-async function fetchOpenAIFileContent(env, fileId) {
+async function* streamOpenAIFileJsonlLines(env, fileId) {
   const response = await fetch(`https://api.openai.com/v1/files/${encodeURIComponent(fileId)}/content`, {
     headers: {
       "Authorization": `Bearer ${env.OPENAI_API_KEY}`
@@ -1769,7 +1802,73 @@ async function fetchOpenAIFileContent(env, fileId) {
     throw new Error(`OpenAI file content fetch failed: ${response.status} ${text}`);
   }
 
-  return response.text();
+  if (!response.body) {
+    throw new Error("OpenAI file content response did not include a readable body");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let doneReading = false;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        doneReading = true;
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() ?? "";
+
+      for (const part of parts) {
+        const line = part.trim();
+        if (line) yield line;
+      }
+    }
+
+    buffer += decoder.decode();
+    const finalLine = buffer.trim();
+    if (finalLine) yield finalLine;
+  } finally {
+    if (!doneReading) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+async function getPendingBatchCustomIds(env, batchId) {
+  const rows = await env.DB.prepare(`
+    SELECT custom_id
+    FROM openai_sprite_batch_items
+    WHERE batch_id = ?
+      AND status NOT IN ('ready', 'failed')
+  `).bind(batchId).all();
+
+  return new Set((rows.results ?? []).map((row) => String(row.custom_id)));
+}
+
+async function getBatchItemSyncCounts(env, batchId) {
+  const row = await env.DB.prepare(`
+    SELECT
+      COUNT(*) AS item_count,
+      SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) AS ready_count,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+    FROM openai_sprite_batch_items
+    WHERE batch_id = ?
+  `).bind(batchId).first();
+
+  return {
+    itemCount: Number(row?.item_count ?? 0),
+    ready: Number(row?.ready_count ?? 0),
+    failed: Number(row?.failed_count ?? 0)
+  };
+}
+
+function customIdFromJsonlLine(line) {
+  const match = String(line ?? "").match(/"custom_id"\s*:\s*"([^"]+)"/);
+  return match ? match[1] : "";
 }
 
 async function syncSpriteBatchOutputLine(env, batchId, line) {
@@ -1796,6 +1895,8 @@ async function syncSpriteBatchOutputLine(env, batchId, line) {
   const item = await env.DB.prepare(`
     SELECT
       bi.custom_id,
+      bi.status AS batch_item_status,
+      bi.r2_key AS batch_item_r2_key,
       bi.job_id,
       sj.taxon_id,
       sj.asset_kind,
@@ -1810,6 +1911,8 @@ async function syncSpriteBatchOutputLine(env, batchId, line) {
   `).bind(batchId, line.custom_id).first();
 
   if (!item) return "ignored";
+  if (item.batch_item_status === "ready" && item.batch_item_r2_key) return "already_ready";
+  if (item.batch_item_status === "failed") return "already_failed";
 
   const body = line.response?.body ?? {};
   const b64 = body.data?.[0]?.b64_json;
@@ -2272,7 +2375,10 @@ async function getSpriteTree(env, options = {}) {
 }
 
 function buildSpriteTree(leaves) {
-  const rootMap = new Map();
+  if (!Array.isArray(leaves) || leaves.length === 0) return [];
+
+  const lifeNode = branchNode("taxon:life", "Life", "root");
+  const rootMap = lifeNode.childMap;
 
   const getBranch = (map, key, factory) => {
     if (!map.has(key)) map.set(key, factory());
@@ -2312,7 +2418,7 @@ function buildSpriteTree(leaves) {
     return node;
   };
 
-  return Array.from(rootMap.values()).map(finalize).sort(compareTreeNodes);
+  return [finalize(lifeNode)];
 }
 
 function branchNode(key, name, rank) {
@@ -4601,49 +4707,90 @@ function renderAppHtml() {
 
     .sprite-tree {
       display: grid;
-      gap: 8px;
-    }
-
-    .tree-node {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.78);
       overflow: hidden;
+      background: rgba(255, 255, 255, 0.84);
     }
 
-    .tree-node summary {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
+    .tree-menu-row {
+      --tree-indent: 0px;
+      width: 100%;
+      min-width: 0;
+      border: 0;
+      border-bottom: 1px solid #e5e9e2;
+      padding-left: calc(10px + var(--tree-indent));
+      padding-right: 10px;
+      font: inherit;
+      color: var(--ink);
+    }
+
+    .tree-menu-row:last-child {
+      border-bottom: 0;
+    }
+
+    .tree-menu-branch {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto auto;
+      gap: 8px;
       align-items: center;
       min-height: 42px;
-      padding: 9px 12px;
+      background: #fbfcf9;
       cursor: pointer;
+      text-align: left;
+    }
+
+    .tree-menu-branch:hover,
+    .tree-menu-branch:focus-visible {
+      background: #eef4f0;
+    }
+
+    .tree-menu-branch[aria-expanded="true"] {
+      background: #edf6f1;
+    }
+
+    .tree-disclosure {
+      color: var(--teal);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-weight: 900;
+      text-align: center;
     }
 
-    .tree-node-list {
-      display: grid;
-      gap: 8px;
-      padding: 0 10px 10px 18px;
+    .tree-branch-name,
+    .tree-leaf-name {
+      min-width: 0;
+      font-weight: 900;
+      overflow-wrap: anywhere;
     }
 
-    .tree-leaf {
+    .tree-rank,
+    .tree-count,
+    .tree-leaf-meta {
+      color: var(--muted);
+      font-size: 0.8rem;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .tree-menu-leaf {
       display: grid;
-      grid-template-columns: 72px minmax(0, 1fr) auto;
+      grid-template-columns: 58px minmax(0, 1fr) auto;
       gap: 10px;
       align-items: center;
-      min-height: 88px;
-      border: 1px solid #e5e9e2;
-      border-radius: 8px;
-      padding: 8px;
+      min-height: 72px;
+      padding-top: 7px;
+      padding-bottom: 7px;
+      background: #ffffff;
+    }
+
+    .tree-menu-leaf:nth-child(even) {
       background: #fbfcf9;
     }
 
     .tree-leaf-sprite {
       display: grid;
       place-items: center;
-      width: 72px;
+      width: 58px;
       aspect-ratio: 1 / 1;
       border-radius: 8px;
       background: #eef2eb;
@@ -4654,23 +4801,16 @@ function renderAppHtml() {
       width: 94%;
     }
 
-    .tree-leaf-name {
+    .tree-leaf-copy {
       min-width: 0;
-      font-weight: 900;
-      overflow-wrap: anywhere;
+      display: grid;
+      gap: 2px;
     }
 
-    .tree-leaf-meta {
+    .tree-notice {
       color: var(--muted);
-      font-size: 0.82rem;
-      overflow-wrap: anywhere;
-    }
-
-    .tree-count {
-      color: var(--muted);
-      font-size: 0.8rem;
-      font-weight: 900;
-      white-space: nowrap;
+      font-size: 0.84rem;
+      font-weight: 800;
     }
 
     .grid {
@@ -5186,13 +5326,29 @@ function renderAppHtml() {
         grid-template-columns: 1fr;
       }
 
-      .tree-tools,
-      .tree-leaf {
+      .tree-tools {
         grid-template-columns: 1fr;
       }
 
+      .tree-menu-branch {
+        grid-template-columns: 18px minmax(0, 1fr) auto;
+      }
+
+      .tree-rank {
+        display: none;
+      }
+
+      .tree-menu-leaf {
+        grid-template-columns: 52px minmax(0, 1fr);
+      }
+
+      .tree-menu-leaf .manual-result-link {
+        grid-column: 2;
+        justify-self: start;
+      }
+
       .tree-leaf-sprite {
-        width: min(100%, 160px);
+        width: 52px;
       }
 
       .meta {
@@ -5337,6 +5493,8 @@ function renderAppHtml() {
     const DEV_QUEUE_MORE_LIMIT = 100;
     const DEV_BATCH_SUBMIT_LIMIT = 100;
     const GLOBAL_SEED_BATCH_LIMIT = 200;
+    const TREE_RENDER_ROW_LIMIT = 420;
+    const BATCH_SYNC_ITEM_LIMIT = 25;
     const ACTIVE_BATCH_STATUSES = new Set(["submitted", "validating", "in_progress", "finalizing", "cancelling"]);
 
     const state = {
@@ -5346,6 +5504,7 @@ function renderAppHtml() {
       taxa: [],
       spriteTree: null,
       treeSearch: "",
+      expandedTreeNodes: new Set(),
       selectedTaxa: new Set(),
       flippedTaxa: new Set(),
       batchJobs: [],
@@ -5570,6 +5729,22 @@ function renderAppHtml() {
     });
 
     els.startBattleButton.addEventListener("click", startNpcBattle);
+
+    els.spriteTreePanel.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-tree-toggle]");
+      if (!button) return;
+
+      const key = button.getAttribute("data-tree-key");
+      if (!key) return;
+
+      if (state.expandedTreeNodes.has(key)) {
+        state.expandedTreeNodes.delete(key);
+      } else {
+        state.expandedTreeNodes.add(key);
+      }
+
+      renderSpriteTree();
+    });
 
     els.battlePanel.addEventListener("click", async (event) => {
       const button = event.target.closest("[data-move-id]");
@@ -6086,8 +6261,10 @@ function renderAppHtml() {
       if (showStatus) setStatus("Loading sprite tree");
 
       try {
+        const previousQuery = state.spriteTree?.q || "";
         const res = await apiFetch("/api/sprite-tree?limit=1000&q=" + encodeURIComponent(q));
         state.spriteTree = res;
+        syncTreeExpansion(res, q, previousQuery);
         renderSpriteTree();
         if (showStatus) setStatus("Loaded " + Number(res.totalSprites || 0) + " ready sprites in the tree");
       } catch (error) {
@@ -6140,39 +6317,118 @@ function renderAppHtml() {
       }
 
       els.spriteTreePanel.innerHTML =
-        '<div class="tree-summary">Grouped by iNaturalist iconic taxon and genus from the current D1/R2 sprite assets.</div>' +
-        '<div class="sprite-tree">' + tree.roots.map((node) => renderTreeNode(node, 0)).join("") + '</div>';
+        '<div class="tree-summary">' + treeSummaryText(tree) + '</div>' +
+        renderTreeMenu(tree.roots);
     }
 
-    function renderTreeNode(node, depth) {
-      if (node.leaf) return renderTreeLeaf(node);
+    function syncTreeExpansion(tree, query, previousQuery) {
+      const roots = Array.isArray(tree?.roots) ? tree.roots : [];
+      const branchKeys = collectTreeBranchKeys(roots);
+      const rootKeys = roots
+        .filter((node) => !node.leaf && node.key)
+        .map((node) => String(node.key));
 
-      const open = depth < 1 ? " open" : "";
-      return '<details class="tree-node"' + open + '>' +
-        '<summary>' +
-          '<span>' + escapeHtml(node.name || "Taxon") + '</span>' +
-          '<span class="tree-count">' + Number(node.spriteCount || 0) + ' sprites</span>' +
-        '</summary>' +
-        '<div class="tree-node-list">' +
-          (Array.isArray(node.children) ? node.children.map((child) => renderTreeNode(child, depth + 1)).join("") : "") +
-        '</div>' +
-      '</details>';
+      if (String(query || "").trim()) {
+        state.expandedTreeNodes = branchKeys;
+        return;
+      }
+
+      if (previousQuery !== query || state.expandedTreeNodes.size === 0) {
+        state.expandedTreeNodes = new Set(rootKeys);
+        return;
+      }
+
+      const retained = new Set(rootKeys);
+      for (const key of state.expandedTreeNodes) {
+        if (branchKeys.has(key)) retained.add(key);
+      }
+      state.expandedTreeNodes = retained;
     }
 
-    function renderTreeLeaf(node) {
+    function collectTreeBranchKeys(nodes, keys = new Set()) {
+      for (const node of nodes || []) {
+        if (!node || node.leaf) continue;
+        if (node.key) keys.add(String(node.key));
+        collectTreeBranchKeys(node.children || [], keys);
+      }
+      return keys;
+    }
+
+    function treeSummaryText(tree) {
+      const q = String(tree.q || "").trim();
+      const total = Number(tree.totalSprites || 0);
+      if (q) return total + ' ready sprites matching "' + escapeHtml(q) + '"';
+      return total + " ready sprites by taxonomic branch";
+    }
+
+    function renderTreeMenu(roots) {
+      const renderState = { rows: [], truncated: false };
+      collectVisibleTreeRows(roots || [], 0, renderState);
+
+      const notice = renderState.truncated
+        ? '<div class="tree-notice">Showing first ' + TREE_RENDER_ROW_LIMIT + ' visible rows.</div>'
+        : '';
+
+      return notice +
+        '<div class="sprite-tree" role="tree">' +
+          renderState.rows.map((row) => row.node.leaf
+            ? renderTreeLeaf(row.node, row.depth)
+            : renderTreeBranch(row.node, row.depth)
+          ).join("") +
+        '</div>';
+    }
+
+    function collectVisibleTreeRows(nodes, depth, renderState) {
+      for (const node of nodes || []) {
+        if (renderState.rows.length >= TREE_RENDER_ROW_LIMIT) {
+          renderState.truncated = true;
+          return;
+        }
+
+        renderState.rows.push({ node, depth });
+
+        if (!node.leaf && state.expandedTreeNodes.has(String(node.key))) {
+          collectVisibleTreeRows(node.children || [], depth + 1, renderState);
+          if (renderState.truncated) return;
+        }
+      }
+    }
+
+    function renderTreeBranch(node, depth) {
+      const key = String(node.key || "");
+      const expanded = state.expandedTreeNodes.has(key);
+      const childCount = Array.isArray(node.children) ? node.children.length : 0;
+      const rank = node.rank || "branch";
+
+      return '<button class="tree-menu-row tree-menu-branch" type="button" role="treeitem" ' +
+          treeRowStyle(depth) +
+          ' data-tree-toggle data-tree-key="' + escapeAttr(key) + '" aria-expanded="' + (expanded ? "true" : "false") + '">' +
+        '<span class="tree-disclosure" aria-hidden="true">' + (expanded ? "v" : "&gt;") + '</span>' +
+        '<span class="tree-branch-name">' + escapeHtml(node.name || "Taxon") + '</span>' +
+        '<span class="tree-rank">' + escapeHtml(rank) + '</span>' +
+        '<span class="tree-count">' + Number(node.spriteCount || 0) + ' sprites / ' + childCount + ' items</span>' +
+      '</button>';
+    }
+
+    function renderTreeLeaf(node, depth) {
       const sprite = node.sprite?.url
         ? renderSheetSprite(node.sprite.url, "anim-idle")
         : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(node.iconicTaxonName)) + '"></div>';
 
-      return '<div class="tree-leaf">' +
+      return '<div class="tree-menu-row tree-menu-leaf" role="treeitem" ' + treeRowStyle(depth) + '>' +
         '<div class="tree-leaf-sprite">' + sprite + '</div>' +
-        '<div>' +
+        '<div class="tree-leaf-copy">' +
           '<div class="tree-leaf-name">' + escapeHtml(node.name || node.scientificName || "Unnamed taxon") + '</div>' +
           '<div class="tree-leaf-meta"><em>' + escapeHtml(node.scientificName || "") + '</em></div>' +
           '<div class="tree-leaf-meta">' + escapeHtml((node.rank || "taxon") + " / " + (node.iconicTaxonName || "Life")) + ' / taxon ' + Number(node.taxonId || 0) + '</div>' +
         '</div>' +
         '<a class="manual-result-link" href="' + escapeAttr(node.sprite?.url || "#") + '" target="_blank" rel="noreferrer">Open</a>' +
       '</div>';
+    }
+
+    function treeRowStyle(depth) {
+      const indent = Math.max(0, Math.min(10, Number(depth) || 0)) * 18;
+      return 'style="--tree-indent:' + indent + 'px"';
     }
 
     async function loadBatchQueue(showStatus) {
@@ -6406,17 +6662,24 @@ function renderAppHtml() {
       renderBatchQueue();
 
       try {
-        const res = await apiFetch("/api/sprite-batches/" + encodeURIComponent(state.lastBatch.batchId) + "/sync", {
+        const res = await apiFetch(
+          "/api/sprite-batches/" +
+            encodeURIComponent(state.lastBatch.batchId) +
+            "/sync?maxItems=" +
+            BATCH_SYNC_ITEM_LIMIT,
+          {
           method: "POST"
-        });
+          }
+        );
 
         if (res.synced) {
           state.lastBatch = {
             ...state.lastBatch,
             status: res.status || state.lastBatch.status,
             synced: true,
-            ready: Number(res.ready || 0),
-            failed: Number(res.failed || 0),
+            ready: Number(res.ready ?? 0),
+            failed: Number(res.failed ?? 0),
+            itemCount: Number(res.itemCount ?? state.lastBatch.itemCount ?? 0),
             requestCounts: res.requestCounts || state.lastBatch.requestCounts || null
           };
           saveLastBatch();
@@ -6427,11 +6690,23 @@ function renderAppHtml() {
           state.lastBatch = {
             ...state.lastBatch,
             status: res.status || state.lastBatch.status,
+            synced: false,
+            ready: Number(res.ready ?? state.lastBatch.ready ?? 0),
+            failed: Number(res.failed ?? state.lastBatch.failed ?? 0),
+            itemCount: Number(res.itemCount ?? state.lastBatch.itemCount ?? 0),
             requestCounts: res.requestCounts || state.lastBatch.requestCounts || null
           };
           saveLastBatch();
-          if (showStatus) setStatus(batchStatusText(state.lastBatch));
-          if (isActiveBatchStatus(state.lastBatch.status)) scheduleBatchPolling(BATCH_POLL_MS);
+          setStatus(
+            "Batch sync in progress: " +
+              state.lastBatch.ready +
+              " ready, " +
+              state.lastBatch.failed +
+              " failed, " +
+              Number(res.remaining || 0) +
+              " remaining"
+          );
+          scheduleBatchPolling(5000);
         }
       } catch (error) {
         setStatus("Batch sync failed: " + error.message);
@@ -6444,11 +6719,16 @@ function renderAppHtml() {
 
     function scheduleBatchPolling(delayMs) {
       if (state.batchPolling) clearTimeout(state.batchPolling);
-      if (!state.lastBatch || !isActiveBatchStatus(state.lastBatch.status)) return;
+      if (!state.lastBatch || !shouldPollBatch(state.lastBatch)) return;
 
       state.batchPolling = setTimeout(() => {
         refreshBatchStatus(false);
       }, delayMs || BATCH_POLL_MS);
+    }
+
+    function shouldPollBatch(batch) {
+      const status = String(batch?.status || "").toLowerCase();
+      return isActiveBatchStatus(status) || (status === "completed" && !batch.synced);
     }
 
     function normalizeSubmittedBatch(batch) {
