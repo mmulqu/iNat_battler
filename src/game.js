@@ -148,7 +148,7 @@ export function createGenome(taxon) {
   };
 }
 
-export function createBattleCreature(taxon, instanceSuffix = "a") {
+export function createBattleCreature(taxon, instanceSuffix = "a", training = null) {
   const genome = createGenome(taxon);
   const bondLevel = taxon.bondLevel ?? 0;
   const obsCount = taxon.obsCount ?? 0;
@@ -160,12 +160,32 @@ export function createBattleCreature(taxon, instanceSuffix = "a") {
     tempo: Math.round(genome.baseStats.tempo * (1 + bondScale * 0.5)),
     sense: Math.round(genome.baseStats.sense * (1 + bondScale * 0.75))
   };
+
+  // Manual training: allocated points add to the bond-scaled base, then
+  // genus/family mastery buffs multiply the result.
+  const allocations = training?.allocations ?? null;
+  const buffPct = Number(training?.buffPct ?? 0);
+  for (const stat of Object.keys(stats)) {
+    if (allocations && Number.isFinite(allocations[stat])) {
+      stats[stat] += Math.max(0, Math.floor(allocations[stat]));
+    }
+    if (buffPct > 0) {
+      stats[stat] = Math.round(stats[stat] * (1 + buffPct));
+    }
+  }
+
   const maxHp = Math.round(45 + stats.vigor * 1.4 + Math.min(20, Math.sqrt(obsCount) * 2));
+  const speciesName = taxon.commonName || taxon.scientificName;
+  const nickname = training?.nickname ?? null;
 
   return {
     instanceId: `${taxon.taxonId}-${instanceSuffix}`,
     taxonId: taxon.taxonId,
-    name: taxon.commonName || taxon.scientificName,
+    name: nickname || speciesName,
+    speciesName,
+    nickname,
+    trainingLevel: Math.max(0, Math.floor(Number(training?.level ?? 0))),
+    trainingBuffPct: buffPct,
     scientificName: taxon.scientificName,
     bodyPlan: genome.bodyPlan,
     types: genome.types,

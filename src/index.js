@@ -7,6 +7,20 @@ import {
 } from "./game.js";
 
 import {
+  RESPEC_COOLDOWN_MS,
+  TRAINING_STATS,
+  allocationsTotal,
+  combinedBuffPct,
+  groupTier,
+  nextTierTarget,
+  sanitizeAllocations,
+  sanitizeNickname,
+  speciesEarnedPoints,
+  statCapFor,
+  tierRank
+} from "./training.js";
+
+import {
   buildChallengePostRecord,
   clientMetadataDocument,
   exchangeAuthorizationCode,
@@ -175,6 +189,34 @@ async function routeRequest(request, env, ctx) {
   const submissionSyncMatch = url.pathname.match(/^\/api\/sprite-submissions\/([^/]+)\/sync$/);
   if (request.method === "POST" && submissionSyncMatch) {
     return jsonResponse(await syncSingleSubmission(env, decodeURIComponent(submissionSyncMatch[1])));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/training") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await getTrainingOverview(env, session));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/training/sync") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await syncTrainingData(env, session));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/training/allocate") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await allocateTrainingPoints(env, session, payload));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/training/respec") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await respecTraining(env, session, payload.taxonId));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/training/nickname") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await setTrainingNickname(env, session, payload.taxonId, payload.nickname));
   }
 
   if (request.method === "POST" && url.pathname === "/api/challenges") {
@@ -2063,8 +2105,14 @@ async function getRoster(env, userId, limit, q = "") {
       t.iconic_taxon_name,
       t.ancestry,
       t.default_photo_url,
+      t.genus_id,
+      t.family_id,
       ut.obs_count,
       ut.bond_level,
+      ut.rg_obs_count,
+      st.nickname,
+      st.allocated_json,
+      st.points_spent,
       (
         SELECT sa.r2_key
         FROM sprite_assets sa
@@ -2117,6 +2165,7 @@ async function getRoster(env, userId, limit, q = "") {
       ) AS custom_status
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
+    LEFT JOIN species_training st ON st.user_id = ut.user_id AND st.taxon_id = t.taxon_id
     WHERE ut.user_id = ?
       AND (
         ? = ''
@@ -2137,6 +2186,8 @@ async function getRoster(env, userId, limit, q = "") {
     limit
   ).all();
 
+  const buffMap = await loadUserBuffMap(env, userId);
+
   return {
     userId,
     taxa: (rows.results ?? []).map((row) => {
@@ -2147,7 +2198,7 @@ async function getRoster(env, userId, limit, q = "") {
       const spriteUrl = spriteReady ? `/api/assets/${encodeR2Key(finalKey)}` : null;
       const taxon = taxonSummaryFromRow(row, spriteUrl);
       const genome = createGenome(taxon);
-      const battleCreature = createBattleCreature(taxon, "roster");
+      const battleCreature = createBattleCreature(taxon, "roster", trainingFromRow(row, buffMap));
 
       return {
         taxonId: row.taxon_id,
@@ -2167,6 +2218,9 @@ async function getRoster(env, userId, limit, q = "") {
               placeholder: placeholderFor(row.iconic_taxon_name)
             },
         customSprite: row.custom_status ? { status: row.custom_status } : null,
+        nickname: row.nickname ?? null,
+        trainingLevel: Math.max(0, Number(row.points_spent ?? 0)),
+        rgObsCount: Number(row.rg_obs_count ?? 0),
         bodyPlan: genome.bodyPlan,
         types: genome.types,
         role: genome.role,
@@ -2470,8 +2524,13 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
       t.common_name,
       t.iconic_taxon_name,
       t.ancestry,
+      t.genus_id,
+      t.family_id,
       ut.obs_count,
       ut.bond_level,
+      st.nickname,
+      st.allocated_json,
+      st.points_spent,
       (
         SELECT sa.r2_key
         FROM sprite_assets sa
@@ -2508,6 +2567,7 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
       ) AS approved_custom_key
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
+    LEFT JOIN species_training st ON st.user_id = ut.user_id AND st.taxon_id = t.taxon_id
     WHERE ut.user_id = ?
       AND t.taxon_id IN (${placeholders})
       AND (
@@ -2536,6 +2596,7 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
     ASSET_VERSION
   ).all();
 
+  const buffMap = await loadUserBuffMap(env, userId);
   const byId = new Map((rows.results ?? []).map((row) => [Number(row.taxon_id), row]));
   return cleanTaxonIds.map((taxonId, index) => {
     const row = byId.get(taxonId);
@@ -2547,7 +2608,11 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
     const customKey = personalView === "owner" ? row.own_custom_key : row.approved_custom_key;
     const finalKey = customKey || row.r2_key;
     const spriteUrl = finalKey ? `/api/assets/${encodeR2Key(finalKey)}` : null;
-    return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `${idPrefix}-${index}`);
+    return createBattleCreature(
+      taxonSummaryFromRow(row, spriteUrl),
+      `${idPrefix}-${index}`,
+      trainingFromRow(row, buffMap)
+    );
   });
 }
 
@@ -3455,6 +3520,568 @@ async function declineChallenge(env, session, challengeId) {
   `).bind(now, challengeId).run();
 
   return { challengeId, status: "declined" };
+}
+
+// ---------------------------------------------------------------------------
+// Species training: Research Grade points, mastery tiers, stat allocation
+// ---------------------------------------------------------------------------
+
+const TRAINING_ANCESTOR_BATCH_SIZE = 30;
+const TRAINING_MAX_ANCESTOR_BATCHES = 12;
+
+function requireLinkedUserId(session) {
+  if (!session.inat_login) throw httpError("Link your iNaturalist account first", 400);
+  return inatUserIdFor(session.inat_login);
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function fetchRgSpeciesCounts(env, inatLogin) {
+  const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:rg:v1`;
+  const cached = await readSpeciesCountsCache(env, cacheKey);
+  if (cached?.fresh) return cached.rows;
+
+  const maxPages = intEnv(env, "MAX_IMPORT_PAGES", 1);
+  const rows = [];
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const url = new URL("https://api.inaturalist.org/v1/observations/species_counts");
+    url.searchParams.set("user_login", inatLogin);
+    url.searchParams.set("quality_grade", "research");
+    url.searchParams.set("per_page", "500");
+    url.searchParams.set("page", String(page));
+
+    const res = await fetchInatWithRetry(url.toString());
+    if (!res.ok) {
+      if (res.status === 429 && cached?.rows?.length) return cached.rows;
+      const error = new Error(`iNaturalist Research Grade counts failed (${res.status})`);
+      if (res.status === 429) error.code = "INAT_RATE_LIMITED";
+      throw error;
+    }
+
+    const data = await res.json();
+    const pageRows = Array.isArray(data.results) ? data.results : [];
+    rows.push(...pageRows);
+    if (pageRows.length < 500) break;
+    if (page < maxPages) await sleep(1100);
+  }
+
+  await writeSpeciesCountsCache(env, cacheKey, rows);
+  return rows;
+}
+
+async function loadTaxonInfoCache(env, taxonIds) {
+  const map = new Map();
+  for (const chunk of chunkArray(taxonIds, 80)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT * FROM taxon_info_cache WHERE taxon_id IN (${placeholders})`
+    ).bind(...chunk).all();
+    for (const row of rows.results ?? []) map.set(Number(row.taxon_id), row);
+  }
+  return map;
+}
+
+async function syncTrainingData(env, session) {
+  const userId = requireLinkedUserId(session);
+  const now = new Date().toISOString();
+  const summary = {
+    rgSpeciesUpdated: 0,
+    taxaResolved: 0,
+    unresolvedTaxa: 0,
+    ancestorsFetched: 0,
+    masteriesUpdated: 0,
+    warning: null
+  };
+
+  // 1. Research Grade counts per species.
+  try {
+    const rgRows = await fetchRgSpeciesCounts(env, session.inat_login);
+    await env.DB.prepare("UPDATE user_taxa SET rg_obs_count = 0 WHERE user_id = ?").bind(userId).run();
+
+    for (const row of rgRows) {
+      const taxon = row.taxon;
+      if (!taxon?.id || !taxon.name) continue;
+      const rgCount = Math.max(0, Number(row.count ?? 0));
+      await upsertTaxonFromInat(env, taxon, now);
+      await env.DB.prepare(`
+        INSERT INTO user_taxa (user_id, taxon_id, obs_count, weighted_obs, bond_level, rg_obs_count, imported_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, taxon_id) DO UPDATE SET
+          rg_obs_count = excluded.rg_obs_count
+      `).bind(
+        userId,
+        taxon.id,
+        rgCount,
+        rgCount,
+        Math.floor(10 * Math.log10(1 + rgCount)),
+        rgCount,
+        now
+      ).run();
+      summary.rgSpeciesUpdated += 1;
+    }
+  } catch (error) {
+    summary.warning = error instanceof Error ? error.message : "Research Grade fetch failed";
+  }
+
+  // 2. Resolve genus/family ids for the user's taxa from their ancestry chains.
+  const unresolved = await env.DB.prepare(`
+    SELECT t.taxon_id, t.ancestry
+    FROM user_taxa ut
+    JOIN taxa t ON t.taxon_id = ut.taxon_id
+    WHERE ut.user_id = ?
+      AND (t.genus_id IS NULL OR t.family_id IS NULL)
+      AND t.ancestry IS NOT NULL
+  `).bind(userId).all();
+  const unresolvedRows = unresolved.results ?? [];
+
+  const ancestorIds = new Set();
+  for (const row of unresolvedRows) {
+    for (const part of String(row.ancestry).split("/")) {
+      const id = Number.parseInt(part, 10);
+      if (Number.isFinite(id)) ancestorIds.add(id);
+    }
+  }
+
+  const infoCache = await loadTaxonInfoCache(env, [...ancestorIds]);
+  const missingIds = [...ancestorIds].filter((id) => !infoCache.has(id));
+
+  let batches = 0;
+  for (const chunk of chunkArray(missingIds, TRAINING_ANCESTOR_BATCH_SIZE)) {
+    if (batches >= TRAINING_MAX_ANCESTOR_BATCHES) break;
+    batches += 1;
+
+    try {
+      const res = await fetchInatWithRetry(
+        `https://api.inaturalist.org/v1/taxa/${chunk.join(",")}?per_page=${chunk.length}`
+      );
+      if (!res.ok) {
+        summary.warning = summary.warning ?? `iNaturalist taxa lookup failed (${res.status}); sync again later for remaining taxa`;
+        break;
+      }
+      const data = await res.json();
+      for (const taxon of data.results ?? []) {
+        const info = {
+          taxon_id: taxon.id,
+          rank: taxon.rank ?? null,
+          name: taxon.name ?? null,
+          complete_species_count: Number.isFinite(taxon.complete_species_count)
+            ? taxon.complete_species_count
+            : null,
+          fetched_at: now
+        };
+        await env.DB.prepare(`
+          INSERT OR REPLACE INTO taxon_info_cache (taxon_id, rank, name, complete_species_count, fetched_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).bind(info.taxon_id, info.rank, info.name, info.complete_species_count, info.fetched_at).run();
+        infoCache.set(Number(taxon.id), info);
+        summary.ancestorsFetched += 1;
+      }
+    } catch (error) {
+      summary.warning = summary.warning ?? (error instanceof Error ? error.message : "taxa lookup failed");
+      break;
+    }
+    await sleep(600);
+  }
+
+  for (const row of unresolvedRows) {
+    const chain = String(row.ancestry).split("/")
+      .map((part) => Number.parseInt(part, 10))
+      .filter(Number.isFinite);
+
+    // Ancestry is ordered root -> leaf, so the last genus/family in the
+    // chain is the closest to the species.
+    let genus = null;
+    let family = null;
+    for (const id of chain) {
+      const info = infoCache.get(id);
+      if (!info) continue;
+      if (info.rank === "genus") genus = info;
+      if (info.rank === "family") family = info;
+    }
+
+    if (genus || family) {
+      await env.DB.prepare(`
+        UPDATE taxa
+        SET genus_id = COALESCE(?, genus_id),
+            genus_name = COALESCE(?, genus_name),
+            family_id = COALESCE(?, family_id),
+            family_name = COALESCE(?, family_name)
+        WHERE taxon_id = ?
+      `).bind(
+        genus?.taxon_id ?? null,
+        genus?.name ?? null,
+        family?.taxon_id ?? null,
+        family?.name ?? null,
+        row.taxon_id
+      ).run();
+    }
+    if (genus && family) summary.taxaResolved += 1;
+    else summary.unresolvedTaxa += 1;
+  }
+
+  // 3. Mastery tiers (never downgraded once achieved).
+  const context = await loadTrainingContext(env, userId);
+  for (const kind of ["genus", "family"]) {
+    const groups = kind === "genus" ? context.genusGroups : context.familyGroups;
+
+    for (const [groupId, group] of groups) {
+      if (group.observed <= 0) continue;
+      const computedTier = groupTier(kind, group.observed, group.total);
+      const existing = context.masteryMap.get(`${kind}:${groupId}`);
+      const finalTier = existing && tierRank(existing.tier) > tierRank(computedTier)
+        ? existing.tier
+        : computedTier;
+      if (finalTier === "none") continue;
+
+      const achievedAt = existing && tierRank(existing.tier) >= tierRank(finalTier)
+        ? existing.achieved_at
+        : now;
+      await env.DB.prepare(`
+        INSERT INTO user_masteries (
+          user_id, group_kind, group_id, group_name, tier,
+          species_observed, species_total, achieved_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, group_kind, group_id) DO UPDATE SET
+          group_name = excluded.group_name,
+          tier = excluded.tier,
+          species_observed = excluded.species_observed,
+          species_total = excluded.species_total,
+          achieved_at = excluded.achieved_at,
+          updated_at = excluded.updated_at
+      `).bind(
+        userId,
+        kind,
+        groupId,
+        group.name,
+        finalTier,
+        group.observed,
+        group.total,
+        achievedAt ?? now,
+        now
+      ).run();
+      summary.masteriesUpdated += 1;
+    }
+  }
+
+  return summary;
+}
+
+async function loadTrainingContext(env, userId) {
+  const rows = await env.DB.prepare(`
+    SELECT
+      t.taxon_id, t.scientific_name, t.common_name, t.iconic_taxon_name, t.ancestry,
+      t.genus_id, t.genus_name, t.family_id, t.family_name,
+      ut.obs_count, ut.bond_level, ut.rg_obs_count,
+      st.nickname, st.allocated_json, st.points_spent, st.last_respec_at
+    FROM user_taxa ut
+    JOIN taxa t ON t.taxon_id = ut.taxon_id
+    LEFT JOIN species_training st ON st.user_id = ut.user_id AND st.taxon_id = ut.taxon_id
+    WHERE ut.user_id = ?
+    ORDER BY ut.rg_obs_count DESC, ut.obs_count DESC
+  `).bind(userId).all();
+  const speciesRows = rows.results ?? [];
+
+  const genusGroups = new Map();
+  const familyGroups = new Map();
+  for (const row of speciesRows) {
+    const hasRg = Number(row.rg_obs_count ?? 0) > 0;
+    if (row.genus_id) {
+      const group = genusGroups.get(row.genus_id) ?? { name: row.genus_name, observed: 0, total: null };
+      if (hasRg) group.observed += 1;
+      genusGroups.set(row.genus_id, group);
+    }
+    if (row.family_id) {
+      const group = familyGroups.get(row.family_id) ?? { name: row.family_name, observed: 0, total: null };
+      if (hasRg) group.observed += 1;
+      familyGroups.set(row.family_id, group);
+    }
+  }
+
+  const groupIds = [...genusGroups.keys(), ...familyGroups.keys()];
+  if (groupIds.length) {
+    const infoCache = await loadTaxonInfoCache(env, groupIds);
+    for (const [groupId, group] of genusGroups) {
+      group.total = infoCache.get(groupId)?.complete_species_count ?? null;
+    }
+    for (const [groupId, group] of familyGroups) {
+      group.total = infoCache.get(groupId)?.complete_species_count ?? null;
+    }
+  }
+
+  const masteryRows = await env.DB.prepare(
+    "SELECT * FROM user_masteries WHERE user_id = ?"
+  ).bind(userId).all();
+  const masteryMap = new Map();
+  for (const row of masteryRows.results ?? []) {
+    masteryMap.set(`${row.group_kind}:${row.group_id}`, row);
+  }
+
+  return { speciesRows, genusGroups, familyGroups, masteryMap };
+}
+
+function trainingTiersForRow(row, masteryMap) {
+  return {
+    genusTier: row.genus_id ? masteryMap.get(`genus:${row.genus_id}`)?.tier ?? "none" : "none",
+    familyTier: row.family_id ? masteryMap.get(`family:${row.family_id}`)?.tier ?? "none" : "none"
+  };
+}
+
+function buildTrainingEntry(row, context) {
+  const rg = Math.max(0, Number(row.rg_obs_count ?? 0));
+  const hasRg = rg > 0 ? 1 : 0;
+  const genusObserved = row.genus_id ? context.genusGroups.get(row.genus_id)?.observed ?? 0 : 0;
+  const familyObserved = row.family_id ? context.familyGroups.get(row.family_id)?.observed ?? 0 : 0;
+  const { genusTier, familyTier } = trainingTiersForRow(row, context.masteryMap);
+
+  const earned = speciesEarnedPoints({
+    rgObsCount: rg,
+    genusOthers: Math.max(0, genusObserved - hasRg),
+    familyOthers: Math.max(0, familyObserved - hasRg),
+    genusTier,
+    familyTier
+  });
+
+  const allocations = sanitizeAllocations(row.allocated_json);
+  const spent = Math.max(0, Number(row.points_spent ?? 0));
+  const available = Math.max(0, earned.total - spent);
+  const buffPct = combinedBuffPct(genusTier, familyTier);
+  const nickname = row.nickname ?? null;
+
+  const summary = taxonSummaryFromRow(row);
+  const baseCreature = createBattleCreature(summary, "train-base");
+  const trainedCreature = createBattleCreature(summary, "train", {
+    allocations,
+    buffPct,
+    nickname,
+    level: spent
+  });
+
+  const stats = {};
+  for (const stat of TRAINING_STATS) {
+    stats[stat] = {
+      base: baseCreature.stats[stat],
+      allocated: allocations[stat] ?? 0,
+      total: trainedCreature.stats[stat],
+      cap: statCapFor(baseCreature.stats[stat])
+    };
+  }
+
+  const lastRespec = row.last_respec_at ? Date.parse(row.last_respec_at) : null;
+  const respecAvailableAt = lastRespec ? new Date(lastRespec + RESPEC_COOLDOWN_MS).toISOString() : null;
+
+  return {
+    taxonId: row.taxon_id,
+    name: row.common_name || row.scientific_name,
+    scientificName: row.scientific_name,
+    nickname,
+    level: spent,
+    rgObsCount: rg,
+    genus: row.genus_id ? { id: row.genus_id, name: row.genus_name, tier: genusTier } : null,
+    family: row.family_id ? { id: row.family_id, name: row.family_name, tier: familyTier } : null,
+    earned,
+    spent,
+    available,
+    buffPct,
+    maxHp: trainedCreature.maxHp,
+    stats,
+    respecAvailableAt,
+    canRespec: spent > 0 && (!lastRespec || Date.now() - lastRespec >= RESPEC_COOLDOWN_MS)
+  };
+}
+
+function masteryOverviewList(context) {
+  const list = [];
+  for (const kind of ["genus", "family"]) {
+    const groups = kind === "genus" ? context.genusGroups : context.familyGroups;
+    for (const [groupId, group] of groups) {
+      if (group.observed <= 0) continue;
+      const stored = context.masteryMap.get(`${kind}:${groupId}`);
+      const tier = stored?.tier ?? groupTier(kind, group.observed, group.total);
+      list.push({
+        kind,
+        groupId,
+        name: group.name,
+        tier,
+        observed: group.observed,
+        total: group.total,
+        next: nextTierTarget(kind, tier),
+        buffPct: combinedBuffPct(kind === "genus" ? tier : "none", kind === "family" ? tier : "none")
+      });
+    }
+  }
+  list.sort((a, b) => tierRank(b.tier) - tierRank(a.tier) || b.observed - a.observed);
+  return list;
+}
+
+async function getTrainingOverview(env, session) {
+  const userId = requireLinkedUserId(session);
+  const context = await loadTrainingContext(env, userId);
+  const species = context.speciesRows.map((row) => buildTrainingEntry(row, context));
+
+  const totals = species.reduce(
+    (acc, entry) => {
+      acc.earned += entry.earned.total;
+      acc.spent += entry.spent;
+      acc.available += entry.available;
+      return acc;
+    },
+    { earned: 0, spent: 0, available: 0 }
+  );
+
+  return {
+    userId,
+    totals,
+    species,
+    masteries: masteryOverviewList(context)
+  };
+}
+
+async function upsertSpeciesTraining(env, userId, taxonId, fields) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    INSERT INTO species_training (
+      user_id, taxon_id, nickname, allocated_json, points_spent, last_respec_at, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, taxon_id) DO UPDATE SET
+      nickname = COALESCE(excluded.nickname, species_training.nickname),
+      allocated_json = COALESCE(excluded.allocated_json, species_training.allocated_json),
+      points_spent = COALESCE(excluded.points_spent, species_training.points_spent),
+      last_respec_at = COALESCE(excluded.last_respec_at, species_training.last_respec_at),
+      updated_at = excluded.updated_at
+  `).bind(
+    userId,
+    taxonId,
+    fields.nickname ?? null,
+    fields.allocatedJson ?? null,
+    fields.pointsSpent ?? null,
+    fields.lastRespecAt ?? null,
+    now,
+    now
+  ).run();
+}
+
+async function findTrainingEntry(env, userId, taxonId) {
+  const context = await loadTrainingContext(env, userId);
+  const row = context.speciesRows.find((candidate) => Number(candidate.taxon_id) === taxonId);
+  if (!row) throw httpError("That species is not in your roster", 404);
+  return { context, row };
+}
+
+async function allocateTrainingPoints(env, session, payload) {
+  const userId = requireLinkedUserId(session);
+  const taxonId = Number.parseInt(payload.taxonId, 10);
+  if (!Number.isFinite(taxonId)) throw httpError("Missing taxonId", 400);
+
+  const additions = sanitizeAllocations(payload.allocations);
+  const sumAdd = allocationsTotal(additions);
+  if (sumAdd <= 0) throw httpError("No points to allocate", 400);
+
+  const { context, row } = await findTrainingEntry(env, userId, taxonId);
+  const entry = buildTrainingEntry(row, context);
+  if (entry.available < sumAdd) {
+    throw httpError(`Not enough points: ${entry.available} available, ${sumAdd} requested`, 400);
+  }
+
+  const merged = sanitizeAllocations(row.allocated_json);
+  for (const stat of TRAINING_STATS) {
+    const add = additions[stat] ?? 0;
+    if (!add) continue;
+    const next = (merged[stat] ?? 0) + add;
+    if (next > entry.stats[stat].cap) {
+      throw httpError(`${stat} is capped at +${entry.stats[stat].cap} for this species`, 400);
+    }
+    merged[stat] = next;
+  }
+
+  await upsertSpeciesTraining(env, userId, taxonId, {
+    allocatedJson: JSON.stringify(merged),
+    pointsSpent: entry.spent + sumAdd
+  });
+
+  row.allocated_json = JSON.stringify(merged);
+  row.points_spent = entry.spent + sumAdd;
+  return buildTrainingEntry(row, context);
+}
+
+async function respecTraining(env, session, rawTaxonId) {
+  const userId = requireLinkedUserId(session);
+  const taxonId = Number.parseInt(rawTaxonId, 10);
+  if (!Number.isFinite(taxonId)) throw httpError("Missing taxonId", 400);
+
+  const { context, row } = await findTrainingEntry(env, userId, taxonId);
+  if (!row.points_spent) throw httpError("No allocated points to respec", 400);
+
+  const lastRespec = row.last_respec_at ? Date.parse(row.last_respec_at) : null;
+  if (lastRespec && Date.now() - lastRespec < RESPEC_COOLDOWN_MS) {
+    const nextAt = new Date(lastRespec + RESPEC_COOLDOWN_MS).toISOString().slice(0, 10);
+    throw httpError(`Free respec is once per week; next available ${nextAt}`, 400);
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    UPDATE species_training
+    SET allocated_json = '{}', points_spent = 0, last_respec_at = ?, updated_at = ?
+    WHERE user_id = ? AND taxon_id = ?
+  `).bind(now, now, userId, taxonId).run();
+
+  row.allocated_json = "{}";
+  row.points_spent = 0;
+  row.last_respec_at = now;
+  return buildTrainingEntry(row, context);
+}
+
+async function setTrainingNickname(env, session, rawTaxonId, rawNickname) {
+  const userId = requireLinkedUserId(session);
+  const taxonId = Number.parseInt(rawTaxonId, 10);
+  if (!Number.isFinite(taxonId)) throw httpError("Missing taxonId", 400);
+
+  await findTrainingEntry(env, userId, taxonId);
+  const nickname = sanitizeNickname(rawNickname);
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    INSERT INTO species_training (user_id, taxon_id, nickname, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, taxon_id) DO UPDATE SET
+      nickname = excluded.nickname,
+      updated_at = excluded.updated_at
+  `).bind(userId, taxonId, nickname, now, now).run();
+
+  return { taxonId, nickname };
+}
+
+async function loadUserBuffMap(env, userId) {
+  const rows = await env.DB.prepare(`
+    SELECT group_kind, group_id, tier
+    FROM user_masteries
+    WHERE user_id = ? AND tier IN ('gold', 'complete')
+  `).bind(userId).all();
+
+  const map = new Map();
+  for (const row of rows.results ?? []) {
+    map.set(`${row.group_kind}:${row.group_id}`, row.tier);
+  }
+  return map;
+}
+
+function trainingFromRow(row, buffMap) {
+  const genusTier = row.genus_id ? buffMap.get(`genus:${row.genus_id}`) ?? "none" : "none";
+  const familyTier = row.family_id ? buffMap.get(`family:${row.family_id}`) ?? "none" : "none";
+  return {
+    allocations: sanitizeAllocations(row.allocated_json),
+    buffPct: combinedBuffPct(genusTier, familyTier),
+    nickname: row.nickname ?? null,
+    level: Math.max(0, Number(row.points_spent ?? 0))
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -5633,6 +6260,152 @@ function renderAppHtml() {
       background: linear-gradient(90deg, var(--coral), var(--amber));
     }
 
+    .training-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .train-row {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.88);
+    }
+
+    .train-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .train-ledger {
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+
+    .train-stats {
+      display: grid;
+      gap: 5px;
+    }
+
+    .train-stat {
+      display: grid;
+      grid-template-columns: 64px minmax(0, 1fr) 86px auto;
+      gap: 10px;
+      align-items: center;
+      font-size: 0.8rem;
+    }
+
+    .train-stat .stat-track {
+      height: 8px;
+      border-radius: 999px;
+      background: #e3e8e0;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .train-stat .stat-base,
+    .train-stat .stat-alloc {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+    }
+
+    .train-stat .stat-base {
+      background: linear-gradient(90deg, var(--green), var(--teal));
+    }
+
+    .train-stat .stat-alloc {
+      background: var(--amber);
+      opacity: 0.85;
+    }
+
+    .train-add {
+      min-height: 26px;
+      min-width: 34px;
+      border-radius: 6px;
+      background: var(--teal);
+      color: #fff;
+      font-weight: 800;
+      font-size: 0.78rem;
+    }
+
+    .train-add:disabled {
+      background: #b9c3bd;
+    }
+
+    .train-tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .train-tools input {
+      flex: 1;
+      min-width: 120px;
+      min-height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 8px;
+      font-size: 0.8rem;
+    }
+
+    .train-tools .secondary {
+      min-height: 32px;
+      padding: 0 10px;
+      font-size: 0.78rem;
+    }
+
+    .mastery-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .mastery-card {
+      display: grid;
+      gap: 4px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.88);
+      font-size: 0.8rem;
+    }
+
+    .tier-chip {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      background: #e7ebe5;
+      color: #5b675f;
+    }
+
+    .tier-chip.tier-bronze { background: #ead9c5; color: #7a5023; }
+    .tier-chip.tier-silver { background: #e2e6ea; color: #4f5b66; }
+    .tier-chip.tier-gold { background: #f4e3ae; color: #7c5e12; }
+    .tier-chip.tier-complete { background: #cfe8d4; color: #1f6b34; }
+
+    .lv-chip {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 900;
+      background: #2c3a30;
+      color: #f2ce72;
+    }
+
     .dummy-sprite {
       display: grid;
       place-items: center;
@@ -5877,6 +6650,7 @@ function renderAppHtml() {
         <nav class="view-tabs" aria-label="Main views">
           <button class="view-tab active" id="rosterTabButton" type="button" data-view-tab="roster">Roster</button>
           <button class="view-tab" id="battleTabButton" type="button" data-view-tab="battle">Battle</button>
+          <button class="view-tab" id="trainingTabButton" type="button" data-view-tab="training">Training</button>
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
         </nav>
         <section class="view-panel" id="rosterView">
@@ -5897,6 +6671,22 @@ function renderAppHtml() {
             </div>
           </div>
           <section class="battle" id="battlePanel" hidden></section>
+        </section>
+        <section class="view-panel" id="trainingView" hidden>
+          <div class="roster-head">
+            <h2>Training</h2>
+            <span class="subtle" id="trainingTotalsLabel"></span>
+          </div>
+          <div class="tree-tools">
+            <input id="trainingFilterInput" placeholder="Filter species">
+            <button class="secondary" id="trainingSyncButton" type="button">Sync iNat Data</button>
+          </div>
+          <div class="empty" id="trainingEmptyState">
+            Sign in with Bluesky and link your iNaturalist account, then sync to earn
+            training points from Research Grade observations.
+          </div>
+          <div id="trainingMasteries" hidden></div>
+          <div id="trainingList" class="training-list" hidden></div>
         </section>
         <section class="view-panel" id="treeView" hidden>
           <div class="roster-head">
@@ -5951,6 +6741,9 @@ function renderAppHtml() {
       challengeInfo: null,
       inatLinkPending: null,
       mySprites: [],
+      training: null,
+      trainingFilter: "",
+      trainingBusy: false,
       bskyBusy: false
     };
 
@@ -6002,6 +6795,14 @@ function renderAppHtml() {
       battleView: document.getElementById("battleView"),
       battleEmptyState: document.getElementById("battleEmptyState"),
       demoBattleButton: document.getElementById("demoBattleButton"),
+      trainingTabButton: document.getElementById("trainingTabButton"),
+      trainingView: document.getElementById("trainingView"),
+      trainingTotalsLabel: document.getElementById("trainingTotalsLabel"),
+      trainingFilterInput: document.getElementById("trainingFilterInput"),
+      trainingSyncButton: document.getElementById("trainingSyncButton"),
+      trainingEmptyState: document.getElementById("trainingEmptyState"),
+      trainingMasteries: document.getElementById("trainingMasteries"),
+      trainingList: document.getElementById("trainingList"),
       bskyStateLabel: document.getElementById("bskyStateLabel"),
       bskyBody: document.getElementById("bskyBody")
     };
@@ -6015,7 +6816,44 @@ function renderAppHtml() {
 
     els.rosterTabButton.addEventListener("click", () => switchView("roster"));
     els.battleTabButton.addEventListener("click", () => switchView("battle"));
+    els.trainingTabButton.addEventListener("click", () => switchView("training"));
     els.treeTabButton.addEventListener("click", () => switchView("tree"));
+
+    els.trainingSyncButton.addEventListener("click", syncTraining);
+
+    els.trainingFilterInput.addEventListener("input", debounce(() => {
+      state.trainingFilter = els.trainingFilterInput.value.trim().toLowerCase();
+      renderTraining();
+    }, 200));
+
+    els.trainingList.addEventListener("click", async (event) => {
+      const addButton = event.target.closest("[data-train-add]");
+      if (addButton) {
+        await allocateStat(
+          addButton.getAttribute("data-train-taxon"),
+          addButton.getAttribute("data-train-add"),
+          Number(addButton.getAttribute("data-train-amount") || 1)
+        );
+        return;
+      }
+
+      const respecButton = event.target.closest("[data-train-respec]");
+      if (respecButton) {
+        await respecSpecies(respecButton.getAttribute("data-train-respec"));
+        return;
+      }
+
+      const nickButton = event.target.closest("[data-train-nick]");
+      if (nickButton) {
+        await saveNickname(nickButton.getAttribute("data-train-nick"));
+      }
+    });
+
+    els.trainingList.addEventListener("keydown", async (event) => {
+      if (event.key !== "Enter" || !event.target.hasAttribute("data-train-nick-input")) return;
+      event.preventDefault();
+      await saveNickname(event.target.getAttribute("data-train-nick-input"));
+    });
 
     els.treeRefreshButton.addEventListener("click", async () => {
       state.treeSearch = els.treeSearchInput.value.trim();
@@ -6341,6 +7179,8 @@ function renderAppHtml() {
         }
       } else {
         state.challenges = [];
+        state.training = null;
+        if (state.activeView === "training") renderTraining();
       }
 
       renderBsky();
@@ -6547,6 +7387,248 @@ function renderAppHtml() {
       '</div>';
     }
 
+    const TRAIN_STATS = ["vigor", "strike", "guard", "tempo", "sense"];
+
+    async function loadTraining() {
+      if (!state.me || !state.me.loggedIn || !state.me.inatLogin) {
+        state.training = null;
+        renderTraining();
+        return;
+      }
+
+      try {
+        state.training = await apiFetch("/api/training");
+      } catch (error) {
+        setStatus(error.message);
+        state.training = null;
+      }
+      renderTraining();
+    }
+
+    async function syncTraining() {
+      if (!state.me || !state.me.loggedIn || !state.me.inatLogin) {
+        setStatus("Sign in with Bluesky and link your iNaturalist account first.");
+        return;
+      }
+      if (state.trainingBusy) return;
+
+      state.trainingBusy = true;
+      els.trainingSyncButton.disabled = true;
+      setStatus("Syncing Research Grade data from iNaturalist…");
+
+      try {
+        const res = await apiFetch("/api/training/sync", { method: "POST" });
+        let message = "Synced: " + Number(res.rgSpeciesUpdated || 0) + " RG species, " +
+          Number(res.taxaResolved || 0) + " taxa classified, " +
+          Number(res.masteriesUpdated || 0) + " masteries updated.";
+        if (res.unresolvedTaxa > 0) message += " " + res.unresolvedTaxa + " taxa pending — sync again to continue.";
+        if (res.warning) message += " (" + res.warning + ")";
+        setStatus(message);
+        await loadTraining();
+        state.rosterStale = true;
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.trainingBusy = false;
+        els.trainingSyncButton.disabled = false;
+      }
+    }
+
+    function replaceTrainingEntry(entry) {
+      if (!state.training) return;
+      const index = state.training.species.findIndex((candidate) => candidate.taxonId === entry.taxonId);
+      if (index >= 0) state.training.species[index] = entry;
+
+      const totals = { earned: 0, spent: 0, available: 0 };
+      for (const species of state.training.species) {
+        totals.earned += species.earned.total;
+        totals.spent += species.spent;
+        totals.available += species.available;
+      }
+      state.training.totals = totals;
+    }
+
+    async function allocateStat(taxonId, stat, amount) {
+      if (state.trainingBusy) return;
+      state.trainingBusy = true;
+
+      try {
+        const allocations = {};
+        allocations[stat] = amount;
+        const entry = await apiFetch("/api/training/allocate", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ taxonId: taxonId, allocations: allocations })
+        });
+        replaceTrainingEntry(entry);
+        state.rosterStale = true;
+        renderTraining();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.trainingBusy = false;
+      }
+    }
+
+    async function respecSpecies(taxonId) {
+      if (state.trainingBusy) return;
+      state.trainingBusy = true;
+
+      try {
+        const entry = await apiFetch("/api/training/respec", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ taxonId: taxonId })
+        });
+        replaceTrainingEntry(entry);
+        state.rosterStale = true;
+        renderTraining();
+        setStatus("Points refunded. Next free respec for this species in one week.");
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.trainingBusy = false;
+      }
+    }
+
+    async function saveNickname(taxonId) {
+      const input = document.getElementById("trainNick-" + taxonId);
+      if (!input) return;
+
+      try {
+        const res = await apiFetch("/api/training/nickname", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ taxonId: taxonId, nickname: input.value })
+        });
+        const entry = state.training && state.training.species.find((candidate) => String(candidate.taxonId) === String(taxonId));
+        if (entry) entry.nickname = res.nickname;
+        state.rosterStale = true;
+        renderTraining();
+        setStatus(res.nickname ? "Nickname saved: " + res.nickname : "Nickname cleared.");
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
+    function renderMasteryCard(mastery) {
+      const kindLabel = mastery.kind === "genus" ? "Genus" : "Family";
+      const progress = mastery.total
+        ? mastery.observed + " / " + mastery.total + " species"
+        : mastery.observed + " RG species";
+      const buffPct = Math.round((mastery.buffPct || 0) * 100);
+      const extras = [];
+      if (mastery.next) extras.push("next: " + mastery.next.tier + " at " + mastery.next.threshold);
+      else if (mastery.tier === "gold" && mastery.total) extras.push("complete at " + mastery.total);
+      if (buffPct > 0) extras.push("+" + buffPct + "% stats");
+
+      return '<div class="mastery-card">' +
+        '<div><span class="tier-chip tier-' + escapeAttr(mastery.tier) + '">' + escapeHtml(mastery.tier) + '</span> ' +
+          '<strong>' + escapeHtml(mastery.name || kindLabel + " " + mastery.groupId) + '</strong> ' +
+          '<span class="subtle">' + kindLabel + '</span></div>' +
+        '<div class="subtle">' + escapeHtml(progress + (extras.length ? " · " + extras.join(" · ") : "")) + '</div>' +
+      '</div>';
+    }
+
+    function renderTrainStatRow(entry, stat) {
+      const data = entry.stats[stat];
+      const baseWidth = Math.max(2, Math.min(100, data.base));
+      const totalWidth = Math.max(baseWidth, Math.min(100, data.total));
+      const capReached = data.allocated >= data.cap;
+      const noPoints = entry.available <= 0;
+      const label = stat.charAt(0).toUpperCase() + stat.slice(1);
+
+      return '<div class="train-stat">' +
+        '<span>' + escapeHtml(label) + '</span>' +
+        '<div class="stat-track">' +
+          '<span class="stat-alloc" style="width:' + totalWidth + '%"></span>' +
+          '<span class="stat-base" style="width:' + baseWidth + '%"></span>' +
+        '</div>' +
+        '<span class="subtle">' + data.total + ' (+' + data.allocated + '/' + data.cap + ')</span>' +
+        '<span>' +
+          '<button class="train-add" type="button" data-train-add="' + escapeAttr(stat) + '" data-train-taxon="' + escapeAttr(String(entry.taxonId)) + '" data-train-amount="1" ' + (capReached || noPoints ? "disabled" : "") + '>+1</button> ' +
+          '<button class="train-add" type="button" data-train-add="' + escapeAttr(stat) + '" data-train-taxon="' + escapeAttr(String(entry.taxonId)) + '" data-train-amount="5" ' + (data.allocated + 5 > data.cap || entry.available < 5 ? "disabled" : "") + '>+5</button>' +
+        '</span>' +
+      '</div>';
+    }
+
+    function renderTrainRow(entry) {
+      const ledger = "Earned " + entry.earned.total + " pts = " +
+        entry.earned.base + " RG (sqrt of " + entry.rgObsCount + " obs) + " +
+        entry.earned.firstBonus + " first + " +
+        entry.earned.genusSpill + " genus + " +
+        entry.earned.familySpill + " family + " +
+        (entry.earned.genusBonus + entry.earned.familyBonus) + " mastery";
+      const groupChips =
+        (entry.genus && entry.genus.tier !== "none" ? ' <span class="tier-chip tier-' + escapeAttr(entry.genus.tier) + '">' + escapeHtml(entry.genus.name || "genus") + '</span>' : "") +
+        (entry.family && entry.family.tier !== "none" ? ' <span class="tier-chip tier-' + escapeAttr(entry.family.tier) + '">' + escapeHtml(entry.family.name || "family") + '</span>' : "");
+      const buffPct = Math.round((entry.buffPct || 0) * 100);
+      const respecLabel = entry.canRespec
+        ? "Respec"
+        : entry.spent > 0 && entry.respecAvailableAt
+          ? "Respec " + entry.respecAvailableAt.slice(0, 10)
+          : "Respec";
+
+      return '<div class="train-row">' +
+        '<div class="train-head">' +
+          '<strong>' + escapeHtml(entry.nickname || entry.name) + '</strong>' +
+          (entry.nickname ? '<span class="subtle">' + escapeHtml(entry.name) + '</span>' : "") +
+          '<span class="subtle">' + escapeHtml(entry.scientificName) + '</span>' +
+          (entry.level > 0 ? '<span class="lv-chip">Lv ' + entry.level + '</span>' : "") +
+          '<span class="chip">' + entry.available + ' pts</span>' +
+          '<span class="chip">' + entry.rgObsCount + ' RG</span>' +
+          (buffPct > 0 ? '<span class="chip">+' + buffPct + '% mastery</span>' : "") +
+          groupChips +
+        '</div>' +
+        '<div class="train-ledger">' + escapeHtml(ledger) + '</div>' +
+        '<div class="train-stats">' + TRAIN_STATS.map((stat) => renderTrainStatRow(entry, stat)).join("") + '</div>' +
+        '<div class="train-tools">' +
+          '<input id="trainNick-' + escapeAttr(String(entry.taxonId)) + '" data-train-nick-input="' + escapeAttr(String(entry.taxonId)) + '" placeholder="Nickname (yours only)" maxlength="24" value="' + escapeAttr(entry.nickname || "") + '">' +
+          '<button class="secondary" type="button" data-train-nick="' + escapeAttr(String(entry.taxonId)) + '">Save Name</button>' +
+          '<button class="secondary" type="button" data-train-respec="' + escapeAttr(String(entry.taxonId)) + '" ' + (entry.canRespec ? "" : "disabled") + '>' + escapeHtml(respecLabel) + '</button>' +
+        '</div>' +
+      '</div>';
+    }
+
+    function renderTraining() {
+      const training = state.training;
+      const linked = state.me && state.me.loggedIn && state.me.inatLogin;
+
+      els.trainingEmptyState.hidden = Boolean(training);
+      els.trainingMasteries.hidden = !training;
+      els.trainingList.hidden = !training;
+
+      if (!training) {
+        els.trainingTotalsLabel.textContent = "";
+        els.trainingEmptyState.textContent = linked
+          ? "Press Sync iNat Data to pull your Research Grade observations and start earning points."
+          : "Sign in with Bluesky and link your iNaturalist account, then sync to earn training points from Research Grade observations.";
+        return;
+      }
+
+      els.trainingTotalsLabel.textContent =
+        training.totals.available + " pts available · " +
+        training.totals.spent + " spent · " +
+        training.totals.earned + " earned";
+
+      els.trainingMasteries.innerHTML = training.masteries.length
+        ? '<div class="mastery-grid">' + training.masteries.map(renderMasteryCard).join("") + '</div>'
+        : '<div class="subtle" style="margin-top:10px">No genus or family progress yet. Observe more Research Grade species, then sync.</div>';
+
+      const filter = state.trainingFilter;
+      const visible = filter
+        ? training.species.filter((entry) => (
+            (entry.name || "").toLowerCase().includes(filter) ||
+            (entry.scientificName || "").toLowerCase().includes(filter) ||
+            (entry.nickname || "").toLowerCase().includes(filter)
+          ))
+        : training.species;
+
+      els.trainingList.innerHTML = visible.length
+        ? visible.map(renderTrainRow).join("")
+        : '<div class="subtle">No species match the filter.</div>';
+    }
+
     function renderChallengeBanner() {
       const info = state.challengeInfo;
       if (!info) return "";
@@ -6745,11 +7827,22 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = ["tree", "battle"].includes(view) ? view : "roster";
+      state.activeView = ["tree", "battle", "training"].includes(view) ? view : "roster";
       renderViewTabs();
 
       if (state.activeView === "tree" && !state.spriteTree) {
         await loadSpriteTree(false);
+      }
+      if (state.activeView === "training" && !state.training) {
+        await loadTraining();
+      }
+      if (state.activeView === "roster" && state.rosterStale && state.userId) {
+        state.rosterStale = false;
+        try {
+          await loadRoster();
+        } catch (error) {
+          setStatus(error.message);
+        }
       }
     }
 
@@ -6757,9 +7850,11 @@ function renderAppHtml() {
       const view = state.activeView;
       els.rosterTabButton.classList.toggle("active", view === "roster");
       els.battleTabButton.classList.toggle("active", view === "battle");
+      els.trainingTabButton.classList.toggle("active", view === "training");
       els.treeTabButton.classList.toggle("active", view === "tree");
       els.rosterView.hidden = view !== "roster";
       els.battleView.hidden = view !== "battle";
+      els.trainingView.hidden = view !== "training";
       els.treeView.hidden = view !== "tree";
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
     }
@@ -7277,8 +8372,10 @@ function renderAppHtml() {
               '<span class="badge">' + escapeHtml(badge) + '</span>' +
             '</div>' +
             '<div class="meta">' +
-              '<div class="name">' + escapeHtml(taxon.name) + '</div>' +
-              '<div class="sci">' + escapeHtml(taxon.scientificName) + '</div>' +
+              '<div class="name">' + escapeHtml(taxon.nickname || taxon.name) +
+                (Number(taxon.trainingLevel) > 0 ? ' <span class="lv-chip">Lv ' + Number(taxon.trainingLevel) + '</span>' : '') +
+              '</div>' +
+              '<div class="sci">' + escapeHtml(taxon.nickname ? taxon.name + " · " + taxon.scientificName : taxon.scientificName) + '</div>' +
               '<div class="chips">' +
                 '<span class="chip">' + escapeHtml(types) + '</span>' +
                 '<span class="chip">' + escapeHtml(taxon.role || "scout") + '</span>' +
@@ -7925,7 +9022,9 @@ function renderAppHtml() {
       return '<article class="combatant ' + side + '">' +
         '<div class="plate">' +
           '<div class="combatant-head">' +
-            '<div class="combatant-name">' + escapeHtml(creature.name) + '</div>' +
+            '<div class="combatant-name">' + escapeHtml(creature.name) +
+              (Number(creature.trainingLevel) > 0 ? ' <span class="lv-chip">Lv ' + Number(creature.trainingLevel) + '</span>' : '') +
+            '</div>' +
             '<div class="combatant-role">' + escapeHtml((creature.types || []).join(" / ")) + '</div>' +
           '</div>' +
           '<div class="hp" aria-label="HP"><span data-hp-bar="' + side + '" class="' + (hpPct <= 25 ? "hp-low" : "") + '" style="--hp:' + hpPct + '%"></span></div>' +
