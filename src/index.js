@@ -147,7 +147,7 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "POST" && url.pathname === "/api/inat/link/confirm") {
     const session = await requireSession(request, env);
-    return jsonResponse(await confirmInatLink(env, session));
+    return jsonResponse(await confirmInatLink(env, session, ctx));
   }
 
   if (request.method === "POST" && url.pathname === "/api/challenges") {
@@ -3251,7 +3251,7 @@ async function fetchInatUserProfile(login) {
   return profile;
 }
 
-async function confirmInatLink(env, session) {
+async function confirmInatLink(env, session, ctx) {
   const pendingLogin = session.inat_pending_login;
   const code = session.inat_verification_code;
   if (!pendingLogin || !code) throw httpError("Start the iNaturalist link first", 400);
@@ -3274,7 +3274,25 @@ async function confirmInatLink(env, session) {
     WHERE did = ?
   `).bind(profile.login, profile.id, now, now, session.did).run();
 
-  const importResult = await importUserByLogin(env, profile.login);
+  const importPromise = importUserByLogin(env, profile.login);
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(importPromise.catch((error) => {
+      console.error("Background iNaturalist import after link failed", error);
+    }));
+
+    return {
+      ok: true,
+      inatLogin: profile.login,
+      inatUserId: profile.id,
+      userId: inatUserIdFor(profile.login),
+      importStarted: true,
+      importedTaxa: null,
+      queuedSprites: null,
+      warning: "iNaturalist account linked. Roster import is running in the background."
+    };
+  }
+
+  const importResult = await importPromise;
   return {
     ok: true,
     inatLogin: profile.login,
@@ -4537,6 +4555,27 @@ function renderAppHtml() {
       overflow-wrap: anywhere;
     }
 
+    .bsky-status {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 7px 9px;
+      background: #fbfcf9;
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .bsky-status.success {
+      border-color: #b7d8c2;
+      background: #eef7f0;
+      color: #285c38;
+    }
+
+    .bsky-status.error {
+      border-color: #e3b6ad;
+      background: #fff1ed;
+      color: #7a2f20;
+    }
+
     .challenge-banner {
       border: 1px solid var(--blue);
       border-radius: 8px;
@@ -5727,7 +5766,10 @@ function renderAppHtml() {
       challenges: [],
       challengeInfo: null,
       inatLinkPending: null,
-      bskyBusy: false
+      bskyBusy: false,
+      bskyAction: "",
+      bskyMessage: "",
+      bskyMessageKind: "info"
     };
 
     const els = {
@@ -6019,7 +6061,10 @@ function renderAppHtml() {
 
       const button = event.target.closest("[data-bsky-action]");
       if (!button) return;
-      handleBskyAction(button.getAttribute("data-bsky-action"), button.getAttribute("data-challenge-id"));
+      const action = button.getAttribute("data-bsky-action");
+      button.disabled = true;
+      button.textContent = bskyBusyButtonText(action);
+      handleBskyAction(action, button.getAttribute("data-challenge-id"));
     });
 
     els.bskyBody.addEventListener("input", (event) => {
@@ -6141,6 +6186,11 @@ function renderAppHtml() {
     async function handleBskyAction(action, challengeId) {
       if (state.bskyBusy) return;
       state.bskyBusy = true;
+      state.bskyAction = action || "";
+      state.bskyMessage = bskyProgressMessage(action);
+      state.bskyMessageKind = "info";
+      els.bskyStateLabel.textContent = "working";
+      if (action === "inat-confirm") renderBsky();
 
       try {
         if (action === "login") await bskyLogin();
@@ -6152,11 +6202,34 @@ function renderAppHtml() {
         else if (action === "challenge-decline") await declineChallengeAction(challengeId);
         else if (action === "battle-open") await openBattle(challengeId);
       } catch (error) {
+        state.bskyMessage = error.message;
+        state.bskyMessageKind = "error";
         setStatus(error.message);
       } finally {
         state.bskyBusy = false;
+        state.bskyAction = "";
         renderBsky();
       }
+    }
+
+    function bskyProgressMessage(action) {
+      if (action === "inat-confirm") return "Checking your iNaturalist profile for the verification code.";
+      if (action === "inat-start") return "Creating a new iNaturalist verification code.";
+      if (action === "login") return "Contacting your Bluesky host.";
+      if (action === "challenge-send") return "Creating and posting the Bluesky challenge.";
+      if (action === "challenge-accept") return "Accepting the challenge and opening battle.";
+      if (action === "challenge-decline") return "Declining the challenge.";
+      return "Working.";
+    }
+
+    function bskyBusyButtonText(action) {
+      if (action === "inat-confirm") return "Verifying...";
+      if (action === "inat-start") return "Creating code...";
+      if (action === "login") return "Signing in...";
+      if (action === "challenge-send") return "Sending...";
+      if (action === "challenge-accept") return "Accepting...";
+      if (action === "challenge-decline") return "Declining...";
+      return "Working...";
     }
 
     async function bskyLogin() {
@@ -6196,6 +6269,8 @@ function renderAppHtml() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ inatLogin: login })
       });
+      state.bskyMessage = "Verification code created. Add it to your iNaturalist bio, save, then click Verify Link.";
+      state.bskyMessageKind = "success";
       setStatus("Code created. Add it to your iNaturalist profile bio, save, then click Verify.");
       await refreshMe();
     }
@@ -6203,8 +6278,35 @@ function renderAppHtml() {
     async function inatLinkConfirm() {
       setStatus("Checking your iNaturalist profile…");
       const res = await apiFetch("/api/inat/link/confirm", { method: "POST" });
-      setStatus("Linked iNaturalist account " + res.inatLogin + ". Imported " + res.importedTaxa + " taxa. You can remove the code from your bio now.");
+      const importText = res.importStarted
+        ? " Roster import is running in the background."
+        : " Imported " + Number(res.importedTaxa || 0) + " taxa.";
+      const message = "Linked iNaturalist account " + res.inatLogin + "." + importText + " You can remove the code from your bio now.";
+      state.bskyMessage = message;
+      state.bskyMessageKind = "success";
+      state.me = {
+        ...(state.me || {}),
+        loggedIn: true,
+        inatLogin: res.inatLogin,
+        inatPendingLogin: null,
+        inatVerificationCode: null,
+        userId: res.userId || ("inat:" + String(res.inatLogin || "").toLowerCase())
+      };
+      state.userId = state.me.userId || state.userId;
+      state.inatLogin = res.inatLogin || state.inatLogin;
+      if (state.userId) localStorage.setItem("inatBattler:userId", state.userId);
+      if (state.inatLogin) {
+        localStorage.setItem("inatBattler:inatLogin", state.inatLogin);
+        els.input.value = state.inatLogin;
+      }
+      renderBsky();
+      setStatus(message);
       await refreshMe();
+      if (res.importStarted) {
+        window.setTimeout(() => {
+          loadRoster().catch((error) => setStatus(error.message));
+        }, 8000);
+      }
     }
 
     async function sendChallenge() {
@@ -6398,31 +6500,43 @@ function renderAppHtml() {
       runTypeahead(input.id, query);
     }
 
+    function renderBskyStatus() {
+      if (!state.bskyMessage) return "";
+      return '<div class="bsky-status ' + escapeAttr(state.bskyMessageKind || "info") + '">' +
+        escapeHtml(state.bskyMessage) +
+      '</div>';
+    }
+
     function renderBsky() {
       if (!els.bskyBody) return;
       const me = state.me;
+      const busyAttr = state.bskyBusy ? " disabled" : "";
 
       if (!me) {
-        els.bskyStateLabel.textContent = "loading";
+        els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "loading";
         els.bskyBody.innerHTML = '<div class="subtle">Loading Bluesky session…</div>';
         return;
       }
 
       if (!me.loggedIn) {
-        els.bskyStateLabel.textContent = "signed out";
+        els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "signed out";
         els.bskyBody.innerHTML =
           renderChallengeBanner() +
+          renderBskyStatus() +
           renderTypeaheadInput("bskyHandleInput", "you.bsky.social", "login") +
-          '<button class="primary" type="button" data-bsky-action="login">Sign in with Bluesky</button>' +
+          '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
+          '</button>' +
           '<div class="subtle">Uses Bluesky OAuth and only asks for permission to create posts.</div>';
         return;
       }
 
-      els.bskyStateLabel.textContent = "@" + me.handle;
+      els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "@" + me.handle;
 
-      let html = '<div class="bsky-row">' +
+      let html = renderBskyStatus() +
+      '<div class="bsky-row">' +
         '<strong>' + escapeHtml(me.displayName || "@" + me.handle) + '</strong>' +
-        '<button class="secondary" type="button" data-bsky-action="logout">Sign out</button>' +
+        '<button class="secondary" type="button" data-bsky-action="logout"' + busyAttr + '>Sign out</button>' +
       '</div>';
 
       if (me.inatLogin) {
@@ -6430,13 +6544,17 @@ function renderAppHtml() {
       } else {
         html += '<div class="subtle">Link your iNaturalist account by proving ownership &mdash; no iNat OAuth, no write access:</div>' +
           '<input id="inatLinkInput" data-bsky-enter="inat-start" placeholder="iNaturalist username" value="' + escapeAttr(me.inatPendingLogin || "") + '">' +
-          '<button class="secondary" type="button" data-bsky-action="inat-start">Get verification code</button>';
+          '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : "Get verification code") +
+          '</button>';
 
         if (me.inatPendingLogin && me.inatVerificationCode) {
           html += '<div class="bsky-code">' + escapeHtml(me.inatVerificationCode) + '</div>' +
             '<div class="subtle">Add this code to the profile bio of "' + escapeHtml(me.inatPendingLogin) +
             '" in <a href="https://www.inaturalist.org/users/edit" target="_blank" rel="noopener">iNaturalist settings</a>, save, then verify. You can remove it afterwards.</div>' +
-            '<button class="primary" type="button" data-bsky-action="inat-confirm">Verify Link</button>';
+            '<button class="primary" type="button" data-bsky-action="inat-confirm"' + busyAttr + '>' +
+              (state.bskyBusy && state.bskyAction === "inat-confirm" ? "Verifying..." : "Verify Link") +
+            '</button>';
         }
       }
 
@@ -6446,7 +6564,9 @@ function renderAppHtml() {
         html += '<div class="subtle"><strong>Challenge a player</strong> (uses your selected 5)</div>' +
           renderTypeaheadInput("challengeHandleInput", "opponent.bsky.social", "challenge-send") +
           '<input id="challengeMessageInput" placeholder="Optional taunt (140 chars)" maxlength="140">' +
-          '<button class="primary" type="button" data-bsky-action="challenge-send">Send Challenge via Bluesky</button>';
+          '<button class="primary" type="button" data-bsky-action="challenge-send"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "challenge-send" ? "Sending..." : "Send Challenge via Bluesky") +
+          '</button>';
       }
 
       if (state.challenges.length) {
