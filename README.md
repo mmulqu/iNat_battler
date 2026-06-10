@@ -192,9 +192,10 @@ Moderation works through emoji reactions in a private Discord channel:
 
 Visibility rules:
 
-- The **submitter always sees their own custom sprite** (pending, approved, or rejected) in their roster and on their side of battles.
+- The **submitter sees their own custom sprite while it is pending or approved** in their roster and on their side of battles.
 - **Opponents only see it once approved**; otherwise they see the shared global sprite (or the placeholder if none exists).
-- A custom sprite also makes that species battle-eligible for its owner even when no global sprite exists yet.
+- **Rejected sprites are hidden from everyone, including the submitter** — the roster shows the rejected QA badge but falls back to the shared global sprite.
+- A pending or approved custom sprite also makes that species battle-eligible for its owner even when no global sprite exists yet.
 
 Setup: create a Discord application with a bot, invite it to the server with View Channel, Send Messages, Attach Files, and Read Message History permissions on the QA channel, set `DISCORD_QA_CHANNEL_ID` in `wrangler.jsonc` (already pointed at the QA channel), and run:
 

@@ -2103,6 +2103,7 @@ async function getRoster(env, userId, limit, q = "") {
         FROM user_sprite_submissions uss
         WHERE uss.user_id = ut.user_id
           AND uss.taxon_id = t.taxon_id
+          AND uss.status != 'rejected'
         ORDER BY uss.created_at DESC
         LIMIT 1
       ) AS custom_r2_key,
@@ -2492,6 +2493,7 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
         FROM user_sprite_submissions uss
         WHERE uss.user_id = ut.user_id
           AND uss.taxon_id = t.taxon_id
+          AND uss.status != 'rejected'
         ORDER BY uss.created_at DESC
         LIMIT 1
       ) AS own_custom_key,
@@ -2522,6 +2524,7 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
           FROM user_sprite_submissions uss
           WHERE uss.user_id = ut.user_id
             AND uss.taxon_id = t.taxon_id
+            AND uss.status != 'rejected'
         )
       )
   `).bind(
@@ -2830,6 +2833,7 @@ async function assertUserOwnsReadyTaxa(env, userId, taxonIds) {
           FROM user_sprite_submissions uss
           WHERE uss.user_id = ut.user_id
             AND uss.taxon_id = ut.taxon_id
+            AND uss.status != 'rejected'
         )
       )
   `).bind(userId, ...taxonIds, DEFAULT_ASSET_KIND, ASSET_VERSION).all();
