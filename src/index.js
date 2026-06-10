@@ -91,6 +91,14 @@ export default {
     }
   },
 
+  async scheduled(controller, env, ctx) {
+    try {
+      await syncSpriteSubmissions(env, 25);
+    } catch (error) {
+      console.error(error);
+    }
+  },
+
   async queue(batch, env) {
     for (const message of batch.messages) {
       const body = message.body;
@@ -178,6 +186,25 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "POST" && url.pathname === "/api/inat/link/confirm") {
     const session = await requireSession(request, env);
     return jsonResponse(await confirmInatLink(env, session, ctx));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/my-sprites/upload") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await uploadUserSprite(request, env, session));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/my-sprites") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await listUserSprites(env, session));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/sprite-submissions/sync") {
+    return jsonResponse(await syncSpriteSubmissions(env, 25));
+  }
+
+  const submissionSyncMatch = url.pathname.match(/^\/api\/sprite-submissions\/([^/]+)\/sync$/);
+  if (request.method === "POST" && submissionSyncMatch) {
+    return jsonResponse(await syncSingleSubmission(env, decodeURIComponent(submissionSyncMatch[1])));
   }
 
   if (request.method === "POST" && url.pathname === "/api/challenges") {
@@ -2212,7 +2239,24 @@ async function getRoster(env, userId, limit, q = "") {
           END,
           sj.updated_at DESC
         LIMIT 1
-      ) AS sprite_job_status
+      ) AS sprite_job_status,
+      (
+        SELECT uss.r2_key
+        FROM user_sprite_submissions uss
+        WHERE uss.user_id = ut.user_id
+          AND uss.taxon_id = t.taxon_id
+          AND uss.status != 'rejected'
+        ORDER BY uss.created_at DESC
+        LIMIT 1
+      ) AS custom_r2_key,
+      (
+        SELECT uss.status
+        FROM user_sprite_submissions uss
+        WHERE uss.user_id = ut.user_id
+          AND uss.taxon_id = t.taxon_id
+        ORDER BY uss.created_at DESC
+        LIMIT 1
+      ) AS custom_status
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
     WHERE ut.user_id = ?
@@ -2238,8 +2282,11 @@ async function getRoster(env, userId, limit, q = "") {
   return {
     userId,
     taxa: (rows.results ?? []).map((row) => {
-      const spriteReady = Boolean(row.r2_key);
-      const spriteUrl = spriteReady ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
+      // The roster is the owner's own view, so their latest custom sprite
+      // wins regardless of QA status; opponents are filtered in battle loads.
+      const finalKey = row.custom_r2_key || row.r2_key;
+      const spriteReady = Boolean(finalKey);
+      const spriteUrl = spriteReady ? `/api/assets/${encodeR2Key(finalKey)}` : null;
       const taxon = taxonSummaryFromRow(row, spriteUrl);
       const genome = createGenome(taxon);
       const battleCreature = createBattleCreature(taxon, "roster");
@@ -2261,6 +2308,7 @@ async function getRoster(env, userId, limit, q = "") {
               url: null,
               placeholder: placeholderFor(row.iconic_taxon_name)
             },
+        customSprite: row.custom_status ? { status: row.custom_status } : null,
         bodyPlan: genome.bodyPlan,
         types: genome.types,
         role: genome.role,
@@ -2549,7 +2597,7 @@ async function listTeams(env, userId) {
   }));
 }
 
-async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix) {
+async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personalView = "owner") {
   const cleanTaxonIds = taxonIds
     .map((taxonId) => Number.parseInt(taxonId, 10))
     .filter(Number.isFinite)
@@ -2584,18 +2632,45 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix) {
           END,
           sa.created_at DESC
         LIMIT 1
-      ) AS r2_key
+      ) AS r2_key,
+      (
+        SELECT uss.r2_key
+        FROM user_sprite_submissions uss
+        WHERE uss.user_id = ut.user_id
+          AND uss.taxon_id = t.taxon_id
+          AND uss.status != 'rejected'
+        ORDER BY uss.created_at DESC
+        LIMIT 1
+      ) AS own_custom_key,
+      (
+        SELECT uss.r2_key
+        FROM user_sprite_submissions uss
+        WHERE uss.user_id = ut.user_id
+          AND uss.taxon_id = t.taxon_id
+          AND uss.status = 'approved'
+        ORDER BY uss.created_at DESC
+        LIMIT 1
+      ) AS approved_custom_key
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
     WHERE ut.user_id = ?
       AND t.taxon_id IN (${placeholders})
-      AND EXISTS (
-        SELECT 1
-        FROM sprite_assets sa
-        WHERE sa.taxon_id = t.taxon_id
-          AND sa.asset_kind = ?
-          AND sa.asset_version = ?
-          AND sa.status = 'ready'
+      AND (
+        EXISTS (
+          SELECT 1
+          FROM sprite_assets sa
+          WHERE sa.taxon_id = t.taxon_id
+            AND sa.asset_kind = ?
+            AND sa.asset_version = ?
+            AND sa.status = 'ready'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM user_sprite_submissions uss
+          WHERE uss.user_id = ut.user_id
+            AND uss.taxon_id = t.taxon_id
+            AND uss.status != 'rejected'
+        )
       )
   `).bind(
     DEFAULT_ASSET_KIND,
@@ -2611,7 +2686,12 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix) {
     const row = byId.get(taxonId);
     if (!row) throw new Error(`Taxon ${taxonId} is not a ready sprite in this user's roster`);
 
-    const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
+    // Owners always see their own custom sprite (any QA status); everyone
+    // else only sees it once Discord QA approved it, falling back to the
+    // shared global sprite otherwise.
+    const customKey = personalView === "owner" ? row.own_custom_key : row.approved_custom_key;
+    const finalKey = customKey || row.r2_key;
+    const spriteUrl = finalKey ? `/api/assets/${encodeR2Key(finalKey)}` : null;
     return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `${idPrefix}-${index}`);
   });
 }
@@ -2884,13 +2964,22 @@ async function assertUserOwnsReadyTaxa(env, userId, taxonIds) {
     FROM user_taxa ut
     WHERE ut.user_id = ?
       AND ut.taxon_id IN (${placeholders})
-      AND EXISTS (
-        SELECT 1
-        FROM sprite_assets sa
-        WHERE sa.taxon_id = ut.taxon_id
-          AND sa.asset_kind = ?
-          AND sa.asset_version = ?
-          AND sa.status = 'ready'
+      AND (
+        EXISTS (
+          SELECT 1
+          FROM sprite_assets sa
+          WHERE sa.taxon_id = ut.taxon_id
+            AND sa.asset_kind = ?
+            AND sa.asset_version = ?
+            AND sa.status = 'ready'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM user_sprite_submissions uss
+          WHERE uss.user_id = ut.user_id
+            AND uss.taxon_id = ut.taxon_id
+            AND uss.status != 'rejected'
+        )
       )
   `).bind(userId, ...taxonIds, DEFAULT_ASSET_KIND, ASSET_VERSION).all();
 
@@ -3474,8 +3563,8 @@ async function acceptChallenge(env, session, challengeId, rawTaxonIds) {
   const challengerUserId = inatUserIdFor(row.challenger_inat_login);
   const challengerTaxonIds = JSON.parse(row.team_json);
 
-  const playerCreatures = await loadUserBattleCreatures(env, accepterUserId, taxonIds, "p");
-  const opponentCreatures = await loadUserBattleCreatures(env, challengerUserId, challengerTaxonIds, "o");
+  const playerCreatures = await loadUserBattleCreatures(env, accepterUserId, taxonIds, "p", "owner");
+  const opponentCreatures = await loadUserBattleCreatures(env, challengerUserId, challengerTaxonIds, "o", "public");
 
   const now = new Date().toISOString();
   const battleId = randomId("battle");
@@ -3529,6 +3618,299 @@ async function declineChallenge(env, session, challengeId) {
   `).bind(now, challengeId).run();
 
   return { challengeId, status: "declined" };
+}
+
+// ---------------------------------------------------------------------------
+// Per-user custom sprites with Discord QA moderation
+// ---------------------------------------------------------------------------
+
+const DISCORD_API_URL = "https://discord.com/api/v10";
+const QA_APPROVE_EMOJIS = new Set(["✅", "☑️", "✔️", "🟢"]);
+const QA_REJECT_EMOJIS = new Set(["❌", "✖️", "🚫", "⛔", "🔴"]);
+
+function discordConfig(env) {
+  const token = env.DISCORD_BOT_TOKEN;
+  const channelId = env.DISCORD_QA_CHANNEL_ID;
+  if (!token || !channelId) {
+    throw new Error(
+      "Discord QA is not configured. Set the DISCORD_BOT_TOKEN secret and DISCORD_QA_CHANNEL_ID var."
+    );
+  }
+  return { token, channelId };
+}
+
+async function postSpriteToDiscordQA(env, { submissionId, taxonLabel, inatLogin, handle, bytes, contentType, spriteUrl }) {
+  const { token, channelId } = discordConfig(env);
+
+  const content =
+    `**Sprite QA** \`${submissionId}\`\n` +
+    `Species: ${taxonLabel}\n` +
+    `Player: @${handle} (iNat: ${inatLogin})\n` +
+    `React ✅ to approve (visible to opponents) or ❌ to reject (visible only to the submitter).`;
+
+  const form = new FormData();
+  form.append("payload_json", JSON.stringify({ content }));
+  form.append(
+    "files[0]",
+    new Blob([bytes], { type: contentType }),
+    `${submissionId}.${extensionForContentType(contentType)}`
+  );
+
+  const res = await fetch(`${DISCORD_API_URL}/channels/${channelId}/messages`, {
+    method: "POST",
+    headers: { authorization: `Bot ${token}` },
+    body: form
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Discord post failed (${res.status}): ${detail.slice(0, 180)}`);
+  }
+  const message = await res.json();
+  return { messageId: message.id, channelId };
+}
+
+async function fetchDiscordDecision(env, row) {
+  const { token } = discordConfig(env);
+  const res = await fetch(
+    `${DISCORD_API_URL}/channels/${row.discord_channel_id}/messages/${row.discord_message_id}`,
+    { headers: { authorization: `Bot ${token}` } }
+  );
+  if (res.status === 404) return { decision: null, error: "QA message was deleted on Discord" };
+  if (!res.ok) return { decision: null, error: `Discord read failed (${res.status})` };
+
+  const message = await res.json();
+  const reactions = Array.isArray(message.reactions) ? message.reactions : [];
+  const hasReject = reactions.some((r) => QA_REJECT_EMOJIS.has(r.emoji?.name) && r.count > 0);
+  const hasApprove = reactions.some((r) => QA_APPROVE_EMOJIS.has(r.emoji?.name) && r.count > 0);
+
+  if (hasReject) return { decision: "rejected", error: null };
+  if (hasApprove) return { decision: "approved", error: null };
+  return { decision: null, error: null };
+}
+
+async function uploadUserSprite(request, env, session) {
+  if (!session.inat_login) throw httpError("Link your iNaturalist account first", 400);
+
+  const form = await request.formData();
+  const file = form.get("sprite");
+  const taxonId = Number.parseInt(String(form.get("taxonId") ?? ""), 10);
+  if (!Number.isFinite(taxonId)) throw httpError("Missing or invalid taxonId", 400);
+  if (!file || typeof file.arrayBuffer !== "function") throw httpError("Missing sprite image file", 400);
+
+  const bytes = await file.arrayBuffer();
+  const maxBytes = intEnv(env, "MAX_MANUAL_UPLOAD_BYTES", 12_000_000);
+  if (bytes.byteLength <= 0) throw httpError("Sprite image file is empty", 400);
+  if (bytes.byteLength > maxBytes) {
+    throw httpError(`Sprite image file is larger than ${Math.floor(maxBytes / 1_000_000)} MB`, 400);
+  }
+
+  const contentType = normalizeImageContentType(file.type) ?? contentTypeForAssetKey(file.name ?? "");
+  if (!contentType) throw httpError("Custom sprite must be PNG, JPEG, or WebP", 400);
+
+  const userId = inatUserIdFor(session.inat_login);
+  const owned = await env.DB.prepare(`
+    SELECT t.taxon_id, t.scientific_name, t.common_name
+    FROM user_taxa ut
+    JOIN taxa t ON t.taxon_id = ut.taxon_id
+    WHERE ut.user_id = ? AND ut.taxon_id = ?
+  `).bind(userId, taxonId).first();
+  if (!owned) throw httpError("That species is not in your roster", 400);
+
+  const now = new Date().toISOString();
+  const submissionId = randomId("usprite");
+  const fileHash = await sha256ArrayBufferHex(bytes);
+  const extension = extensionForContentType(contentType);
+  const loginSlug = session.inat_login.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
+  const r2Key = `users/${loginSlug}/sprites/v${ASSET_VERSION}/${taxonId}/${fileHash.slice(0, 16)}.${extension}`;
+  const dimensions = readImageDimensions(bytes, contentType);
+
+  await env.ASSETS.put(r2Key, bytes, {
+    httpMetadata: {
+      contentType,
+      cacheControl: "public, max-age=31536000, immutable"
+    },
+    customMetadata: {
+      submissionId,
+      taxonId: String(taxonId),
+      userId,
+      did: session.did,
+      source: "user-sprite",
+      fileHash,
+      uploadedAt: now
+    }
+  });
+
+  const taxonLabel = `${owned.common_name || owned.scientific_name} (${owned.scientific_name}, taxon ${taxonId})`;
+  let discordMessageId = null;
+  let discordChannelId = null;
+  let discordError = null;
+  try {
+    const posted = await postSpriteToDiscordQA(env, {
+      submissionId,
+      taxonLabel,
+      inatLogin: session.inat_login,
+      handle: session.handle,
+      bytes,
+      contentType
+    });
+    discordMessageId = posted.messageId;
+    discordChannelId = posted.channelId;
+  } catch (error) {
+    discordError = error instanceof Error ? error.message : "Discord post failed";
+  }
+
+  await env.DB.prepare(`
+    INSERT INTO user_sprite_submissions (
+      submission_id, did, user_id, taxon_id, r2_key, content_type,
+      width, height, status, discord_message_id, discord_channel_id,
+      discord_error, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+  `).bind(
+    submissionId,
+    session.did,
+    userId,
+    taxonId,
+    r2Key,
+    contentType,
+    dimensions?.width ?? null,
+    dimensions?.height ?? null,
+    discordMessageId,
+    discordChannelId,
+    discordError,
+    now,
+    now
+  ).run();
+
+  return {
+    submissionId,
+    taxonId,
+    name: owned.common_name || owned.scientific_name,
+    status: "pending",
+    url: `/api/assets/${encodeR2Key(r2Key)}`,
+    width: dimensions?.width ?? null,
+    height: dimensions?.height ?? null,
+    discordMessageId,
+    discordError
+  };
+}
+
+function userSpriteSummary(row) {
+  return {
+    submissionId: row.submission_id,
+    taxonId: row.taxon_id,
+    name: row.common_name || row.scientific_name || `taxon ${row.taxon_id}`,
+    status: row.status,
+    url: `/api/assets/${encodeR2Key(row.r2_key)}`,
+    discordError: row.discord_error,
+    createdAt: row.created_at,
+    decidedAt: row.decided_at
+  };
+}
+
+async function listUserSprites(env, session) {
+  const rows = await env.DB.prepare(`
+    SELECT uss.*, t.common_name, t.scientific_name
+    FROM user_sprite_submissions uss
+    LEFT JOIN taxa t ON t.taxon_id = uss.taxon_id
+    WHERE uss.did = ?
+    ORDER BY uss.created_at DESC
+    LIMIT 50
+  `).bind(session.did).all();
+
+  return { submissions: (rows.results ?? []).map(userSpriteSummary) };
+}
+
+async function applySubmissionDecision(env, submissionId, decision) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    UPDATE user_sprite_submissions
+    SET status = ?, decided_at = ?, updated_at = ?, discord_error = NULL
+    WHERE submission_id = ?
+  `).bind(decision, now, now, submissionId).run();
+}
+
+async function syncSpriteSubmissions(env, limit = 25) {
+  const rows = await env.DB.prepare(`
+    SELECT *
+    FROM user_sprite_submissions
+    WHERE status = 'pending'
+    ORDER BY created_at ASC
+    LIMIT ?
+  `).bind(limit).all();
+
+  const summary = { checked: 0, approved: 0, rejected: 0, reposted: 0, errors: 0 };
+
+  for (const row of rows.results ?? []) {
+    summary.checked += 1;
+
+    try {
+      if (!row.discord_message_id) {
+        const object = await env.ASSETS.get(row.r2_key);
+        if (!object) throw new Error("Sprite bytes missing from R2");
+        const taxon = await env.DB.prepare(
+          "SELECT common_name, scientific_name FROM taxa WHERE taxon_id = ?"
+        ).bind(row.taxon_id).first();
+        const account = await env.DB.prepare(
+          "SELECT handle, inat_login FROM accounts WHERE did = ?"
+        ).bind(row.did).first();
+        const posted = await postSpriteToDiscordQA(env, {
+          submissionId: row.submission_id,
+          taxonLabel: `${taxon?.common_name || taxon?.scientific_name || "Unknown"} (${taxon?.scientific_name ?? "?"}, taxon ${row.taxon_id})`,
+          inatLogin: account?.inat_login ?? "unknown",
+          handle: account?.handle ?? "unknown",
+          bytes: await object.arrayBuffer(),
+          contentType: row.content_type
+        });
+        await env.DB.prepare(`
+          UPDATE user_sprite_submissions
+          SET discord_message_id = ?, discord_channel_id = ?, discord_error = NULL, updated_at = ?
+          WHERE submission_id = ?
+        `).bind(posted.messageId, posted.channelId, new Date().toISOString(), row.submission_id).run();
+        summary.reposted += 1;
+        continue;
+      }
+
+      const { decision, error } = await fetchDiscordDecision(env, row);
+      if (decision) {
+        await applySubmissionDecision(env, row.submission_id, decision);
+        summary[decision === "approved" ? "approved" : "rejected"] += 1;
+      } else if (error) {
+        await env.DB.prepare(
+          "UPDATE user_sprite_submissions SET discord_error = ?, updated_at = ? WHERE submission_id = ?"
+        ).bind(error, new Date().toISOString(), row.submission_id).run();
+        summary.errors += 1;
+      }
+    } catch (error) {
+      summary.errors += 1;
+      await env.DB.prepare(
+        "UPDATE user_sprite_submissions SET discord_error = ?, updated_at = ? WHERE submission_id = ?"
+      ).bind(
+        error instanceof Error ? error.message : "sync failed",
+        new Date().toISOString(),
+        row.submission_id
+      ).run();
+    }
+  }
+
+  return summary;
+}
+
+async function syncSingleSubmission(env, submissionId) {
+  const row = await env.DB.prepare(
+    "SELECT * FROM user_sprite_submissions WHERE submission_id = ?"
+  ).bind(submissionId).first();
+  if (!row) throw httpError("Submission not found", 404);
+  if (!row.discord_message_id) throw httpError("Submission has no Discord QA message yet; run a full sync first", 400);
+
+  // Re-evaluates regardless of current status, so changing the reaction on
+  // Discord overturns an earlier decision.
+  const { decision, error } = await fetchDiscordDecision(env, row);
+  if (error) throw httpError(error, 502);
+  if (decision && decision !== row.status) {
+    await applySubmissionDecision(env, submissionId, decision);
+  }
+  return { submissionId, status: decision ?? row.status, changed: Boolean(decision && decision !== row.status) };
 }
 
 async function serveAsset(request, env) {
@@ -6199,6 +6581,10 @@ function renderAppHtml() {
           state.challenges = [];
         }
 
+        if (state.me.inatLogin) {
+          await loadMySprites();
+        }
+
         if (state.me.userId && state.me.userId !== state.userId) {
           state.userId = state.me.userId;
           state.inatLogin = state.me.inatLogin || "";
@@ -6240,6 +6626,8 @@ function renderAppHtml() {
         else if (action === "challenge-accept") await acceptChallengeAction(challengeId);
         else if (action === "challenge-decline") await declineChallengeAction(challengeId);
         else if (action === "battle-open") await openBattle(challengeId);
+        else if (action === "sprite-upload") await uploadCustomSprite();
+        else if (action === "sprites-sync") await syncMySprites();
       } catch (error) {
         state.bskyMessage = error.message;
         state.bskyMessageKind = "error";
@@ -6418,6 +6806,60 @@ function renderAppHtml() {
       if (!battleId) return;
       const battle = await apiFetch("/api/battles/" + encodeURIComponent(battleId));
       enterBattle(battle, { skipIntro: true });
+    }
+
+    async function loadMySprites() {
+      try {
+        const res = await apiFetch("/api/my-sprites");
+        state.mySprites = res.submissions || [];
+      } catch (error) {
+        state.mySprites = [];
+      }
+    }
+
+    async function uploadCustomSprite() {
+      const input = document.getElementById("customSpriteFile");
+      const file = input && input.files && input.files[0];
+      if (!file) {
+        setStatus("Choose an image file first (PNG, JPEG, or WebP 4x4 sprite sheet).");
+        return;
+      }
+      if (state.selectedTaxa.size !== 1) {
+        setStatus("Select exactly one creature card in your roster, then upload.");
+        return;
+      }
+
+      const taxonId = Array.from(state.selectedTaxa)[0];
+      const form = new FormData();
+      form.append("sprite", file);
+      form.append("taxonId", String(taxonId));
+
+      setStatus("Uploading custom sprite…");
+      const res = await apiFetch("/api/my-sprites/upload", { method: "POST", body: form });
+      if (res.discordError) {
+        setStatus("Sprite saved and live for you, but the Discord QA post failed: " + res.discordError + " (it will retry automatically)");
+      } else {
+        setStatus("Custom sprite for " + res.name + " submitted for QA. It's live for you now; opponents see it once approved on Discord.");
+      }
+      await loadMySprites();
+      await loadRoster();
+    }
+
+    async function syncMySprites() {
+      setStatus("Checking Discord QA reactions…");
+      const res = await apiFetch("/api/sprite-submissions/sync", { method: "POST" });
+      await loadMySprites();
+      await loadRoster();
+      setStatus("QA refresh: " + Number(res.approved || 0) + " approved, " + Number(res.rejected || 0) + " rejected, " + Number(res.checked || 0) + " checked.");
+    }
+
+    function renderMySpriteItem(item) {
+      const badge = item.status === "approved" ? "✅" : item.status === "rejected" ? "❌" : "🕒";
+      return '<div class="challenge-item">' +
+        '<div>' + badge + ' <strong>' + escapeHtml(item.name) + '</strong> &mdash; ' + escapeHtml(item.status) +
+        (item.discordError ? ' <span class="subtle">(Discord: ' + escapeHtml(item.discordError) + ')</span>' : '') +
+        '</div>' +
+      '</div>';
     }
 
     function renderChallengeBanner() {

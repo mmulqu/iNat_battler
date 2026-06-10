@@ -180,6 +180,38 @@ iNaturalist OAuth is globally scoped, which is far more permission than this app
 
 No iNat tokens are ever issued or stored.
 
+### Custom sprites with Discord QA
+
+Signed-in players with a linked iNaturalist account can upload their own sprite sheet for any species in their roster (select one creature card, choose a PNG/JPEG/WebP file in the "Custom sprites" block of the Bluesky panel).
+
+Moderation works through emoji reactions in a private Discord channel:
+
+1. On upload the Worker stores the image in R2 (`users/<login>/sprites/...`), creates a `user_sprite_submissions` row (`pending`), and posts the image to the QA channel via the Discord bot.
+2. React ✅ (or ☑️ ✔️ 🟢) to **approve**, ❌ (or ✖️ 🚫 ⛔ 🔴) to **reject**. A reject reaction wins if both are present.
+3. A cron trigger polls pending submissions every 2 minutes (Workers can't hold a Discord Gateway socket, so reactions are read via REST). `POST /api/sprite-submissions/sync` forces a check; `POST /api/sprite-submissions/:id/sync` re-evaluates one submission even after a decision, so changing the reaction overturns it.
+
+Visibility rules:
+
+- The **submitter sees their own custom sprite while it is pending or approved** in their roster and on their side of battles.
+- **Opponents only see it once approved**; otherwise they see the shared global sprite (or the placeholder if none exists).
+- **Rejected sprites are hidden from everyone, including the submitter** — the roster shows the rejected QA badge but falls back to the shared global sprite.
+- A pending or approved custom sprite also makes that species battle-eligible for its owner even when no global sprite exists yet.
+
+Setup: create a Discord application with a bot, invite it to the server with View Channel, Send Messages, Attach Files, and Read Message History permissions on the QA channel, set `DISCORD_QA_CHANNEL_ID` in `wrangler.jsonc` (already pointed at the QA channel), and run:
+
+```sh
+npx wrangler secret put DISCORD_BOT_TOKEN
+```
+
+If the Discord post fails (missing token, outage), the submission stays pending with the error recorded and the cron retries the post automatically.
+
+```text
+POST /api/my-sprites/upload          multipart: sprite, taxonId
+GET  /api/my-sprites
+POST /api/sprite-submissions/sync
+POST /api/sprite-submissions/:id/sync
+```
+
 ### Auth & challenge endpoints
 
 ```text
