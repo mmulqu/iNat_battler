@@ -7,6 +7,14 @@ import {
 } from "./game.js";
 
 import {
+  GENOME_VERSION_MOVES,
+  assembleGenomeV2,
+  buildSpriteSheetPromptV2,
+  dossierMessages,
+  validateDossier
+} from "./moves.js";
+
+import {
   RESPEC_COOLDOWN_MS,
   TRAINING_STATS,
   allocationsTotal,
@@ -386,6 +394,34 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "GET" && url.pathname === "/api/sprite-batches/latest") {
     return jsonResponse(await getLatestSpriteBatch(env));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/move-batches/dev-submit") {
+    const payload = await readJson(request);
+    return jsonResponse(await submitMoveBatch(env, {
+      limit: clampInt(payload.limit, 1, 60, 10),
+      userId: payload.userId ? String(payload.userId) : ""
+    }));
+  }
+
+  const moveBatchSyncMatch = url.pathname.match(/^\/api\/move-batches\/([^/]+)\/sync$/);
+  if (request.method === "POST" && moveBatchSyncMatch) {
+    return jsonResponse(await syncMoveBatch(env, decodeURIComponent(moveBatchSyncMatch[1])));
+  }
+
+  const moveBatchMatch = url.pathname.match(/^\/api\/move-batches\/([^/]+)$/);
+  if (request.method === "GET" && moveBatchMatch) {
+    return jsonResponse(await getMoveBatch(env, decodeURIComponent(moveBatchMatch[1])));
+  }
+
+  const movesGenerateMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/moves\/dev-generate$/);
+  if (request.method === "POST" && movesGenerateMatch) {
+    return jsonResponse(await generateMovesForTaxon(env, Number(movesGenerateMatch[1])));
+  }
+
+  const genomeMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/genome$/);
+  if (request.method === "GET" && genomeMatch) {
+    return jsonResponse(await getTaxonGenome(env, Number(genomeMatch[1])));
   }
 
   const spriteBatchSyncMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)\/sync$/);
@@ -2271,6 +2307,276 @@ async function devGenerateSpriteForJob(env, jobId) {
   return { assetId, r2Key, url: `/api/assets/${encodeR2Key(r2Key)}` };
 }
 
+// ---------------------------------------------------------------------------
+// Species move dossiers (LLM-researched signature moves -> genome v2)
+// ---------------------------------------------------------------------------
+
+function moveModel(env) {
+  return env.MOVE_MODEL || "gpt-5.4-nano";
+}
+
+async function fetchWikipediaSummaries(env, taxonIds) {
+  const map = new Map();
+  for (const chunk of chunkArray(taxonIds, 30)) {
+    try {
+      const res = await fetchInatWithRetry(
+        `https://api.inaturalist.org/v1/taxa/${chunk.join(",")}?per_page=${chunk.length}`
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const taxon of data.results ?? []) {
+        if (taxon?.wikipedia_summary) {
+          map.set(Number(taxon.id), String(taxon.wikipedia_summary).replace(/<[^>]+>/g, " "));
+        }
+      }
+    } catch {
+      // Summaries are best-effort grounding; the prompt handles their absence.
+    }
+    if (taxonIds.length > 30) await sleep(600);
+  }
+  return map;
+}
+
+async function writeGenomeV2(env, taxonRow, dossier) {
+  const summary = taxonSummaryFromRow(taxonRow);
+  summary.defaultPhotoUrl = taxonRow.default_photo_url ?? null;
+
+  const genome = assembleGenomeV2(summary, dossier);
+  const promptSpec = buildSpriteSheetPromptV2(summary, genome);
+
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO creature_genomes (
+      taxon_id, genome_version, body_plan,
+      ecological_types_json, battle_role,
+      prompt_json, genome_json, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    taxonRow.taxon_id,
+    GENOME_VERSION_MOVES,
+    genome.bodyPlan,
+    JSON.stringify(genome.types),
+    genome.role,
+    JSON.stringify(promptSpec),
+    JSON.stringify(genome),
+    new Date().toISOString()
+  ).run();
+
+  return genome;
+}
+
+async function loadSpeciesMovesMap(env, taxonIds) {
+  const ids = [...new Set(taxonIds.map(Number).filter(Number.isFinite))];
+  if (!ids.length) return new Map();
+
+  const placeholders = ids.map(() => "?").join(",");
+  const rows = await env.DB.prepare(`
+    SELECT taxon_id, genome_json
+    FROM creature_genomes
+    WHERE genome_version >= ? AND taxon_id IN (${placeholders})
+  `).bind(GENOME_VERSION_MOVES, ...ids).all();
+
+  const map = new Map();
+  for (const row of rows.results ?? []) {
+    try {
+      const genome = JSON.parse(row.genome_json);
+      if (Array.isArray(genome.moves) && genome.moves.length === 4) {
+        map.set(Number(row.taxon_id), genome);
+      }
+    } catch {
+      // Ignore malformed rows; procedural moves remain the fallback.
+    }
+  }
+  return map;
+}
+
+async function generateMovesForTaxon(env, taxonId) {
+  if (!env.OPENAI_API_KEY) throw httpError("OPENAI_API_KEY is not configured", 400);
+
+  const taxonRow = await env.DB.prepare("SELECT * FROM taxa WHERE taxon_id = ?").bind(taxonId).first();
+  if (!taxonRow) throw httpError(`Unknown taxon ${taxonId}`, 404);
+
+  const summaries = await fetchWikipediaSummaries(env, [taxonId]);
+  const messages = dossierMessages(taxonSummaryFromRow(taxonRow), summaries.get(taxonId) ?? null);
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: moveModel(env),
+      messages,
+      response_format: { type: "json_object" }
+    })
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw httpError(`OpenAI chat failed (${res.status}): ${text.slice(0, 200)}`, 502);
+  }
+
+  const data = await res.json();
+  const content = data.choices?.[0]?.message?.content;
+  const dossier = validateDossier(content, taxonId);
+  const genome = await writeGenomeV2(env, taxonRow, dossier);
+
+  return { taxonId, model: moveModel(env), genome };
+}
+
+async function getTaxonGenome(env, taxonId) {
+  const row = await env.DB.prepare("SELECT * FROM creature_genomes WHERE taxon_id = ?").bind(taxonId).first();
+  if (!row) throw httpError(`No genome stored for taxon ${taxonId}`, 404);
+  return {
+    taxonId,
+    genomeVersion: row.genome_version,
+    genome: JSON.parse(row.genome_json),
+    promptSpec: JSON.parse(row.prompt_json)
+  };
+}
+
+async function submitMoveBatch(env, { limit, userId }) {
+  const rows = await env.DB.prepare(`
+    SELECT t.*, (
+      SELECT COUNT(*) FROM user_taxa ut2 WHERE ut2.taxon_id = t.taxon_id
+    ) AS roster_count
+    FROM taxa t
+    WHERE t.taxon_id NOT IN (
+        SELECT taxon_id FROM creature_genomes WHERE genome_version >= ?
+      )
+      AND (? = '' OR EXISTS (
+        SELECT 1 FROM user_taxa ut WHERE ut.user_id = ? AND ut.taxon_id = t.taxon_id
+      ))
+      AND (
+        EXISTS (SELECT 1 FROM user_taxa ut3 WHERE ut3.taxon_id = t.taxon_id)
+        OR EXISTS (SELECT 1 FROM global_seed_taxa gst WHERE gst.taxon_id = t.taxon_id)
+      )
+    ORDER BY roster_count DESC, t.taxon_id ASC
+    LIMIT ?
+  `).bind(GENOME_VERSION_MOVES, userId, userId, limit).all();
+
+  const taxa = rows.results ?? [];
+  if (!taxa.length) {
+    return { queued: 0, message: "Every eligible species already has signature moves." };
+  }
+
+  const taxonIds = taxa.map((row) => Number(row.taxon_id));
+  const summaries = await fetchWikipediaSummaries(env, taxonIds);
+
+  const jsonl = taxa.map((row) => JSON.stringify({
+    custom_id: `moves:${row.taxon_id}`,
+    method: "POST",
+    url: "/v1/chat/completions",
+    body: {
+      model: moveModel(env),
+      messages: dossierMessages(taxonSummaryFromRow(row), summaries.get(Number(row.taxon_id)) ?? null),
+      response_format: { type: "json_object" }
+    }
+  })).join("\n");
+
+  const inputFileId = await uploadOpenAIBatchFile(env, jsonl, `move-batch-${Date.now()}.jsonl`);
+  const batch = await createOpenAIBatch(env, inputFileId, "/v1/chat/completions", {
+    purpose: "species_moves"
+  });
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    INSERT INTO move_batches (
+      batch_id, input_file_id, status, model, item_count, taxon_ids_json, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    batch.id,
+    inputFileId,
+    batch.status ?? "submitted",
+    moveModel(env),
+    taxa.length,
+    JSON.stringify(taxonIds),
+    now,
+    now
+  ).run();
+
+  return { batchId: batch.id, status: batch.status, queued: taxa.length, taxonIds };
+}
+
+async function getMoveBatch(env, batchId) {
+  const row = await env.DB.prepare("SELECT * FROM move_batches WHERE batch_id = ?").bind(batchId).first();
+  if (!row) throw httpError("Move batch not found", 404);
+
+  try {
+    const batch = await retrieveOpenAIBatch(env, batchId);
+    await env.DB.prepare(
+      "UPDATE move_batches SET status = ?, output_file_id = ?, updated_at = ? WHERE batch_id = ?"
+    ).bind(batch.status, batch.output_file_id ?? row.output_file_id, new Date().toISOString(), batchId).run();
+    row.status = batch.status;
+    row.output_file_id = batch.output_file_id ?? row.output_file_id;
+  } catch {
+    // Offline or missing key: return the stored snapshot.
+  }
+
+  return {
+    batchId: row.batch_id,
+    status: row.status,
+    model: row.model,
+    itemCount: row.item_count,
+    appliedCount: row.applied_count,
+    failedCount: row.failed_count,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function syncMoveBatch(env, batchId) {
+  const row = await env.DB.prepare("SELECT * FROM move_batches WHERE batch_id = ?").bind(batchId).first();
+  if (!row) throw httpError("Move batch not found", 404);
+
+  const batch = await retrieveOpenAIBatch(env, batchId);
+  let applied = 0;
+  let failed = 0;
+  const errors = [];
+
+  if (batch.output_file_id) {
+    const content = await fetchOpenAIFileContent(env, batch.output_file_id);
+    for (const line of parseJsonl(content)) {
+      const taxonId = Number(String(line.custom_id ?? "").replace("moves:", ""));
+      try {
+        if (line.error) throw new Error(line.error.message ?? "batch line error");
+        const messageContent = line.response?.body?.choices?.[0]?.message?.content;
+        if (!messageContent) throw new Error("no completion content");
+
+        const dossier = validateDossier(messageContent, taxonId);
+        const taxonRow = await env.DB.prepare("SELECT * FROM taxa WHERE taxon_id = ?").bind(taxonId).first();
+        if (!taxonRow) throw new Error("taxon missing from D1");
+
+        await writeGenomeV2(env, taxonRow, dossier);
+        applied += 1;
+      } catch (error) {
+        failed += 1;
+        if (errors.length < 8) {
+          errors.push(`${taxonId}: ${error instanceof Error ? error.message : "failed"}`);
+        }
+      }
+    }
+  }
+
+  await env.DB.prepare(`
+    UPDATE move_batches
+    SET status = ?, output_file_id = ?, applied_count = ?, failed_count = ?, error = ?, updated_at = ?
+    WHERE batch_id = ?
+  `).bind(
+    batch.status,
+    batch.output_file_id ?? row.output_file_id,
+    applied,
+    failed,
+    errors.length ? errors.join(" | ") : null,
+    new Date().toISOString(),
+    batchId
+  ).run();
+
+  return { batchId, status: batch.status, applied, failed, errors };
+}
+
 async function getRoster(env, userId, limit, q = "") {
   const rows = await env.DB.prepare(`
     SELECT
@@ -2362,10 +2668,12 @@ async function getRoster(env, userId, limit, q = "") {
   ).all();
 
   const buffMap = await loadUserBuffMap(env, userId);
+  const rosterRows = rows.results ?? [];
+  const movesMap = await loadSpeciesMovesMap(env, rosterRows.map((row) => Number(row.taxon_id)));
 
   return {
     userId,
-    taxa: (rows.results ?? []).map((row) => {
+    taxa: rosterRows.map((row) => {
       // The roster is the owner's own view, so pending or approved custom
       // sprites win here; rejected submissions fall back to the global sprite.
       const finalKey = row.custom_r2_key || row.r2_key;
@@ -2373,7 +2681,13 @@ async function getRoster(env, userId, limit, q = "") {
       const spriteUrl = spriteReady ? `/api/assets/${encodeR2Key(finalKey)}` : null;
       const taxon = taxonSummaryFromRow(row, spriteUrl);
       const genome = createGenome(taxon);
-      const battleCreature = createBattleCreature(taxon, "roster", trainingFromRow(row, buffMap));
+      const speciesGenome = movesMap.get(Number(row.taxon_id)) ?? null;
+      const battleCreature = createBattleCreature(
+        taxon,
+        "roster",
+        trainingFromRow(row, buffMap),
+        speciesGenome?.moves ?? null
+      );
 
       return {
         taxonId: row.taxon_id,
@@ -2402,7 +2716,9 @@ async function getRoster(env, userId, limit, q = "") {
         baseStats: genome.baseStats,
         stats: battleCreature.stats,
         maxHp: battleCreature.maxHp,
-        moves: battleCreature.moves
+        moves: battleCreature.moves,
+        facts: speciesGenome?.facts ?? null,
+        hasSignatureMoves: Boolean(speciesGenome)
       };
     })
   };
@@ -2775,6 +3091,7 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
   ).all();
 
   const buffMap = await loadUserBuffMap(env, userId);
+  const movesMap = await loadSpeciesMovesMap(env, cleanTaxonIds);
   const byId = new Map((rows.results ?? []).map((row) => [Number(row.taxon_id), row]));
   return cleanTaxonIds.map((taxonId, index) => {
     const row = byId.get(taxonId);
@@ -2789,7 +3106,8 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
     return createBattleCreature(
       taxonSummaryFromRow(row, spriteUrl),
       `${idPrefix}-${index}`,
-      trainingFromRow(row, buffMap)
+      trainingFromRow(row, buffMap),
+      movesMap.get(taxonId)?.moves ?? null
     );
   });
 }
@@ -2892,9 +3210,16 @@ async function createRandomReadyNpcTeam(env, excludedTaxonIds = [], size = 5) {
     size
   ).all();
 
-  const creatures = (rows.results ?? []).map((row, index) => {
+  const npcRows = rows.results ?? [];
+  const npcMovesMap = await loadSpeciesMovesMap(env, npcRows.map((row) => Number(row.taxon_id)));
+  const creatures = npcRows.map((row, index) => {
     const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
-    return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `npc-${index}`);
+    return createBattleCreature(
+      taxonSummaryFromRow(row, spriteUrl),
+      `npc-${index}`,
+      null,
+      npcMovesMap.get(Number(row.taxon_id))?.moves ?? null
+    );
   });
 
   if (creatures.length < size) {
@@ -2947,12 +3272,18 @@ async function startDemoBattle(env) {
   ).all();
 
   const byId = new Map((rows.results ?? []).map((row) => [Number(row.taxon_id), row]));
+  const demoMovesMap = await loadSpeciesMovesMap(env, DEMO_PLAYER_TAXON_IDS);
   const creatures = DEMO_PLAYER_TAXON_IDS.map((taxonId, index) => {
     const row = byId.get(taxonId);
     if (!row) throw new Error("Demo sprite seed data is missing. Run D1 migrations.");
 
     const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
-    return createBattleCreature(taxonSummaryFromRow(row, spriteUrl), `demo-${index}`);
+    return createBattleCreature(
+      taxonSummaryFromRow(row, spriteUrl),
+      `demo-${index}`,
+      null,
+      demoMovesMap.get(taxonId)?.moves ?? null
+    );
   });
   const dummies = DEMO_DUMMY_TAXA.map((taxon, index) => ({
     ...createBattleCreature(taxon, `dummy-${index}`),
@@ -4759,8 +5090,9 @@ async function getOrCreatePromptSpec(env, taxonId) {
     SELECT prompt_json
     FROM creature_genomes
     WHERE taxon_id = ?
-      AND genome_version = ?
-  `).bind(taxonId, ASSET_VERSION).first();
+    ORDER BY genome_version DESC
+    LIMIT 1
+  `).bind(taxonId).first();
 
   if (existing?.prompt_json) return JSON.parse(existing.prompt_json);
 
@@ -6821,6 +7153,38 @@ function renderAppHtml() {
       background: #2c3a30;
       color: #f2ce72;
     }
+
+    .sig-star {
+      color: #b48a12;
+    }
+
+    .move-button.signature {
+      border-color: #d9b545;
+      background: #f8f2dc;
+    }
+
+    .status-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .status-chip {
+      display: inline-block;
+      padding: 0 7px;
+      border-radius: 999px;
+      font-size: 0.68rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      background: #e7ebe5;
+      color: #5b675f;
+    }
+
+    .status-chip.status-stunned { background: #f4e3ae; color: #7c5e12; }
+    .status-chip.status-marked { background: #f3d3cf; color: #93352c; }
+    .status-chip.status-poisoned { background: #e2d4ef; color: #5e3a86; }
+    .status-chip.status-shielded { background: #d4e4f1; color: #2d5a82; }
 
     .dummy-sprite {
       display: grid;
@@ -9118,10 +9482,11 @@ function renderAppHtml() {
         const power = Number(move.power || 0);
         const score = power > 0 ? power : "ST";
 
-        return '<div class="ability">' +
+        return '<div class="ability"' + (move.flavor ? ' title="' + escapeAttr(move.flavor) + '"' : "") + '>' +
           '<div>' +
-            '<strong>' + escapeHtml(move.name || move.id || "Move") + '</strong>' +
-            '<span>' + escapeHtml((move.type || "Life") + " / " + (move.category || "status")) + '</span>' +
+            '<strong>' + (move.signature ? '<span class="sig-star">★</span> ' : "") + escapeHtml(move.name || move.id || "Move") + '</strong>' +
+            '<span>' + escapeHtml((move.type || "Life") + " / " + (move.category || "status")) +
+              (move.flavor ? '<br>' + escapeHtml(move.flavor) : "") + '</span>' +
           '</div>' +
           '<div class="ability-power">' + escapeHtml(score) + '</div>' +
         '</div>';
@@ -9198,7 +9563,7 @@ function renderAppHtml() {
       const active = getActiveCreature(prev.player);
       const move = active.moves.find((candidate) => candidate.id === moveId);
       state.battleBusy = true;
-      state.battleAnimation = move && move.category === "special" ? "anim-special" : "anim-attack";
+      state.battleAnimation = moveAnimClassFor(active, moveId);
       playSfx("click");
       renderBattle();
 
@@ -9243,6 +9608,13 @@ function renderAppHtml() {
       return move ? move.category : "physical";
     }
 
+    function moveAnimClassFor(creature, moveId) {
+      const move = (creature.moves || []).find((candidate) => candidate.id === moveId);
+      if (move && move.animRow === 4) return "anim-special";
+      if (move && move.animRow === 3) return "anim-attack";
+      return move && move.category === "special" ? "anim-special" : "anim-attack";
+    }
+
     async function playTurnEvents(prev, next) {
       const events = (next.log || []).filter((entry) => entry.turn === prev.turn);
       const hpState = {
@@ -9259,12 +9631,84 @@ function renderAppHtml() {
           const actorSide = sideForName(damageMatch[1], prev);
           const targetSide = actorSide === "player" ? "opponent" : "player";
           const damage = Number(damageMatch[3]);
-          const category = moveCategoryFor(prev, actorSide, entry.data && entry.data.moveId);
-          triggerAttackVisual(actorSide, category === "special" ? "anim-special" : "anim-attack");
+          const actorCreature = getActiveCreature(actorSide === "player" ? prev.player : prev.opponent);
+          const moveId = entry.data && entry.data.moveId;
+          const category = moveCategoryFor(prev, actorSide, moveId);
+          triggerAttackVisual(actorSide, moveAnimClassFor(actorCreature, moveId));
           if (category === "special") playSfx("special");
           await delay(280);
           hitEffect(targetSide, damage, hpState);
           await delay(640);
+          continue;
+        }
+
+        const multihitMatch = text.match(/^It struck (\d+) times\.$/);
+        if (multihitMatch) {
+          playSfx("hit", 0.6);
+          await delay(260);
+          continue;
+        }
+
+        const stunMatch = text.match(/^(.+) is stunned and cannot move\.$/);
+        if (stunMatch) {
+          playSfx("debuff");
+          spawnFloat(sideForName(stunMatch[1], prev), "stunned", "dmg");
+          await delay(520);
+          continue;
+        }
+
+        const poisonMatch = text.match(/^(.+) is hurt by poison and loses (\d+) HP\.$/);
+        if (poisonMatch) {
+          const side = sideForName(poisonMatch[1], prev);
+          const damage = Number(poisonMatch[2]);
+          playSfx("status");
+          const target = hpState[side];
+          target.hp = Math.max(0, target.hp - damage);
+          setHpBar(side, target.hp, target.max);
+          spawnFloat(side, "-" + damage, "dmg");
+          await delay(520);
+          continue;
+        }
+
+        const drainMatch = text.match(/^(.+) drained (\d+) HP\.$/);
+        if (drainMatch) {
+          const side = sideForName(drainMatch[1], prev);
+          const healed = Number(drainMatch[2]);
+          playSfx("heal");
+          const target = hpState[side];
+          target.hp = Math.min(target.max, target.hp + healed);
+          setHpBar(side, target.hp, target.max);
+          spawnFloat(side, "+" + healed, "heal");
+          await delay(480);
+          continue;
+        }
+
+        const recoilMatch = text.match(/^(.+) took (\d+) recoil damage\.$/);
+        if (recoilMatch) {
+          const side = sideForName(recoilMatch[1], prev);
+          const damage = Number(recoilMatch[2]);
+          playSfx("hit", 0.5);
+          const target = hpState[side];
+          target.hp = Math.max(0, target.hp - damage);
+          setHpBar(side, target.hp, target.max);
+          spawnFloat(side, "-" + damage, "dmg");
+          await delay(480);
+          continue;
+        }
+
+        if (/shield softened the blow\.$/.test(text) || / raised a shield\.$/.test(text)) {
+          playSfx("buff");
+          await delay(380);
+          continue;
+        }
+        if (/ was poisoned\.$/.test(text) || / is marked for the hunt\.$/.test(text) || / is stunned\.$/.test(text)) {
+          playSfx("status");
+          await delay(380);
+          continue;
+        }
+        if (/ shook off the poison\.$/.test(text)) {
+          playSfx("heal");
+          await delay(320);
           continue;
         }
 
@@ -9650,8 +10094,10 @@ function renderAppHtml() {
       const opponentActive = getActiveCreature(battle.opponent);
       const moveButtons = battle.status === "active"
         ? playerActive.moves.map((move) => (
-            '<button class="move-button" type="button" data-move-id="' + escapeAttr(move.id) + '" ' + (state.battleBusy ? "disabled" : "") + '>' +
-              escapeHtml(move.name) + '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + '</span>' +
+            '<button class="move-button' + (move.signature ? " signature" : "") + '" type="button" data-move-id="' + escapeAttr(move.id) + '" ' +
+              (move.flavor ? 'title="' + escapeAttr(move.flavor) + '" ' : "") + (state.battleBusy ? "disabled" : "") + '>' +
+              escapeHtml(move.name) + (move.signature ? ' <span class="sig-star">★</span>' : "") +
+              '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + '</span>' +
             '</button>'
           )).join("")
         : '<button class="move-button" type="button" disabled>Battle ' + escapeHtml(battle.status) + '</button>';
@@ -9705,6 +10151,11 @@ function renderAppHtml() {
           '</div>' +
           '<div class="hp" aria-label="HP"><span data-hp-bar="' + side + '" class="' + (hpPct <= 25 ? "hp-low" : "") + '" style="--hp:' + hpPct + '%"></span></div>' +
           '<div class="subtle" data-hp-text="' + side + '">' + Number(creature.hp || 0) + ' / ' + Number(creature.maxHp || 0) + ' HP</div>' +
+          ((creature.statuses || []).length
+            ? '<div class="status-chips">' + creature.statuses.map((status) => (
+                '<span class="status-chip status-' + escapeAttr(status) + '">' + escapeHtml(status) + '</span>'
+              )).join("") + '</div>'
+            : "") +
           '<div class="bench">' + bench + '</div>' +
         '</div>' +
         '<div class="combatant-sprite" data-sprite-zone="' + side + '">' +

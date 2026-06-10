@@ -148,7 +148,9 @@ export function createGenome(taxon) {
   };
 }
 
-export function createBattleCreature(taxon, instanceSuffix = "a", training = null) {
+export const MOVE_TYPES = Object.keys(TYPE_CHART);
+
+export function createBattleCreature(taxon, instanceSuffix = "a", training = null, speciesMoves = null) {
   const genome = createGenome(taxon);
   const bondLevel = taxon.bondLevel ?? 0;
   const obsCount = taxon.obsCount ?? 0;
@@ -194,7 +196,7 @@ export function createBattleCreature(taxon, instanceSuffix = "a", training = nul
     hp: maxHp,
     stats,
     statStages: {},
-    moves: genome.moves,
+    moves: Array.isArray(speciesMoves) && speciesMoves.length === 4 ? speciesMoves : genome.moves,
     bondLevel,
     fainted: false,
     statuses: [],
@@ -276,23 +278,71 @@ export function resolveTurn(state, playerAction, npcAction, rng) {
   for (const item of actions) {
     if (item.actor.fainted || item.target.fainted) continue;
 
+    if (hasStatus(item.actor, "stunned")) {
+      removeStatus(item.actor, "stunned");
+      next.log.push({ turn: next.turn, text: `${item.actor.name} is stunned and cannot move.` });
+      continue;
+    }
+
     const move = item.actor.moves.find((candidate) => candidate.id === item.action.moveId);
     if (!move) continue;
 
     applyMove(next, item.actor, item.target, move, rng);
 
-    if (item.target.hp <= 0) {
-      item.target.hp = 0;
-      item.target.fainted = true;
-      next.log.push({ turn: next.turn, text: `${item.target.name} fainted.` });
+    for (const combatant of [item.target, item.actor]) {
+      if (!combatant.fainted && combatant.hp <= 0) {
+        combatant.hp = 0;
+        combatant.fainted = true;
+        next.log.push({ turn: next.turn, text: `${combatant.name} fainted.` });
+      }
     }
   }
+
+  applyPoisonTicks(next, [playerCreature, npcCreature]);
 
   autoSwitch(next.player);
   autoSwitch(next.opponent);
   next.status = getBattleStatus(next);
   next.turn += 1;
   return next;
+}
+
+export function hasStatus(creature, status) {
+  return Array.isArray(creature.statuses) && creature.statuses.includes(status);
+}
+
+function removeStatus(creature, status) {
+  if (!Array.isArray(creature.statuses)) return;
+  const index = creature.statuses.indexOf(status);
+  if (index >= 0) creature.statuses.splice(index, 1);
+}
+
+function applyPoisonTicks(state, creatures) {
+  for (const creature of creatures) {
+    if (creature.fainted || !hasStatus(creature, "poisoned")) continue;
+
+    const meta = creature.statusMeta ?? (creature.statusMeta = {});
+    const turnsLeft = Number.isFinite(meta.poisonedTurns) ? meta.poisonedTurns : 3;
+    const damage = Math.max(1, Math.floor(creature.maxHp * 0.08));
+
+    creature.hp -= damage;
+    state.log.push({
+      turn: state.turn,
+      text: `${creature.name} is hurt by poison and loses ${damage} HP.`
+    });
+
+    meta.poisonedTurns = turnsLeft - 1;
+    if (meta.poisonedTurns <= 0) {
+      removeStatus(creature, "poisoned");
+      state.log.push({ turn: state.turn, text: `${creature.name} shook off the poison.` });
+    }
+
+    if (creature.hp <= 0) {
+      creature.hp = 0;
+      creature.fainted = true;
+      state.log.push({ turn: state.turn, text: `${creature.name} fainted.` });
+    }
+  }
 }
 
 export function getActive(team) {
@@ -428,6 +478,13 @@ function estimateDamage(attacker, defender, move) {
   return Math.max(1, Math.floor(base));
 }
 
+const STATUS_APPLY_TEXT = {
+  stunned: (name) => `${name} is stunned.`,
+  marked: (name) => `${name} is marked for the hunt.`,
+  poisoned: (name) => `${name} was poisoned.`,
+  shielded: (name) => `${name} raised a shield.`
+};
+
 function applyMove(state, attacker, defender, move, rng) {
   if (rng() * 100 > move.accuracy) {
     state.log.push({ turn: state.turn, text: `${attacker.name} used ${move.name}, but it missed.` });
@@ -435,32 +492,70 @@ function applyMove(state, attacker, defender, move, rng) {
   }
 
   if (move.category !== "status") {
-    const damage = estimateDamage(attacker, defender, move);
+    let damage = estimateDamage(attacker, defender, move);
+    let hits = 1;
+
+    if (move.effect?.kind === "multihit") {
+      const min = Math.max(2, Math.min(3, Math.floor(move.effect.min ?? 2)));
+      const max = Math.max(min, Math.min(3, Math.floor(move.effect.max ?? 3)));
+      hits = min + Math.floor(rng() * (max - min + 1));
+      damage *= hits;
+    }
+
+    if (hasStatus(defender, "marked")) {
+      damage = Math.floor(damage * 1.25);
+      removeStatus(defender, "marked");
+    }
+
+    if (hasStatus(defender, "shielded")) {
+      damage = Math.max(1, Math.floor(damage / 2));
+      removeStatus(defender, "shielded");
+      state.log.push({ turn: state.turn, text: `${defender.name}'s shield softened the blow.` });
+    }
+
     defender.hp -= damage;
     state.log.push({
       turn: state.turn,
       text: `${attacker.name} used ${move.name} and dealt ${damage} damage.`,
       data: { damage, moveId: move.id }
     });
+    if (hits > 1) {
+      state.log.push({ turn: state.turn, text: `It struck ${hits} times.` });
+    }
+
+    if (move.effect?.kind === "drain") {
+      const pct = Math.max(10, Math.min(60, Math.floor(move.effect.pct ?? 30)));
+      const healed = Math.max(1, Math.floor((damage * pct) / 100));
+      attacker.hp = Math.min(attacker.maxHp, attacker.hp + healed);
+      state.log.push({ turn: state.turn, text: `${attacker.name} drained ${healed} HP.` });
+    }
+
+    if (move.effect?.kind === "recoil") {
+      const pct = Math.max(10, Math.min(50, Math.floor(move.effect.pct ?? 25)));
+      const recoil = Math.max(1, Math.floor((damage * pct) / 100));
+      attacker.hp -= recoil;
+      state.log.push({ turn: state.turn, text: `${attacker.name} took ${recoil} recoil damage.` });
+    }
   } else {
     state.log.push({ turn: state.turn, text: `${attacker.name} used ${move.name}.` });
   }
 
-  if (move.effect) applyEffect(state, attacker, defender, move, rng);
+  if (move.effect && ["buff", "debuff", "heal", "status"].includes(move.effect.kind)) {
+    applyEffect(state, attacker, defender, move, rng);
+  }
 }
 
 function applyEffect(state, attacker, defender, move, rng) {
   const effect = move.effect;
-  const target = effect.kind === "buff" || effect.kind === "heal" ? attacker : defender;
 
   if (effect.kind === "buff") {
-    target.statStages[effect.stat] = Math.min(4, (target.statStages[effect.stat] ?? 0) + effect.amount);
-    state.log.push({ turn: state.turn, text: `${target.name}'s ${effect.stat} rose.` });
+    attacker.statStages[effect.stat] = Math.min(4, (attacker.statStages[effect.stat] ?? 0) + effect.amount);
+    state.log.push({ turn: state.turn, text: `${attacker.name}'s ${effect.stat} rose.` });
   }
 
   if (effect.kind === "debuff") {
-    target.statStages[effect.stat] = Math.max(-4, (target.statStages[effect.stat] ?? 0) - effect.amount);
-    state.log.push({ turn: state.turn, text: `${target.name}'s ${effect.stat} fell.` });
+    defender.statStages[effect.stat] = Math.max(-4, (defender.statStages[effect.stat] ?? 0) - effect.amount);
+    state.log.push({ turn: state.turn, text: `${defender.name}'s ${effect.stat} fell.` });
   }
 
   if (effect.kind === "heal") {
@@ -469,9 +564,20 @@ function applyEffect(state, attacker, defender, move, rng) {
     state.log.push({ turn: state.turn, text: `${attacker.name} recovered ${amount} HP.` });
   }
 
-  if (effect.kind === "status" && rng() * 100 <= effect.chance && !defender.statuses.includes(effect.status)) {
-    defender.statuses.push(effect.status);
-    state.log.push({ turn: state.turn, text: `${defender.name} became ${effect.status}.` });
+  if (effect.kind === "status" && rng() * 100 <= (effect.chance ?? 100)) {
+    // Shields protect the user; every other status afflicts the target.
+    const target = effect.status === "shielded" ? attacker : defender;
+    if (!target.statuses.includes(effect.status)) {
+      target.statuses.push(effect.status);
+      if (effect.status === "poisoned") {
+        (target.statusMeta ?? (target.statusMeta = {})).poisonedTurns = 3;
+      }
+      const describe = STATUS_APPLY_TEXT[effect.status];
+      state.log.push({
+        turn: state.turn,
+        text: describe ? describe(target.name) : `${target.name} became ${effect.status}.`
+      });
+    }
   }
 }
 
