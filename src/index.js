@@ -5371,13 +5371,29 @@ async function loadTrainingContext(env, userId) {
       t.taxon_id, t.scientific_name, t.common_name, t.iconic_taxon_name, t.ancestry,
       t.genus_id, t.genus_name, t.family_id, t.family_name,
       ut.obs_count, ut.bond_level, ut.rg_obs_count, ut.training_count_source,
-      st.nickname, st.allocated_json, st.points_spent, st.last_respec_at
+      st.nickname, st.allocated_json, st.points_spent, st.last_respec_at,
+      (
+        SELECT sa.r2_key
+        FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+        ORDER BY
+          CASE
+            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+            ELSE 3
+          END,
+          sa.created_at DESC
+        LIMIT 1
+      ) AS sprite_r2_key
     FROM user_taxa ut
     JOIN taxa t ON t.taxon_id = ut.taxon_id
     LEFT JOIN species_training st ON st.user_id = ut.user_id AND st.taxon_id = ut.taxon_id
     WHERE ut.user_id = ?
     ORDER BY ut.rg_obs_count DESC, ut.obs_count DESC
-  `).bind(userId).all();
+  `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION, userId).all();
   const speciesRows = rows.results ?? [];
 
   const genusGroups = new Map();
@@ -5472,6 +5488,8 @@ function buildTrainingEntry(row, context) {
     taxonId: row.taxon_id,
     name: row.common_name || row.scientific_name,
     scientificName: row.scientific_name,
+    iconicTaxonName: row.iconic_taxon_name ?? null,
+    spriteUrl: row.sprite_r2_key ? `/api/assets/${encodeR2Key(row.sprite_r2_key)}` : null,
     nickname,
     level: spent,
     rgObsCount: rg,
@@ -8307,6 +8325,132 @@ function renderAppHtml() {
       background: linear-gradient(90deg, var(--coral), var(--amber));
     }
 
+    .training-hint {
+      padding: 10px 14px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .training-hint:empty {
+      display: none;
+    }
+
+    .training-masteries {
+      margin-top: 12px;
+    }
+
+    .training-masteries > summary {
+      cursor: pointer;
+      font-weight: 800;
+      color: var(--muted);
+      user-select: none;
+    }
+
+    .training-split {
+      display: grid;
+      grid-template-columns: minmax(230px, 300px) minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+      margin-top: 14px;
+    }
+
+    .training-roster {
+      display: grid;
+      align-content: start;
+      max-height: 72vh;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.88);
+    }
+
+    .training-roster-row {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 7px 10px;
+      border: 0;
+      border-bottom: 1px solid #e5e9e2;
+      background: transparent;
+      font: inherit;
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .training-roster-row:last-child {
+      border-bottom: 0;
+    }
+
+    .training-roster-row:hover {
+      background: #eef4f0;
+    }
+
+    .training-roster-row.active {
+      background: #edf6f1;
+      box-shadow: inset 3px 0 0 var(--teal);
+    }
+
+    .training-roster-sprite {
+      display: grid;
+      place-items: center;
+      width: 44px;
+      aspect-ratio: 1 / 1;
+      border-radius: 6px;
+      background: #eef2eb;
+      overflow: hidden;
+    }
+
+    .training-roster-sprite .sheet-sprite {
+      width: 94%;
+    }
+
+    .training-roster-sprite .placeholder-shape {
+      width: 60%;
+      height: 60%;
+    }
+
+    .training-roster-copy {
+      min-width: 0;
+      display: grid;
+      gap: 1px;
+    }
+
+    .training-roster-copy strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 0.85rem;
+    }
+
+    .training-roster-copy .subtle {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 0.72rem;
+    }
+
+    .training-roster-pts {
+      display: grid;
+      gap: 2px;
+      justify-items: end;
+      font-size: 0.72rem;
+      font-weight: 800;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .training-roster-pts .pts {
+      color: var(--teal);
+    }
+
+    .training-detail {
+      min-width: 0;
+    }
+
     .training-list {
       display: grid;
       gap: 12px;
@@ -8699,6 +8843,14 @@ function renderAppHtml() {
         grid-template-columns: 18px minmax(0, 1fr) auto;
       }
 
+      .training-split {
+        grid-template-columns: 1fr;
+      }
+
+      .training-roster {
+        max-height: 38vh;
+      }
+
       .tree-rank {
         display: none;
       }
@@ -8885,12 +9037,15 @@ function renderAppHtml() {
             <input id="trainingFilterInput" placeholder="Filter species">
             <button class="secondary" id="trainingSyncButton" type="button">Sync iNat Data</button>
           </div>
-          <div class="empty" id="trainingEmptyState">
-            Sign in with Bluesky and link your iNaturalist account, then sync to earn
-            training points from iNaturalist observations.
+          <div class="training-hint" id="trainingEmptyState"></div>
+          <details class="training-masteries" id="trainingMasteries" hidden>
+            <summary id="trainingMasteriesSummary">Masteries</summary>
+            <div id="trainingMasteriesBody"></div>
+          </details>
+          <div class="training-split" id="trainingSplit" hidden>
+            <div class="training-roster" id="trainingList" role="listbox" aria-label="Trainable species"></div>
+            <div class="training-detail" id="trainingDetail"></div>
           </div>
-          <div id="trainingMasteries" hidden></div>
-          <div id="trainingList" class="training-list" hidden></div>
         </section>
         <section class="view-panel" id="treeView" hidden>
           <div class="roster-head">
@@ -8962,6 +9117,7 @@ function renderAppHtml() {
   <script>
     const LAST_BATCH_STORAGE_KEY = "inatBattler:lastBatch";
     const ROSTER_PAGE_SIZE = 100;
+    ${placeholderFor.toString()}
     const BATCH_POLL_MS = 60000;
     const DEV_QUEUE_MORE_LIMIT = 100;
     const DEV_BATCH_SUBMIT_LIMIT = 100;
@@ -9016,6 +9172,7 @@ function renderAppHtml() {
       mySprites: [],
       training: null,
       trainingFilter: "",
+      trainingSelected: null,
       trainingBusy: false,
       devLab: null,
       devBusy: false,
@@ -9100,7 +9257,11 @@ function renderAppHtml() {
       trainingSyncButton: document.getElementById("trainingSyncButton"),
       trainingEmptyState: document.getElementById("trainingEmptyState"),
       trainingMasteries: document.getElementById("trainingMasteries"),
+      trainingMasteriesSummary: document.getElementById("trainingMasteriesSummary"),
+      trainingMasteriesBody: document.getElementById("trainingMasteriesBody"),
+      trainingSplit: document.getElementById("trainingSplit"),
       trainingList: document.getElementById("trainingList"),
+      trainingDetail: document.getElementById("trainingDetail"),
       devTabButton: document.getElementById("devTabButton"),
       devView: document.getElementById("devView"),
       devLabState: document.getElementById("devLabState"),
@@ -9138,7 +9299,14 @@ function renderAppHtml() {
       renderTraining();
     }, 200));
 
-    els.trainingList.addEventListener("click", async (event) => {
+    els.trainingSplit.addEventListener("click", async (event) => {
+      const selectRow = event.target.closest("[data-train-select]");
+      if (selectRow) {
+        state.trainingSelected = selectRow.getAttribute("data-train-select");
+        renderTraining();
+        return;
+      }
+
       const addButton = event.target.closest("[data-train-add]");
       if (addButton) {
         await allocateStat(
@@ -9161,7 +9329,7 @@ function renderAppHtml() {
       }
     });
 
-    els.trainingList.addEventListener("keydown", async (event) => {
+    els.trainingSplit.addEventListener("keydown", async (event) => {
       if (event.key !== "Enter" || !event.target.hasAttribute("data-train-nick-input")) return;
       event.preventDefault();
       await saveNickname(event.target.getAttribute("data-train-nick-input"));
@@ -10151,22 +10319,26 @@ function renderAppHtml() {
 
       els.trainingEmptyState.hidden = Boolean(training);
       els.trainingMasteries.hidden = !training;
-      els.trainingList.hidden = !training;
+      els.trainingSplit.hidden = !training;
 
       if (!training) {
         els.trainingTotalsLabel.textContent = "";
         els.trainingEmptyState.textContent = linked
           ? "Press Sync iNat Data to pull your iNaturalist observations and start earning points."
-          : "Sign in with Bluesky and link your iNaturalist account, then sync to earn training points from iNaturalist observations.";
+          : "To train creatures: sign in with Bluesky (sidebar), link your iNaturalist account, then press Sync iNat Data. Research Grade observations earn training points.";
         return;
       }
 
+      els.trainingEmptyState.textContent = "";
       els.trainingTotalsLabel.textContent =
         training.totals.available + " pts available · " +
         training.totals.spent + " spent · " +
         training.totals.earned + " earned";
 
-      els.trainingMasteries.innerHTML = training.masteries.length
+      els.trainingMasteriesSummary.textContent = training.masteries.length
+        ? "Masteries (" + training.masteries.length + ")"
+        : "Masteries";
+      els.trainingMasteriesBody.innerHTML = training.masteries.length
         ? '<div class="mastery-grid">' + training.masteries.map(renderMasteryCard).join("") + '</div>'
         : '<div class="subtle" style="margin-top:10px">No genus or family progress yet. Observe more species, then sync.</div>';
 
@@ -10179,9 +10351,38 @@ function renderAppHtml() {
           ))
         : training.species;
 
+      const selected = visible.find((entry) => String(entry.taxonId) === String(state.trainingSelected))
+        || visible[0]
+        || null;
+      if (selected) state.trainingSelected = String(selected.taxonId);
+
       els.trainingList.innerHTML = visible.length
-        ? visible.map(renderTrainRow).join("")
-        : '<div class="subtle">No species match the filter.</div>';
+        ? visible.map((entry) => renderTrainingListRow(entry, selected)).join("")
+        : '<div class="subtle" style="padding:10px">No species match the filter.</div>';
+
+      els.trainingDetail.innerHTML = selected
+        ? renderTrainRow(selected)
+        : '<div class="empty">Select a species on the left to allocate training points.</div>';
+    }
+
+    function renderTrainingListRow(entry, selected) {
+      const isActive = selected && String(entry.taxonId) === String(selected.taxonId);
+      const sprite = entry.spriteUrl
+        ? renderSheetSprite(entry.spriteUrl, "anim-idle")
+        : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(entry.iconicTaxonName)) + '"></div>';
+
+      return '<button type="button" class="training-roster-row' + (isActive ? " active" : "") +
+        '" data-train-select="' + escapeAttr(String(entry.taxonId)) + '" role="option" aria-selected="' + String(Boolean(isActive)) + '">' +
+        '<span class="training-roster-sprite">' + sprite + '</span>' +
+        '<span class="training-roster-copy">' +
+          '<strong>' + escapeHtml(entry.nickname || entry.name) + '</strong>' +
+          '<span class="subtle"><em>' + escapeHtml(entry.scientificName || "") + '</em></span>' +
+        '</span>' +
+        '<span class="training-roster-pts">' +
+          (entry.level > 0 ? '<span>Lv ' + Number(entry.level) + '</span>' : '') +
+          (entry.available > 0 ? '<span class="pts">' + Number(entry.available) + ' pts</span>' : '') +
+        '</span>' +
+      '</button>';
     }
 
     function renderChallengeBanner() {
