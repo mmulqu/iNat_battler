@@ -333,18 +333,14 @@ async function routeRequest(request, env, ctx) {
   const rosterMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/roster$/);
   if (request.method === "GET" && rosterMatch) {
     const userId = decodeURIComponent(rosterMatch[1]);
-    const limit = clampInt(url.searchParams.get("limit"), 1, 250, 100);
-    const q = String(url.searchParams.get("q") ?? "");
-    return jsonResponse(await getRoster(env, userId, limit, q));
+    return jsonResponse(await getRoster(env, userId, rosterOptionsFromUrl(url)));
   }
 
   if (request.method === "GET" && url.pathname === "/api/roster") {
     const userId = url.searchParams.get("userId");
     if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
 
-    const limit = clampInt(url.searchParams.get("limit"), 1, 250, 100);
-    const q = String(url.searchParams.get("q") ?? "");
-    return jsonResponse(await getRoster(env, userId, limit, q));
+    return jsonResponse(await getRoster(env, userId, rosterOptionsFromUrl(url)));
   }
 
   const spritePreferenceMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/(\d+)\/preference$/);
@@ -618,26 +614,32 @@ async function importUserByLogin(env, rawLogin) {
     };
   }
 
-  for (const row of speciesRows) {
-    const taxon = row.taxon;
-    if (!taxon?.id || !taxon.name) continue;
+  // Batched so a full Research Grade roster (thousands of species) stays
+  // within the per-invocation D1 query budget.
+  for (const chunk of chunkArray(speciesRows, 40)) {
+    const statements = [];
+    for (const row of chunk) {
+      const taxon = row.taxon;
+      if (!taxon?.id || !taxon.name) continue;
 
-    await upsertTaxonFromInat(env, taxon, now);
+      statements.push(prepareTaxonUpsert(env, taxon, now));
 
-    const obsCount = Number(row.count ?? 0);
-    const bondLevel = Math.floor(10 * Math.log10(1 + obsCount));
+      const obsCount = Number(row.count ?? 0);
+      const bondLevel = Math.floor(10 * Math.log10(1 + obsCount));
 
-    await env.DB.prepare(`
-      INSERT INTO user_taxa (
-        user_id, taxon_id, obs_count, weighted_obs, bond_level, imported_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id, taxon_id) DO UPDATE SET
-        obs_count = excluded.obs_count,
-        weighted_obs = excluded.weighted_obs,
-        bond_level = excluded.bond_level,
-        imported_at = excluded.imported_at
-    `).bind(userId, taxon.id, obsCount, obsCount, bondLevel, now).run();
+      statements.push(env.DB.prepare(`
+        INSERT INTO user_taxa (
+          user_id, taxon_id, obs_count, weighted_obs, bond_level, imported_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, taxon_id) DO UPDATE SET
+          obs_count = excluded.obs_count,
+          weighted_obs = excluded.weighted_obs,
+          bond_level = excluded.bond_level,
+          imported_at = excluded.imported_at
+      `).bind(userId, taxon.id, obsCount, obsCount, bondLevel, now));
+    }
+    if (statements.length) await env.DB.batch(statements);
   }
 
   const initialLimit = intEnv(env, "MAX_INITIAL_SPRITE_JOBS", 12);
@@ -689,8 +691,8 @@ function prepareTaxonUpsert(env, taxon, now) {
 }
 
 async function fetchSpeciesCounts(env, inatLogin) {
-  const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:v2:fields:v1`;
-  const cooldownKey = `inat:species_counts:${inatLogin.toLowerCase()}:verifiable:cooldown`;
+  const cacheKey = `inat:species_counts:${inatLogin.toLowerCase()}:roster-rg:v1`;
+  const cooldownKey = `inat:species_counts:${inatLogin.toLowerCase()}:roster-rg:cooldown`;
   const cached = await readSpeciesCountsCache(env, cacheKey);
   if (cached?.fresh) return cached.rows;
   if (await readInatCooldown(env, cooldownKey)) {
@@ -704,7 +706,7 @@ async function fetchSpeciesCounts(env, inatLogin) {
   for (let page = 1; page <= maxPages; page += 1) {
     const url = new URL(`${INAT_API_BASE_URL}/observations/species_counts`);
     url.searchParams.set("user_login", inatLogin);
-    url.searchParams.set("verifiable", "true");
+    url.searchParams.set("quality_grade", "research");
     url.searchParams.set("per_page", "500");
     url.searchParams.set("page", String(page));
     url.searchParams.set("fields", INAT_SPECIES_COUNT_FIELDS);
@@ -3424,8 +3426,34 @@ async function setUserSpritePreference(env, userId, taxonId, assetId) {
   };
 }
 
-async function getRoster(env, userId, limit, q = "") {
-  const rows = await env.DB.prepare(`
+function rosterOptionsFromUrl(url) {
+  return {
+    limit: url.searchParams.get("limit"),
+    offset: url.searchParams.get("offset"),
+    q: url.searchParams.get("q") ?? "",
+    sort: url.searchParams.get("sort") ?? "obs",
+    status: url.searchParams.get("status") ?? "all",
+    iconic: url.searchParams.get("iconic") ?? ""
+  };
+}
+
+const ROSTER_SORT_CLAUSES = {
+  obs: "obs_count DESC, taxon_id ASC",
+  name: "lower(COALESCE(common_name, scientific_name)) ASC",
+  affinity: "bond_level DESC, obs_count DESC",
+  level: "COALESCE(points_spent, 0) DESC, obs_count DESC",
+  status: "(r2_key IS NOT NULL OR custom_r2_key IS NOT NULL) DESC, obs_count DESC"
+};
+
+async function getRoster(env, userId, options = {}) {
+  const limit = clampInt(options.limit, 1, 250, 100);
+  const offset = clampInt(options.offset, 0, 1000000, 0);
+  const q = String(options.q ?? "");
+  const iconic = String(options.iconic ?? "");
+  const status = ["ready", "pending", "missing"].includes(options.status) ? options.status : "all";
+  const orderBy = ROSTER_SORT_CLAUSES[options.sort] ?? ROSTER_SORT_CLAUSES.obs;
+
+  const baseQuery = `
     SELECT
       t.taxon_id,
       t.scientific_name,
@@ -3500,9 +3528,10 @@ async function getRoster(env, userId, limit, q = "") {
         OR lower(t.scientific_name) LIKE '%' || lower(?) || '%'
         OR lower(COALESCE(t.common_name, '')) LIKE '%' || lower(?) || '%'
       )
-    ORDER BY ut.obs_count DESC
-    LIMIT ?
-  `).bind(
+      AND (? = '' OR COALESCE(t.iconic_taxon_name, 'Life') = ?)
+  `;
+
+  const baseBinds = [
     DEFAULT_ASSET_KIND,
     ASSET_VERSION,
     DEFAULT_ASSET_KIND,
@@ -3511,8 +3540,44 @@ async function getRoster(env, userId, limit, q = "") {
     q,
     q,
     q,
-    limit
-  ).all();
+    iconic,
+    iconic
+  ];
+
+  // Sprite readiness lives in computed columns, so status filtering wraps the
+  // base query rather than repeating the correlated subqueries in WHERE.
+  const statusClause = `
+    (
+      ? = 'all'
+      OR (? = 'ready' AND (r2_key IS NOT NULL OR custom_r2_key IS NOT NULL))
+      OR (? = 'pending' AND r2_key IS NULL AND custom_r2_key IS NULL
+          AND sprite_job_status IN ('queued', 'running'))
+      OR (? = 'missing' AND r2_key IS NULL AND custom_r2_key IS NULL
+          AND (sprite_job_status IS NULL OR sprite_job_status NOT IN ('queued', 'running')))
+    )
+  `;
+  const statusBinds = [status, status, status, status];
+
+  const rows = await env.DB.prepare(`
+    SELECT * FROM (${baseQuery}) roster
+    WHERE ${statusClause}
+    ORDER BY ${orderBy}
+    LIMIT ? OFFSET ?
+  `).bind(...baseBinds, ...statusBinds, limit, offset).all();
+
+  const totalRow = await env.DB.prepare(`
+    SELECT COUNT(*) AS total FROM (${baseQuery}) roster
+    WHERE ${statusClause}
+  `).bind(...baseBinds, ...statusBinds).first();
+
+  const iconicRows = await env.DB.prepare(`
+    SELECT COALESCE(t.iconic_taxon_name, 'Life') AS iconic, COUNT(*) AS count
+    FROM user_taxa ut
+    JOIN taxa t ON t.taxon_id = ut.taxon_id
+    WHERE ut.user_id = ?
+    GROUP BY COALESCE(t.iconic_taxon_name, 'Life')
+    ORDER BY count DESC, iconic ASC
+  `).bind(userId).all();
 
   const buffMap = await loadUserBuffMap(env, userId);
   const rosterRows = rows.results ?? [];
@@ -3523,6 +3588,13 @@ async function getRoster(env, userId, limit, q = "") {
 
   return {
     userId,
+    total: Number(totalRow?.total ?? rosterRows.length),
+    limit,
+    offset,
+    iconicCounts: (iconicRows.results ?? []).map((row) => ({
+      iconic: row.iconic,
+      count: Number(row.count)
+    })),
     taxa: rosterRows.map((row) => {
       // The roster is the owner's own view, so pending or approved custom
       // sprites win here; rejected submissions fall back to the global sprite.
@@ -7309,6 +7381,26 @@ function renderAppHtml() {
       accent-color: var(--teal);
     }
 
+    .roster-pagination {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .roster-pagination:empty {
+      display: none;
+    }
+
+    .roster-pagination button {
+      width: auto;
+    }
+
+    .roster-pagination .subtle {
+      font-weight: 800;
+    }
+
     .type-chips {
       display: flex;
       flex-wrap: wrap;
@@ -8762,6 +8854,7 @@ function renderAppHtml() {
           <div class="type-chips" id="rosterTypeChips" aria-label="Filter by taxon group"></div>
           <div class="grid" id="rosterGrid"></div>
           <div class="empty" id="emptyState">Import a public iNaturalist roster.</div>
+          <div class="roster-pagination" id="rosterPagination"></div>
         </section>
         <section class="view-panel" id="battleView" hidden>
           <div class="empty" id="battleEmptyState">
@@ -8859,6 +8952,7 @@ function renderAppHtml() {
 
   <script>
     const LAST_BATCH_STORAGE_KEY = "inatBattler:lastBatch";
+    const ROSTER_PAGE_SIZE = 100;
     const BATCH_POLL_MS = 60000;
     const DEV_QUEUE_MORE_LIMIT = 100;
     const DEV_BATCH_SUBMIT_LIMIT = 100;
@@ -8875,7 +8969,10 @@ function renderAppHtml() {
       rosterSearch: "",
       rosterSort: "default",
       rosterStatus: "all",
-      rosterTypes: new Set(),
+      rosterIconic: "",
+      rosterPage: 1,
+      rosterTotal: 0,
+      rosterIconicCounts: [],
       rosterZoom: Number(localStorage.getItem("inatBattler:rosterZoom")) || 190,
       rosterMode: localStorage.getItem("inatBattler:rosterMode") === "sprites" ? "sprites" : "cards",
       spriteTree: null,
@@ -8981,6 +9078,7 @@ function renderAppHtml() {
       rosterZoomInput: document.getElementById("rosterZoomInput"),
       rosterModeButton: document.getElementById("rosterModeButton"),
       rosterTypeChips: document.getElementById("rosterTypeChips"),
+      rosterPagination: document.getElementById("rosterPagination"),
       battlePanel: document.getElementById("battlePanel"),
       battleTabButton: document.getElementById("battleTabButton"),
       battleView: document.getElementById("battleView"),
@@ -9313,18 +9411,30 @@ function renderAppHtml() {
     });
 
     els.rosterSearchInput.addEventListener("input", debounce(() => {
-      state.rosterSearch = els.rosterSearchInput.value.trim().toLowerCase();
-      render();
-    }, 150));
+      state.rosterSearch = els.rosterSearchInput.value.trim();
+      reloadRosterPage(true);
+    }, 300));
 
     els.rosterSortSelect.addEventListener("change", () => {
       state.rosterSort = els.rosterSortSelect.value;
-      render();
+      reloadRosterPage(true);
     });
 
     els.rosterStatusFilter.addEventListener("change", () => {
       state.rosterStatus = els.rosterStatusFilter.value;
-      render();
+      reloadRosterPage(true);
+    });
+
+    els.rosterPagination.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-roster-page]");
+      if (!button || button.disabled) return;
+      const direction = button.getAttribute("data-roster-page");
+      const pageCount = Math.max(1, Math.ceil(state.rosterTotal / ROSTER_PAGE_SIZE));
+      const nextPage = direction === "prev" ? state.rosterPage - 1 : state.rosterPage + 1;
+      if (nextPage < 1 || nextPage > pageCount) return;
+      state.rosterPage = nextPage;
+      els.rosterView.scrollIntoView({ behavior: "smooth", block: "start" });
+      reloadRosterPage(false);
     });
 
     els.rosterZoomInput.addEventListener("input", () => {
@@ -9343,9 +9453,8 @@ function renderAppHtml() {
       const chip = event.target.closest("[data-type-chip]");
       if (!chip) return;
       const type = chip.getAttribute("data-type-chip");
-      if (state.rosterTypes.has(type)) state.rosterTypes.delete(type);
-      else state.rosterTypes.add(type);
-      render();
+      state.rosterIconic = state.rosterIconic === type ? "" : type;
+      reloadRosterPage(true);
     });
 
     els.treeZoomInput.addEventListener("input", () => {
@@ -9436,6 +9545,10 @@ function renderAppHtml() {
       try {
         state.selectedTaxa.clear();
         state.flippedTaxa.clear();
+        state.rosterPage = 1;
+        state.rosterSearch = "";
+        state.rosterIconic = "";
+        els.rosterSearchInput.value = "";
         const res = await apiFetch("/api/import", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -10261,11 +10374,39 @@ function renderAppHtml() {
     async function loadRoster() {
       if (!state.userId) return;
 
-      const res = await apiFetch("/api/roster?userId=" + encodeURIComponent(state.userId) + "&limit=100");
+      const params = new URLSearchParams({
+        userId: state.userId,
+        limit: String(ROSTER_PAGE_SIZE),
+        offset: String((state.rosterPage - 1) * ROSTER_PAGE_SIZE)
+      });
+      if (state.rosterSearch) params.set("q", state.rosterSearch);
+      if (state.rosterSort !== "default") params.set("sort", state.rosterSort);
+      if (state.rosterStatus !== "all") params.set("status", state.rosterStatus);
+      if (state.rosterIconic) params.set("iconic", state.rosterIconic);
+
+      const res = await apiFetch("/api/roster?" + params.toString());
       state.taxa = res.taxa || [];
+      state.rosterTotal = Number(res.total ?? state.taxa.length);
+      state.rosterIconicCounts = Array.isArray(res.iconicCounts) ? res.iconicCounts : [];
+
+      const pageCount = Math.max(1, Math.ceil(state.rosterTotal / ROSTER_PAGE_SIZE));
+      if (state.taxa.length === 0 && state.rosterPage > pageCount) {
+        state.rosterPage = pageCount;
+        return loadRoster();
+      }
+
       pruneSelectedTaxa();
       render();
       schedulePolling();
+    }
+
+    async function reloadRosterPage(resetPage) {
+      if (resetPage) state.rosterPage = 1;
+      try {
+        await loadRoster();
+      } catch (error) {
+        setStatus(error.message);
+      }
     }
 
     async function switchView(view) {
@@ -10585,24 +10726,25 @@ function renderAppHtml() {
     function render() {
       els.accountLabel.textContent = state.inatLogin ? "@" + state.inatLogin : "No roster loaded";
 
-      const visibleTaxa = visibleRosterTaxa();
-      els.emptyState.style.display = visibleTaxa.length ? "none" : "grid";
-      els.emptyState.textContent = state.taxa.length
+      const hasFilters = Boolean(state.rosterSearch || state.rosterIconic || state.rosterStatus !== "all");
+      els.emptyState.style.display = state.taxa.length ? "none" : "grid";
+      els.emptyState.textContent = hasFilters
         ? "No roster creatures match these filters."
         : "Import a public iNaturalist roster.";
       els.rosterGrid.classList.toggle("sprite-mode", state.rosterMode === "sprites");
       els.rosterModeButton.textContent = state.rosterMode === "sprites" ? "Card View" : "Sprite Grid";
-      els.rosterGrid.innerHTML = visibleTaxa
+      els.rosterGrid.innerHTML = state.taxa
         .map(state.rosterMode === "sprites" ? renderSpriteTile : renderCard)
         .join("");
       renderTypeChips();
+      renderRosterPagination();
 
       const spriteCount = state.taxa.filter((taxon) => taxon.sprite.status === "ready").length;
       const queuedCount = state.taxa.filter((taxon) => ["queued", "running"].includes(taxon.sprite.status)).length;
       const bondCount = state.taxa.reduce((sum, taxon) => sum + Number(affinityLevel(taxon) || 0), 0);
       const selectedCount = state.selectedTaxa.size;
 
-      els.taxaCount.textContent = String(state.taxa.length);
+      els.taxaCount.textContent = String(state.rosterTotal || state.taxa.length);
       els.spriteCount.textContent = String(spriteCount);
       els.queuedCount.textContent = String(queuedCount);
       els.bondCount.textContent = String(bondCount);
@@ -10612,10 +10754,10 @@ function renderAppHtml() {
       els.queueMoreButton.disabled = !state.userId;
       els.batchPreviewButton.disabled = !state.userId;
       els.batchSubmitButton.disabled = !state.userId || state.batchJobs.length === 0;
-      els.refreshLabel.textContent = state.taxa.length
-        ? (visibleTaxa.length === state.taxa.length
-          ? "Top " + state.taxa.length
-          : visibleTaxa.length + " of " + state.taxa.length + " shown")
+      els.refreshLabel.textContent = state.rosterTotal
+        ? (state.rosterTotal > ROSTER_PAGE_SIZE
+          ? rosterRangeLabel() + " of " + state.rosterTotal
+          : String(state.rosterTotal) + " species")
         : "";
       renderBatchQueue();
       renderGlobalSeedQueue();
@@ -10626,76 +10768,41 @@ function renderAppHtml() {
       renderBattle();
     }
 
-    function visibleRosterTaxa() {
-      let taxa = state.taxa.slice();
+    function rosterRangeLabel() {
+      const start = (state.rosterPage - 1) * ROSTER_PAGE_SIZE + 1;
+      const end = Math.min(state.rosterTotal, start + state.taxa.length - 1);
+      return start + "–" + end;
+    }
 
-      if (state.rosterSearch) {
-        const q = state.rosterSearch;
-        taxa = taxa.filter((taxon) =>
-          String(taxon.name || "").toLowerCase().includes(q) ||
-          String(taxon.scientificName || "").toLowerCase().includes(q) ||
-          String(taxon.nickname || "").toLowerCase().includes(q)
-        );
+    function renderRosterPagination() {
+      const pageCount = Math.max(1, Math.ceil(state.rosterTotal / ROSTER_PAGE_SIZE));
+      if (state.rosterTotal <= ROSTER_PAGE_SIZE) {
+        els.rosterPagination.innerHTML = "";
+        return;
       }
 
-      if (state.rosterStatus !== "all") {
-        taxa = taxa.filter((taxon) => {
-          const status = taxon.sprite?.status || "missing";
-          if (state.rosterStatus === "ready") return status === "ready";
-          if (state.rosterStatus === "pending") return status === "queued" || status === "running";
-          return status !== "ready" && status !== "queued" && status !== "running";
-        });
-      }
-
-      if (state.rosterTypes.size > 0) {
-        taxa = taxa.filter((taxon) => state.rosterTypes.has(taxon.iconicTaxonName || "Life"));
-      }
-
-      const byName = (a, b) => String(a.nickname || a.name || a.scientificName || "")
-        .localeCompare(String(b.nickname || b.name || b.scientificName || ""));
-
-      if (state.rosterSort === "name") taxa.sort(byName);
-      else if (state.rosterSort === "obs") taxa.sort((a, b) => Number(b.obsCount || 0) - Number(a.obsCount || 0));
-      else if (state.rosterSort === "affinity") taxa.sort((a, b) => Number(affinityLevel(b)) - Number(affinityLevel(a)));
-      else if (state.rosterSort === "level") taxa.sort((a, b) => Number(b.trainingLevel || 0) - Number(a.trainingLevel || 0));
-      else if (state.rosterSort === "status") {
-        const rank = (taxon) => {
-          const status = taxon.sprite?.status || "missing";
-          if (status === "ready") return 0;
-          if (status === "running") return 1;
-          if (status === "queued") return 2;
-          return 3;
-        };
-        taxa.sort((a, b) => rank(a) - rank(b) || byName(a, b));
-      }
-
-      return taxa;
+      els.rosterPagination.innerHTML =
+        '<button class="secondary" type="button" data-roster-page="prev"' +
+          (state.rosterPage <= 1 ? " disabled" : "") + '>&larr; Prev</button>' +
+        '<span class="subtle">Page ' + state.rosterPage + ' of ' + pageCount +
+          ' &middot; ' + state.rosterTotal + ' species</span>' +
+        '<button class="secondary" type="button" data-roster-page="next"' +
+          (state.rosterPage >= pageCount ? " disabled" : "") + '>Next &rarr;</button>';
     }
 
     function renderTypeChips() {
-      const counts = new Map();
-      for (const taxon of state.taxa) {
-        const type = taxon.iconicTaxonName || "Life";
-        counts.set(type, (counts.get(type) || 0) + 1);
-      }
-
-      for (const type of [...state.rosterTypes]) {
-        if (!counts.has(type)) state.rosterTypes.delete(type);
-      }
-
-      if (counts.size < 2) {
+      const counts = state.rosterIconicCounts;
+      if (!Array.isArray(counts) || counts.length < 2) {
         els.rosterTypeChips.innerHTML = "";
         return;
       }
 
-      els.rosterTypeChips.innerHTML = [...counts.entries()]
-        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-        .map(([type, count]) =>
-          '<button type="button" class="type-chip' + (state.rosterTypes.has(type) ? " active" : "") +
-            '" data-type-chip="' + escapeAttr(type) + '">' +
-            escapeHtml(type) + ' <span class="subtle">' + count + '</span>' +
-          '</button>'
-        ).join("");
+      els.rosterTypeChips.innerHTML = counts.map((row) =>
+        '<button type="button" class="type-chip' + (state.rosterIconic === row.iconic ? " active" : "") +
+          '" data-type-chip="' + escapeAttr(row.iconic) + '">' +
+          escapeHtml(row.iconic) + ' <span class="subtle">' + Number(row.count) + '</span>' +
+        '</button>'
+      ).join("");
     }
 
     function renderSpriteTile(taxon) {
@@ -11330,11 +11437,14 @@ function renderAppHtml() {
     }
 
     function pruneSelectedTaxa() {
-      const readyIds = new Set(state.taxa
-        .filter((taxon) => taxon.sprite && taxon.sprite.status === "ready")
-        .map((taxon) => String(taxon.taxonId)));
+      // With a paginated roster only the current page is loaded, so keep
+      // selections for taxa on other pages; drop only loaded-but-not-ready ones.
+      const loaded = new Map(state.taxa.map((taxon) => [String(taxon.taxonId), taxon]));
 
-      state.selectedTaxa = new Set(Array.from(state.selectedTaxa).filter((taxonId) => readyIds.has(String(taxonId))));
+      state.selectedTaxa = new Set(Array.from(state.selectedTaxa).filter((taxonId) => {
+        const taxon = loaded.get(String(taxonId));
+        return !taxon || (taxon.sprite && taxon.sprite.status === "ready");
+      }));
     }
 
     function toggleTeamSelection(taxonId) {
