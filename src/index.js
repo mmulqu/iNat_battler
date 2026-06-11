@@ -6734,11 +6734,18 @@ function imageDataUrlFromBytes(bytes, contentType) {
   return `data:${contentType || "image/png"};base64,${btoa(binary)}`;
 }
 
-// Shared by both custom-sprite upload paths: regenerate the species moves
+// Shared by both custom-sprite upload paths: generate the species moves
 // with the uploaded artwork attached so flavor/animations match the image.
-// Move generation failures never fail the upload itself.
+// Skipped when the species already has moves globally (moves are per-species,
+// so an upload must not re-roll them for everyone). Failures never fail the
+// upload itself.
 async function generateImageConditionedMoves(env, taxonId, bytes, contentType) {
   try {
+    const existingMoveTaxa = await loadMoveGenomeTaxonIds(env, [taxonId]);
+    if (existingMoveTaxa.has(Number(taxonId))) {
+      return { generated: false, skipped: true, reason: "Species already has moves" };
+    }
+
     const imageDataUrl = imageDataUrlFromBytes(bytes, contentType);
     const result = await generateMovesForTaxon(env, taxonId, { imageDataUrl });
     return {
@@ -10138,9 +10145,11 @@ function renderAppHtml() {
       const res = await apiFetch("/api/my-sprites/upload", { method: "POST", body: form });
       const movesNote = res.moves?.generated
         ? " New image-matched moves: " + (res.moves.signatureMoves || []).join(", ") + "."
-        : res.moves?.error
-          ? " (Move regeneration failed: " + res.moves.error + ")"
-          : "";
+        : res.moves?.skipped
+          ? ""
+          : res.moves?.error
+            ? " (Move generation failed: " + res.moves.error + ")"
+            : "";
       const message = res.discordError
         ? "Sprite saved and live for you, but the Discord QA post failed: " + res.discordError + " (it will retry automatically)" + movesNote
         : "Custom sprite for " + res.name + " submitted for QA. It's live for you now; opponents see it once approved on Discord." + movesNote;
@@ -11535,8 +11544,11 @@ function renderAppHtml() {
 
     function renderUploadMovesSummary(moves) {
       if (!moves) return "";
+      if (moves.skipped) {
+        return '<span class="subtle">Existing species moves kept.</span>';
+      }
       if (!moves.generated) {
-        return '<span class="subtle">Moves not regenerated: ' + escapeHtml(moves.error || "unknown error") + '</span>';
+        return '<span class="subtle">Moves not generated: ' + escapeHtml(moves.error || "unknown error") + '</span>';
       }
       const names = Array.isArray(moves.signatureMoves) && moves.signatureMoves.length
         ? moves.signatureMoves.join(", ")
