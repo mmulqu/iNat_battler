@@ -1476,7 +1476,8 @@ async function getSpriteJobForPrompt(env, taxonId, promptHash) {
 
 async function getTaxonDevLab(env, taxonId) {
   const taxon = await ensureTaxonInDb(env, taxonId);
-  const { promptSpec, promptHash, jobId } = await currentSpritePromptInfo(env, taxonId);
+  // Load genome/moves/facts first — these must render even if the sprite
+  // prompt or asset lookups below fail (e.g. taxon has no sprite yet).
   const genomeRow = await env.DB.prepare(`
     SELECT genome_version, genome_json, prompt_json
     FROM creature_genomes
@@ -1484,10 +1485,28 @@ async function getTaxonDevLab(env, taxonId) {
     ORDER BY genome_version DESC
     LIMIT 1
   `).bind(taxonId).first();
-  const genome = genomeRow?.genome_json ? JSON.parse(genomeRow.genome_json) : promptSpec.genome ?? null;
-  const asset = await getSpriteAssetForPrompt(env, taxonId, promptHash);
-  const latestAsset = await getLatestSpriteAssetForTaxon(env, taxonId);
-  const job = await getSpriteJobForPrompt(env, taxonId, promptHash);
+
+  // Sprite prompt + asset lookups are best-effort: a failure here must never
+  // suppress the moves/facts the dev lab is primarily there to show.
+  let promptSpec = null;
+  let promptHash = null;
+  let jobId = null;
+  let asset = null;
+  let latestAsset = null;
+  let job = null;
+  try {
+    const info = await currentSpritePromptInfo(env, taxonId);
+    promptSpec = info.promptSpec;
+    promptHash = info.promptHash;
+    jobId = info.jobId;
+    asset = await getSpriteAssetForPrompt(env, taxonId, promptHash);
+    latestAsset = await getLatestSpriteAssetForTaxon(env, taxonId);
+    job = await getSpriteJobForPrompt(env, taxonId, promptHash);
+  } catch (error) {
+    console.error(`Dev lab sprite lookup failed for taxon ${taxonId}:`, error);
+  }
+
+  const genome = genomeRow?.genome_json ? JSON.parse(genomeRow.genome_json) : promptSpec?.genome ?? null;
 
   return {
     taxon: {
@@ -1497,12 +1516,12 @@ async function getTaxonDevLab(env, taxonId) {
       commonName: taxon.common_name,
       iconicTaxonName: taxon.iconic_taxon_name
     },
-    genomeVersion: Number(genomeRow?.genome_version ?? promptSpec.prompt_version ?? ASSET_VERSION),
+    genomeVersion: Number(genomeRow?.genome_version ?? promptSpec?.prompt_version ?? ASSET_VERSION),
     hasSignatureMoves: Boolean(Array.isArray(genome?.moves) && genome.moves.some((move) => move.signature)),
     facts: genome?.facts ?? [],
     moves: Array.isArray(genome?.moves) ? genome.moves : [],
     promptHash,
-    promptVersion: promptSpec.prompt_version ?? 1,
+    promptVersion: promptSpec?.prompt_version ?? 1,
     jobId,
     asset,
     latestAsset,
