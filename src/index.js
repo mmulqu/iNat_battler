@@ -7134,6 +7134,30 @@ function renderAppHtml() {
       align-items: center;
     }
 
+    details.dev-batch > summary.dev-batch-head {
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+
+    details.dev-batch > summary.dev-batch-head::-webkit-details-marker {
+      display: none;
+    }
+
+    details.dev-batch > summary.dev-batch-head h2::before {
+      content: "▸ ";
+      color: var(--teal);
+      font-size: 0.8em;
+    }
+
+    details.dev-batch[open] > summary.dev-batch-head h2::before {
+      content: "▾ ";
+    }
+
+    details.dev-batch > summary.dev-batch-head:hover h2 {
+      color: var(--teal);
+    }
+
     .batch-list {
       display: grid;
       gap: 6px;
@@ -7234,13 +7258,17 @@ function renderAppHtml() {
     }
 
     .tree-tools {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
       gap: 10px;
       margin-bottom: 12px;
     }
 
-    .tree-tools input {
+    .tree-tools input:not([type="range"]),
+    .tree-tools select,
+    .roster-toolbar input:not([type="range"]),
+    .roster-toolbar select {
       min-height: 42px;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -7248,6 +7276,189 @@ function renderAppHtml() {
       background: #fbfcf9;
       color: var(--ink);
       font: inherit;
+    }
+
+    .tree-tools input[type="search"],
+    .tree-tools input:not([type="range"]):first-child {
+      flex: 1 1 180px;
+      min-width: 0;
+    }
+
+    .roster-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .roster-toolbar input[type="search"] {
+      flex: 1 1 180px;
+      min-width: 0;
+    }
+
+    .zoom-control {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+    }
+
+    .zoom-control input[type="range"] {
+      width: 110px;
+      accent-color: var(--teal);
+    }
+
+    .type-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .type-chips:empty {
+      display: none;
+    }
+
+    .type-chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 12px;
+      background: #fbfcf9;
+      color: var(--muted);
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .type-chip:hover {
+      border-color: var(--teal);
+      color: var(--teal);
+    }
+
+    .type-chip.active {
+      border-color: var(--teal);
+      background: rgba(4, 124, 120, 0.12);
+      color: var(--teal);
+    }
+
+    .grid.sprite-mode {
+      gap: 10px;
+    }
+
+    .sprite-tile {
+      position: relative;
+      display: grid;
+      grid-template-rows: 1fr auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: var(--shadow);
+      cursor: pointer;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    .sprite-tile.unselectable {
+      cursor: default;
+      opacity: 0.75;
+    }
+
+    .sprite-tile.selected {
+      border-color: var(--teal);
+      box-shadow: 0 0 0 3px rgba(4, 124, 120, 0.18), var(--shadow);
+    }
+
+    .sprite-tile:focus-visible {
+      outline: 3px solid rgba(4, 124, 120, 0.35);
+      outline-offset: 2px;
+    }
+
+    .sprite-tile .sprite-tile-art {
+      display: grid;
+      place-items: center;
+      aspect-ratio: 1 / 1;
+      background:
+        linear-gradient(135deg, rgba(4, 124, 120, 0.12), rgba(180, 107, 27, 0.16)),
+        #f8faf6;
+      overflow: hidden;
+    }
+
+    .sprite-tile .sprite-tile-art img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .sprite-tile .sprite-tile-art .placeholder-shape {
+      width: 60%;
+      height: 60%;
+    }
+
+    .sprite-tile-caption {
+      padding: 6px 8px;
+      font-size: 0.8rem;
+      font-weight: 800;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .sprite-tile-caption .subtle {
+      display: block;
+      font-size: 0.72rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .sprite-tile .badge,
+    .recent-tile .badge {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 2;
+    }
+
+    .sprite-tile .select-mark {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      z-index: 2;
+    }
+
+    .recent-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(var(--tile-min, 150px), 1fr));
+      gap: 10px;
+    }
+
+    .recent-tile {
+      position: relative;
+      display: grid;
+      grid-template-rows: 1fr auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    .recent-tile .sprite-tile-art {
+      display: grid;
+      place-items: center;
+      aspect-ratio: 1 / 1;
+      background: #eef2eb;
+      overflow: hidden;
+    }
+
+    .recent-tile a.manual-result-link {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      z-index: 2;
     }
 
     .tree-browser {
@@ -7329,7 +7540,7 @@ function renderAppHtml() {
 
     .tree-menu-leaf {
       display: grid;
-      grid-template-columns: 58px minmax(0, 1fr) auto;
+      grid-template-columns: var(--leaf-size, 58px) minmax(0, 1fr) auto;
       gap: 10px;
       align-items: center;
       min-height: 72px;
@@ -7345,7 +7556,7 @@ function renderAppHtml() {
     .tree-leaf-sprite {
       display: grid;
       place-items: center;
-      width: 58px;
+      width: var(--leaf-size, 58px);
       aspect-ratio: 1 / 1;
       border-radius: 8px;
       background: #eef2eb;
@@ -7370,7 +7581,7 @@ function renderAppHtml() {
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(var(--card-min, 190px), 1fr));
       gap: 14px;
     }
 
@@ -7401,7 +7612,7 @@ function renderAppHtml() {
     .card-inner {
       position: relative;
       display: grid;
-      min-height: 398px;
+      min-height: 240px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: rgba(255, 255, 255, 0.9);
@@ -7470,10 +7681,14 @@ function renderAppHtml() {
     }
 
     .card-back {
+      position: absolute;
+      inset: 0;
       display: grid;
       grid-template-rows: auto auto 1fr;
       gap: 10px;
       padding: 12px;
+      padding-bottom: 44px;
+      overflow: auto;
       background: #fbfcf9;
       transform: rotateY(180deg);
     }
@@ -7691,18 +7906,16 @@ function renderAppHtml() {
       display: grid;
       gap: 8px;
       padding: 12px;
-      min-height: 132px;
+      padding-bottom: 44px;
     }
 
     .name {
-      min-height: 42px;
       font-weight: 800;
       line-height: 1.2;
       overflow-wrap: anywhere;
     }
 
     .sci {
-      min-height: 18px;
       color: var(--muted);
       font-size: 0.84rem;
       font-style: italic;
@@ -8406,6 +8619,7 @@ function renderAppHtml() {
 
       .meta {
         padding: 10px;
+        padding-bottom: 40px;
       }
 
       .name {
@@ -8432,13 +8646,13 @@ function renderAppHtml() {
 
     <section class="layout">
       <aside class="panel">
-        <div class="dev-batch bsky-panel">
-          <div class="dev-batch-head">
+        <details class="dev-batch bsky-panel" id="bskyPanelDetails" open>
+          <summary class="dev-batch-head">
             <h2>Bluesky Battles</h2>
             <span class="subtle" id="bskyStateLabel">signed out</span>
-          </div>
+          </summary>
           <div id="bskyBody" class="bsky-body">Loading Bluesky session…</div>
-        </div>
+        </details>
         <h2>Account</h2>
         <div class="stats">
           <div class="stat">
@@ -8469,30 +8683,30 @@ function renderAppHtml() {
           <button class="primary" id="startBattleButton" type="button" disabled>Battle NPC</button>
         </div>
         <button class="secondary" id="queueMoreButton" type="button" disabled>Queue More</button>
-        <div class="dev-batch">
-          <div class="dev-batch-head">
+        <details class="dev-batch">
+          <summary class="dev-batch-head">
             <h2>Dev Batch</h2>
             <span class="subtle" id="batchQueueCount">0 queued</span>
-          </div>
+          </summary>
           <button class="secondary" id="batchPreviewButton" type="button" disabled>Show Batch Queue</button>
           <button class="secondary" id="batchSubmitButton" type="button" disabled>Submit Batch</button>
           <div class="batch-list" id="batchQueueList">Load a roster, then click Queue More.</div>
-        </div>
-        <div class="dev-batch">
-          <div class="dev-batch-head">
+        </details>
+        <details class="dev-batch">
+          <summary class="dev-batch-head">
             <h2>Global Seed</h2>
             <span class="subtle" id="seedQueueCount">0 queued</span>
-          </div>
+          </summary>
           <button class="secondary" id="seedImportButton" type="button">Import Plants + Animals</button>
           <button class="secondary" id="seedQueueButton" type="button">Queue 200</button>
           <button class="secondary" id="seedSubmitButton" type="button" disabled>Submit 200</button>
           <div class="batch-list" id="seedQueueList">Load seed status to start.</div>
-        </div>
-        <div class="dev-batch">
-          <div class="dev-batch-head">
+        </details>
+        <details class="dev-batch">
+          <summary class="dev-batch-head">
             <h2>Manual Sprite</h2>
             <span class="subtle" id="manualUploadState">idle</span>
-          </div>
+          </summary>
           <form class="manual-upload" id="manualSpriteForm">
             <input id="manualTaxonId" name="taxonId" inputmode="numeric" placeholder="iNaturalist taxon ID">
             <input id="manualScientificName" name="scientificName" placeholder="Scientific name">
@@ -8505,7 +8719,7 @@ function renderAppHtml() {
             <button class="secondary" id="manualUploadButton" type="submit">Upload Sprite</button>
           </form>
           <div class="batch-list" id="manualUploadResult">No manual upload yet.</div>
-        </div>
+        </details>
         <p class="status" id="statusLine"></p>
       </aside>
 
@@ -8523,6 +8737,29 @@ function renderAppHtml() {
             <h2>Roster</h2>
             <span class="subtle" id="refreshLabel"></span>
           </div>
+          <div class="roster-toolbar">
+            <input id="rosterSearchInput" type="search" placeholder="Search roster">
+            <select id="rosterSortSelect" aria-label="Sort roster">
+              <option value="default">Sort: Default</option>
+              <option value="name">Name A&ndash;Z</option>
+              <option value="obs">Most observations</option>
+              <option value="affinity">Highest affinity</option>
+              <option value="level">Training level</option>
+              <option value="status">Ready sprites first</option>
+            </select>
+            <select id="rosterStatusFilter" aria-label="Filter by sprite status">
+              <option value="all">All sprites</option>
+              <option value="ready">Ready</option>
+              <option value="pending">Queued / running</option>
+              <option value="missing">Missing</option>
+            </select>
+            <label class="zoom-control" title="Card size">
+              <span aria-hidden="true">&#x1F50D;</span>
+              <input id="rosterZoomInput" type="range" min="140" max="380" step="10" aria-label="Card size">
+            </label>
+            <button class="secondary mode-toggle" id="rosterModeButton" type="button">Sprite Grid</button>
+          </div>
+          <div class="type-chips" id="rosterTypeChips" aria-label="Filter by taxon group"></div>
           <div class="grid" id="rosterGrid"></div>
           <div class="empty" id="emptyState">Import a public iNaturalist roster.</div>
         </section>
@@ -8560,6 +8797,10 @@ function renderAppHtml() {
           </div>
           <div class="tree-tools">
             <input id="treeSearchInput" placeholder="Search sprites, taxa, or groups">
+            <label class="zoom-control" title="Sprite size">
+              <span aria-hidden="true">&#x1F50D;</span>
+              <input id="treeZoomInput" type="range" min="44" max="160" step="4" aria-label="Sprite size">
+            </label>
             <button class="secondary" id="treeRefreshButton" type="button">Refresh</button>
           </div>
           <div class="tree-browser" id="spriteTreePanel">
@@ -8573,6 +8814,18 @@ function renderAppHtml() {
           </div>
           <div class="tree-tools">
             <input id="recentSearchInput" placeholder="Search recent sprites">
+            <select id="recentSortSelect" aria-label="Sort recent sprites">
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="name">Name A&ndash;Z</option>
+            </select>
+            <select id="recentGroupFilter" aria-label="Filter by taxon group">
+              <option value="all">All groups</option>
+            </select>
+            <label class="zoom-control" title="Sprite size">
+              <span aria-hidden="true">&#x1F50D;</span>
+              <input id="recentZoomInput" type="range" min="110" max="320" step="10" aria-label="Sprite size">
+            </label>
             <button class="secondary" id="recentRefreshButton" type="button">Refresh</button>
           </div>
           <div class="tree-browser" id="recentSpritesPanel">
@@ -8619,10 +8872,20 @@ function renderAppHtml() {
       inatLogin: localStorage.getItem("inatBattler:inatLogin") || "",
       activeView: "roster",
       taxa: [],
+      rosterSearch: "",
+      rosterSort: "default",
+      rosterStatus: "all",
+      rosterTypes: new Set(),
+      rosterZoom: Number(localStorage.getItem("inatBattler:rosterZoom")) || 190,
+      rosterMode: localStorage.getItem("inatBattler:rosterMode") === "sprites" ? "sprites" : "cards",
       spriteTree: null,
       treeSearch: "",
+      treeZoom: Number(localStorage.getItem("inatBattler:treeZoom")) || 58,
       recentSprites: null,
       recentSearch: "",
+      recentSort: "newest",
+      recentGroup: "all",
+      recentZoom: Number(localStorage.getItem("inatBattler:recentZoom")) || 150,
       expandedTreeNodes: new Set(),
       selectedTaxa: new Set(),
       flippedTaxa: new Set(),
@@ -8701,13 +8964,23 @@ function renderAppHtml() {
       treeSearchInput: document.getElementById("treeSearchInput"),
       treeRefreshButton: document.getElementById("treeRefreshButton"),
       treeRefreshLabel: document.getElementById("treeRefreshLabel"),
+      treeZoomInput: document.getElementById("treeZoomInput"),
       spriteTreePanel: document.getElementById("spriteTreePanel"),
       recentSearchInput: document.getElementById("recentSearchInput"),
       recentRefreshButton: document.getElementById("recentRefreshButton"),
       recentRefreshLabel: document.getElementById("recentRefreshLabel"),
+      recentSortSelect: document.getElementById("recentSortSelect"),
+      recentGroupFilter: document.getElementById("recentGroupFilter"),
+      recentZoomInput: document.getElementById("recentZoomInput"),
       recentSpritesPanel: document.getElementById("recentSpritesPanel"),
       rosterGrid: document.getElementById("rosterGrid"),
       emptyState: document.getElementById("emptyState"),
+      rosterSearchInput: document.getElementById("rosterSearchInput"),
+      rosterSortSelect: document.getElementById("rosterSortSelect"),
+      rosterStatusFilter: document.getElementById("rosterStatusFilter"),
+      rosterZoomInput: document.getElementById("rosterZoomInput"),
+      rosterModeButton: document.getElementById("rosterModeButton"),
+      rosterTypeChips: document.getElementById("rosterTypeChips"),
       battlePanel: document.getElementById("battlePanel"),
       battleTabButton: document.getElementById("battleTabButton"),
       battleView: document.getElementById("battleView"),
@@ -9038,6 +9311,71 @@ function renderAppHtml() {
       event.preventDefault();
       toggleTeamSelection(card.getAttribute("data-taxon-id"));
     });
+
+    els.rosterSearchInput.addEventListener("input", debounce(() => {
+      state.rosterSearch = els.rosterSearchInput.value.trim().toLowerCase();
+      render();
+    }, 150));
+
+    els.rosterSortSelect.addEventListener("change", () => {
+      state.rosterSort = els.rosterSortSelect.value;
+      render();
+    });
+
+    els.rosterStatusFilter.addEventListener("change", () => {
+      state.rosterStatus = els.rosterStatusFilter.value;
+      render();
+    });
+
+    els.rosterZoomInput.addEventListener("input", () => {
+      state.rosterZoom = Number(els.rosterZoomInput.value) || 190;
+      localStorage.setItem("inatBattler:rosterZoom", String(state.rosterZoom));
+      els.rosterGrid.style.setProperty("--card-min", state.rosterZoom + "px");
+    });
+
+    els.rosterModeButton.addEventListener("click", () => {
+      state.rosterMode = state.rosterMode === "sprites" ? "cards" : "sprites";
+      localStorage.setItem("inatBattler:rosterMode", state.rosterMode);
+      render();
+    });
+
+    els.rosterTypeChips.addEventListener("click", (event) => {
+      const chip = event.target.closest("[data-type-chip]");
+      if (!chip) return;
+      const type = chip.getAttribute("data-type-chip");
+      if (state.rosterTypes.has(type)) state.rosterTypes.delete(type);
+      else state.rosterTypes.add(type);
+      render();
+    });
+
+    els.treeZoomInput.addEventListener("input", () => {
+      state.treeZoom = Number(els.treeZoomInput.value) || 58;
+      localStorage.setItem("inatBattler:treeZoom", String(state.treeZoom));
+      els.spriteTreePanel.style.setProperty("--leaf-size", state.treeZoom + "px");
+    });
+
+    els.recentSortSelect.addEventListener("change", () => {
+      state.recentSort = els.recentSortSelect.value;
+      renderRecentSprites();
+    });
+
+    els.recentGroupFilter.addEventListener("change", () => {
+      state.recentGroup = els.recentGroupFilter.value;
+      renderRecentSprites();
+    });
+
+    els.recentZoomInput.addEventListener("input", () => {
+      state.recentZoom = Number(els.recentZoomInput.value) || 150;
+      localStorage.setItem("inatBattler:recentZoom", String(state.recentZoom));
+      els.recentSpritesPanel.style.setProperty("--tile-min", state.recentZoom + "px");
+    });
+
+    els.rosterZoomInput.value = String(state.rosterZoom);
+    els.rosterGrid.style.setProperty("--card-min", state.rosterZoom + "px");
+    els.treeZoomInput.value = String(state.treeZoom);
+    els.spriteTreePanel.style.setProperty("--leaf-size", state.treeZoom + "px");
+    els.recentZoomInput.value = String(state.recentZoom);
+    els.recentSpritesPanel.style.setProperty("--tile-min", state.recentZoom + "px");
 
     els.bskyBody.addEventListener("click", (event) => {
       const pick = event.target.closest("[data-typeahead-pick]");
@@ -10246,8 +10584,18 @@ function renderAppHtml() {
 
     function render() {
       els.accountLabel.textContent = state.inatLogin ? "@" + state.inatLogin : "No roster loaded";
-      els.emptyState.style.display = state.taxa.length ? "none" : "grid";
-      els.rosterGrid.innerHTML = state.taxa.map(renderCard).join("");
+
+      const visibleTaxa = visibleRosterTaxa();
+      els.emptyState.style.display = visibleTaxa.length ? "none" : "grid";
+      els.emptyState.textContent = state.taxa.length
+        ? "No roster creatures match these filters."
+        : "Import a public iNaturalist roster.";
+      els.rosterGrid.classList.toggle("sprite-mode", state.rosterMode === "sprites");
+      els.rosterModeButton.textContent = state.rosterMode === "sprites" ? "Card View" : "Sprite Grid";
+      els.rosterGrid.innerHTML = visibleTaxa
+        .map(state.rosterMode === "sprites" ? renderSpriteTile : renderCard)
+        .join("");
+      renderTypeChips();
 
       const spriteCount = state.taxa.filter((taxon) => taxon.sprite.status === "ready").length;
       const queuedCount = state.taxa.filter((taxon) => ["queued", "running"].includes(taxon.sprite.status)).length;
@@ -10264,7 +10612,11 @@ function renderAppHtml() {
       els.queueMoreButton.disabled = !state.userId;
       els.batchPreviewButton.disabled = !state.userId;
       els.batchSubmitButton.disabled = !state.userId || state.batchJobs.length === 0;
-      els.refreshLabel.textContent = state.taxa.length ? "Top " + state.taxa.length : "";
+      els.refreshLabel.textContent = state.taxa.length
+        ? (visibleTaxa.length === state.taxa.length
+          ? "Top " + state.taxa.length
+          : visibleTaxa.length + " of " + state.taxa.length + " shown")
+        : "";
       renderBatchQueue();
       renderGlobalSeedQueue();
       renderViewTabs();
@@ -10272,6 +10624,102 @@ function renderAppHtml() {
       renderRecentSprites();
       renderDevLab();
       renderBattle();
+    }
+
+    function visibleRosterTaxa() {
+      let taxa = state.taxa.slice();
+
+      if (state.rosterSearch) {
+        const q = state.rosterSearch;
+        taxa = taxa.filter((taxon) =>
+          String(taxon.name || "").toLowerCase().includes(q) ||
+          String(taxon.scientificName || "").toLowerCase().includes(q) ||
+          String(taxon.nickname || "").toLowerCase().includes(q)
+        );
+      }
+
+      if (state.rosterStatus !== "all") {
+        taxa = taxa.filter((taxon) => {
+          const status = taxon.sprite?.status || "missing";
+          if (state.rosterStatus === "ready") return status === "ready";
+          if (state.rosterStatus === "pending") return status === "queued" || status === "running";
+          return status !== "ready" && status !== "queued" && status !== "running";
+        });
+      }
+
+      if (state.rosterTypes.size > 0) {
+        taxa = taxa.filter((taxon) => state.rosterTypes.has(taxon.iconicTaxonName || "Life"));
+      }
+
+      const byName = (a, b) => String(a.nickname || a.name || a.scientificName || "")
+        .localeCompare(String(b.nickname || b.name || b.scientificName || ""));
+
+      if (state.rosterSort === "name") taxa.sort(byName);
+      else if (state.rosterSort === "obs") taxa.sort((a, b) => Number(b.obsCount || 0) - Number(a.obsCount || 0));
+      else if (state.rosterSort === "affinity") taxa.sort((a, b) => Number(affinityLevel(b)) - Number(affinityLevel(a)));
+      else if (state.rosterSort === "level") taxa.sort((a, b) => Number(b.trainingLevel || 0) - Number(a.trainingLevel || 0));
+      else if (state.rosterSort === "status") {
+        const rank = (taxon) => {
+          const status = taxon.sprite?.status || "missing";
+          if (status === "ready") return 0;
+          if (status === "running") return 1;
+          if (status === "queued") return 2;
+          return 3;
+        };
+        taxa.sort((a, b) => rank(a) - rank(b) || byName(a, b));
+      }
+
+      return taxa;
+    }
+
+    function renderTypeChips() {
+      const counts = new Map();
+      for (const taxon of state.taxa) {
+        const type = taxon.iconicTaxonName || "Life";
+        counts.set(type, (counts.get(type) || 0) + 1);
+      }
+
+      for (const type of [...state.rosterTypes]) {
+        if (!counts.has(type)) state.rosterTypes.delete(type);
+      }
+
+      if (counts.size < 2) {
+        els.rosterTypeChips.innerHTML = "";
+        return;
+      }
+
+      els.rosterTypeChips.innerHTML = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([type, count]) =>
+          '<button type="button" class="type-chip' + (state.rosterTypes.has(type) ? " active" : "") +
+            '" data-type-chip="' + escapeAttr(type) + '">' +
+            escapeHtml(type) + ' <span class="subtle">' + count + '</span>' +
+          '</button>'
+        ).join("");
+    }
+
+    function renderSpriteTile(taxon) {
+      const status = taxon.sprite.status;
+      const isReady = status === "ready";
+      const taxonId = String(taxon.taxonId);
+      const isSelected = state.selectedTaxa.has(taxonId);
+      const imageUrl = isReady ? taxon.sprite.url : taxon.defaultPhotoUrl;
+      const image = isReady && imageUrl
+        ? renderSheetSprite(imageUrl, "anim-idle")
+        : imageUrl
+        ? '<img alt="" loading="lazy" src="' + escapeAttr(imageUrl) + '">'
+        : '<div class="placeholder-shape placeholder-' + escapeAttr(taxon.sprite.placeholder || "unknown") + '"></div>';
+
+      return '<article class="sprite-tile ' + (isSelected ? "selected " : "") + (!isReady ? "unselectable" : "") +
+        '" data-taxon-card data-taxon-id="' + escapeAttr(taxonId) + '" tabindex="0" role="button" aria-pressed="' + String(isSelected) +
+        '" aria-label="' + escapeAttr((taxon.nickname || taxon.name || taxon.scientificName || "Taxon") + " combat selection") + '">' +
+        '<div class="sprite-tile-art">' + image + '</div>' +
+        (!isReady ? '<span class="badge">' + escapeHtml(status) + '</span>' : '') +
+        '<div class="select-mark" aria-hidden="true">' + (isSelected ? "OK" : "") + '</div>' +
+        '<div class="sprite-tile-caption">' + escapeHtml(taxon.nickname || taxon.name || taxon.scientificName || "") +
+          '<span class="subtle">' + escapeHtml(taxon.scientificName || "") + '</span>' +
+        '</div>' +
+      '</article>';
     }
 
     function renderSpriteTree() {
@@ -10304,8 +10752,22 @@ function renderAppHtml() {
         return;
       }
 
-      const sprites = Array.isArray(recent.sprites) ? recent.sprites : [];
-      els.recentRefreshLabel.textContent = Number(recent.totalSprites || sprites.length) + " newest sprites";
+      const allSprites = Array.isArray(recent.sprites) ? recent.sprites : [];
+      els.recentRefreshLabel.textContent = Number(recent.totalSprites || allSprites.length) + " newest sprites";
+      syncRecentGroupFilter(allSprites);
+
+      let sprites = state.recentGroup === "all"
+        ? allSprites.slice()
+        : allSprites.filter((item) => (item.iconicTaxonName || "Life") === state.recentGroup);
+
+      const createdMs = (item) => {
+        const time = new Date(item.sprite?.createdAt || 0).getTime();
+        return Number.isNaN(time) ? 0 : time;
+      };
+      if (state.recentSort === "oldest") sprites.sort((a, b) => createdMs(a) - createdMs(b));
+      else if (state.recentSort === "name") {
+        sprites.sort((a, b) => String(a.name || a.scientificName || "").localeCompare(String(b.name || b.scientificName || "")));
+      } else sprites.sort((a, b) => createdMs(b) - createdMs(a));
 
       if (sprites.length === 0) {
         els.recentSpritesPanel.innerHTML = '<div class="empty">No ready sprites match this search.</div>';
@@ -10314,9 +10776,22 @@ function renderAppHtml() {
 
       els.recentSpritesPanel.innerHTML =
         '<div class="tree-summary">' + recentSummaryText(recent) + '</div>' +
-        '<div class="sprite-tree" role="list">' +
+        '<div class="recent-grid" role="list">' +
           sprites.map(renderRecentSprite).join("") +
         '</div>';
+    }
+
+    function syncRecentGroupFilter(sprites) {
+      const groups = [...new Set(sprites.map((item) => item.iconicTaxonName || "Life"))].sort();
+      if (state.recentGroup !== "all" && !groups.includes(state.recentGroup)) state.recentGroup = "all";
+
+      els.recentGroupFilter.innerHTML =
+        '<option value="all">All groups</option>' +
+        groups.map((group) =>
+          '<option value="' + escapeAttr(group) + '"' + (state.recentGroup === group ? " selected" : "") + '>' +
+            escapeHtml(group) +
+          '</option>'
+        ).join("");
     }
 
     function recentSummaryText(recent) {
@@ -10342,15 +10817,14 @@ function renderAppHtml() {
         escapeHtml(dimensions)
       ].filter(Boolean).join(" / ");
 
-      return '<div class="tree-menu-row tree-menu-leaf recent-sprite-row" role="listitem">' +
-        '<div class="tree-leaf-sprite">' + sprite + '</div>' +
-        '<div class="tree-leaf-copy">' +
-          '<div class="tree-leaf-name">' + escapeHtml(item.name || item.scientificName || "Unnamed taxon") + '</div>' +
-          '<div class="tree-leaf-meta"><em>' + escapeHtml(item.scientificName || "") + '</em></div>' +
-          '<div class="tree-leaf-meta">' + meta + '</div>' +
-          '<div class="tree-leaf-meta">added ' + escapeHtml(createdAt) + '</div>' +
-        '</div>' +
+      return '<div class="recent-tile" role="listitem">' +
+        '<div class="sprite-tile-art">' + sprite + '</div>' +
         '<a class="manual-result-link" href="' + escapeAttr(item.sprite?.url || "#") + '" target="_blank" rel="noreferrer">Open</a>' +
+        '<div class="sprite-tile-caption" title="' + escapeAttr(meta) + '">' +
+          escapeHtml(item.name || item.scientificName || "Unnamed taxon") +
+          '<span class="subtle"><em>' + escapeHtml(item.scientificName || "") + '</em></span>' +
+          '<span class="subtle">added ' + escapeHtml(createdAt) + '</span>' +
+        '</div>' +
       '</div>';
     }
 
