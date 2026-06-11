@@ -38,8 +38,9 @@ const VALID_CATEGORIES = ["physical", "special", "status"];
 // LLM prompt (sent to the move model, e.g. gpt-5.4-nano)
 // ---------------------------------------------------------------------------
 
-export function dossierMessages(taxon, wikipediaSummary) {
+export function dossierMessages(taxon, wikipediaSummary, options = {}) {
   const common = taxon.commonName || taxon.scientificName;
+  const imageDataUrl = options.imageDataUrl || null;
 
   const system =
     "You are a naturalist and game designer for a biodiversity creature-battler. " +
@@ -75,11 +76,24 @@ export function dossierMessages(taxon, wikipediaSummary) {
     (wikipediaSummary
       ? `Reference summary (from Wikipedia via iNaturalist):\n${String(wikipediaSummary).slice(0, 1600)}\n`
       : "No reference summary available; rely on well-established biology only and stay conservative.\n") +
+    (imageDataUrl
+      ? "A player-submitted sprite image of this species is attached. Let its visual character " +
+        "(pose, color palette, mood, art style) inform the move names, flavor text, and animation " +
+        "storyboards so they match the artwork — but keep the facts biologically true and the move " +
+        "mechanics rooted in the species' real behavior.\n"
+      : "") +
     "Design the dossier now. JSON only.";
+
+  const userContent = imageDataUrl
+    ? [
+        { type: "text", text: user },
+        { type: "image_url", image_url: { url: imageDataUrl } }
+      ]
+    : user;
 
   return [
     { role: "system", content: system },
-    { role: "user", content: user }
+    { role: "user", content: userContent }
   ];
 }
 

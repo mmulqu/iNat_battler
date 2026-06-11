@@ -457,6 +457,10 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await getMoveBatch(env, decodeURIComponent(moveBatchMatch[1])));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/taxa/random-spriteless") {
+    return jsonResponse(await getRandomSpritelessTaxon(env));
+  }
+
   const movesGenerateMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/moves\/dev-generate$/);
   if (request.method === "POST" && movesGenerateMatch) {
     return jsonResponse(await generateMovesForTaxon(env, Number(movesGenerateMatch[1])));
@@ -1221,6 +1225,8 @@ async function uploadManualSprite(request, env) {
     ? await addManualSpriteToUserRoster(env, userId, taxonForDb, now)
     : false;
 
+  const moves = await generateImageConditionedMoves(env, taxon.id, bytes, contentType);
+
   return {
     uploaded: true,
     taxonId: taxon.id,
@@ -1234,7 +1240,8 @@ async function uploadManualSprite(request, env) {
     contentType,
     width: dimensions?.width ?? null,
     height: dimensions?.height ?? null,
-    addedToRoster
+    addedToRoster,
+    moves
   };
 }
 
@@ -1474,6 +1481,31 @@ async function getSpriteJobForPrompt(env, taxonId, promptHash) {
     ORDER BY sj.created_at DESC
     LIMIT 1
   `).bind(taxonId, DEFAULT_ASSET_KIND, ASSET_VERSION, promptHash).first();
+}
+
+async function getRandomSpritelessTaxon(env) {
+  const row = await env.DB.prepare(`
+    SELECT t.taxon_id, t.scientific_name, t.common_name
+    FROM taxa t
+    WHERE (t.rank IS NULL OR t.rank = 'species')
+      AND NOT EXISTS (
+        SELECT 1 FROM sprite_assets sa
+        WHERE sa.taxon_id = t.taxon_id
+          AND sa.asset_kind = ?
+          AND sa.asset_version = ?
+          AND sa.status = 'ready'
+      )
+    ORDER BY RANDOM()
+    LIMIT 1
+  `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION).first();
+
+  if (!row) throw httpError("Every stored taxon already has a ready sprite", 404);
+
+  return {
+    taxonId: Number(row.taxon_id),
+    name: row.common_name || row.scientific_name,
+    scientificName: row.scientific_name
+  };
 }
 
 async function getTaxonDevLab(env, taxonId) {
@@ -2901,12 +2933,14 @@ async function loadSpeciesMovesMap(env, taxonIds) {
   return map;
 }
 
-async function generateMovesForTaxon(env, taxonId) {
+async function generateMovesForTaxon(env, taxonId, options = {}) {
   if (!env.OPENAI_API_KEY) throw httpError("OPENAI_API_KEY is not configured", 400);
 
   const taxonRow = await ensureTaxonInDb(env, taxonId);
   const summaries = await fetchWikipediaSummaries(env, [taxonId]);
-  const messages = dossierMessages(taxonSummaryFromRow(taxonRow), summaries.get(taxonId) ?? null);
+  const messages = dossierMessages(taxonSummaryFromRow(taxonRow), summaries.get(taxonId) ?? null, {
+    imageDataUrl: options.imageDataUrl || null
+  });
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -5873,6 +5907,8 @@ async function uploadUserSprite(request, env, session) {
     now
   ).run();
 
+  const moves = await generateImageConditionedMoves(env, taxonId, bytes, contentType);
+
   return {
     submissionId,
     taxonId,
@@ -5882,7 +5918,8 @@ async function uploadUserSprite(request, env, session) {
     width: dimensions?.width ?? null,
     height: dimensions?.height ?? null,
     discordMessageId,
-    discordError
+    discordError,
+    moves
   };
 }
 
@@ -6680,6 +6717,44 @@ function base64ToArrayBuffer(base64) {
   }
 
   return bytes.buffer;
+}
+
+const MAX_MOVE_IMAGE_PROMPT_BYTES = 8_000_000;
+
+function imageDataUrlFromBytes(bytes, contentType) {
+  if (!bytes || bytes.byteLength <= 0 || bytes.byteLength > MAX_MOVE_IMAGE_PROMPT_BYTES) return null;
+
+  const view = new Uint8Array(bytes);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < view.length; offset += chunkSize) {
+    binary += String.fromCharCode(...view.subarray(offset, offset + chunkSize));
+  }
+
+  return `data:${contentType || "image/png"};base64,${btoa(binary)}`;
+}
+
+// Shared by both custom-sprite upload paths: regenerate the species moves
+// with the uploaded artwork attached so flavor/animations match the image.
+// Move generation failures never fail the upload itself.
+async function generateImageConditionedMoves(env, taxonId, bytes, contentType) {
+  try {
+    const imageDataUrl = imageDataUrlFromBytes(bytes, contentType);
+    const result = await generateMovesForTaxon(env, taxonId, { imageDataUrl });
+    return {
+      generated: true,
+      model: result.model,
+      imageConditioned: Boolean(imageDataUrl),
+      signatureMoves: (result.genome?.moves ?? [])
+        .filter((move) => move.signature)
+        .map((move) => move.name)
+    };
+  } catch (error) {
+    return {
+      generated: false,
+      error: error instanceof Error ? error.message : "Move generation failed"
+    };
+  }
 }
 
 async function sha256ArrayBufferHex(input) {
@@ -8539,7 +8614,7 @@ function renderAppHtml() {
 
     .dev-lab-tools {
       display: grid;
-      grid-template-columns: minmax(160px, 1fr) repeat(5, auto);
+      grid-template-columns: minmax(160px, 1fr) repeat(6, auto);
       gap: 8px;
       align-items: center;
       margin-bottom: 10px;
@@ -9096,6 +9171,7 @@ function renderAppHtml() {
           </div>
           <div class="dev-lab-tools">
             <input id="devTaxonIdInput" inputmode="numeric" placeholder="iNaturalist taxon ID">
+            <button class="secondary" id="devRandomButton" type="button" title="Pick a random taxon that has no sprite yet">&#127922; Random</button>
             <button class="secondary" id="devInspectButton" type="button">Inspect</button>
             <button class="secondary" id="devMovesButton" type="button">Generate Moves</button>
             <button class="secondary" id="devQueueSpriteButton" type="button">Queue Sprite</button>
@@ -9266,6 +9342,7 @@ function renderAppHtml() {
       devView: document.getElementById("devView"),
       devLabState: document.getElementById("devLabState"),
       devTaxonIdInput: document.getElementById("devTaxonIdInput"),
+      devRandomButton: document.getElementById("devRandomButton"),
       devInspectButton: document.getElementById("devInspectButton"),
       devMovesButton: document.getElementById("devMovesButton"),
       devQueueSpriteButton: document.getElementById("devQueueSpriteButton"),
@@ -9336,6 +9413,16 @@ function renderAppHtml() {
     });
 
     els.devInspectButton.addEventListener("click", () => inspectDevLab(true));
+    els.devRandomButton.addEventListener("click", async () => {
+      try {
+        setStatus("Picking a random spriteless taxon…");
+        const res = await apiFetch("/api/taxa/random-spriteless");
+        els.devTaxonIdInput.value = String(res.taxonId);
+        await inspectDevLab(true);
+      } catch (error) {
+        setStatus(error.message);
+      }
+    });
     els.devMovesButton.addEventListener("click", generateDevMoves);
     els.devQueueSpriteButton.addEventListener("click", queueDevSprite);
     els.devGenerateSpriteButton.addEventListener("click", generateDevSpriteBatch);
@@ -10049,9 +10136,14 @@ function renderAppHtml() {
 
       setStatus("Uploading custom sprite…");
       const res = await apiFetch("/api/my-sprites/upload", { method: "POST", body: form });
+      const movesNote = res.moves?.generated
+        ? " New image-matched moves: " + (res.moves.signatureMoves || []).join(", ") + "."
+        : res.moves?.error
+          ? " (Move regeneration failed: " + res.moves.error + ")"
+          : "";
       const message = res.discordError
-        ? "Sprite saved and live for you, but the Discord QA post failed: " + res.discordError + " (it will retry automatically)"
-        : "Custom sprite for " + res.name + " submitted for QA. It's live for you now; opponents see it once approved on Discord.";
+        ? "Sprite saved and live for you, but the Discord QA post failed: " + res.discordError + " (it will retry automatically)" + movesNote
+        : "Custom sprite for " + res.name + " submitted for QA. It's live for you now; opponents see it once approved on Discord." + movesNote;
       if (res.discordError) {
         state.bskyMessageKind = "error";
       } else {
@@ -10831,6 +10923,7 @@ function renderAppHtml() {
     function renderDevLab() {
       const busy = state.devBusy;
       els.devLabState.textContent = busy ? "busy" : "idle";
+      els.devRandomButton.disabled = busy;
       els.devInspectButton.disabled = busy;
       els.devMovesButton.disabled = busy;
       els.devQueueSpriteButton.disabled = busy;
@@ -11435,8 +11528,23 @@ function renderAppHtml() {
         '<strong>' + escapeHtml(result.commonName || result.scientificName || "Uploaded sprite") + '</strong>' +
         '<span><em>' + escapeHtml(result.scientificName || "") + '</em></span>' +
         '<span>taxon ' + Number(result.taxonId || 0) + ' / ' + escapeHtml(size) + ' / ' + escapeHtml(result.contentType || "") + '</span>' +
+        renderUploadMovesSummary(result.moves) +
         '<a class="manual-result-link" href="' + escapeAttr(result.url || "#") + '" target="_blank" rel="noreferrer">Open asset</a>' +
       '</div>';
+    }
+
+    function renderUploadMovesSummary(moves) {
+      if (!moves) return "";
+      if (!moves.generated) {
+        return '<span class="subtle">Moves not regenerated: ' + escapeHtml(moves.error || "unknown error") + '</span>';
+      }
+      const names = Array.isArray(moves.signatureMoves) && moves.signatureMoves.length
+        ? moves.signatureMoves.join(", ")
+        : "signature moves";
+      return '<span class="subtle">' +
+        (moves.imageConditioned ? "Image-conditioned moves: " : "Moves regenerated: ") +
+        escapeHtml(names) +
+      '</span>';
     }
 
     async function hydrateBatchTracker() {
@@ -12711,6 +12819,7 @@ function renderAppHtml() {
       els.recentSearchInput.disabled = isBusy;
       els.recentRefreshButton.disabled = isBusy;
       els.devTaxonIdInput.disabled = isBusy;
+      els.devRandomButton.disabled = isBusy;
       els.devInspectButton.disabled = isBusy;
       els.devMovesButton.disabled = isBusy;
       els.devQueueSpriteButton.disabled = isBusy;
