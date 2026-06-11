@@ -149,6 +149,7 @@ export function createGenome(taxon) {
 }
 
 export const MOVE_TYPES = Object.keys(TYPE_CHART);
+export { TYPE_CHART };
 
 export function createBattleCreature(taxon, instanceSuffix = "a", training = null, speciesMoves = null) {
   const genome = createGenome(taxon);
