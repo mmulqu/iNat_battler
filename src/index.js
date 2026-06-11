@@ -7230,6 +7230,13 @@ function renderAppHtml() {
       color: var(--teal);
     }
 
+    .dev-batch-hint {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
     .batch-list {
       display: grid;
       gap: 6px;
@@ -8780,6 +8787,7 @@ function renderAppHtml() {
             <h2>Dev Batch</h2>
             <span class="subtle" id="batchQueueCount">0 queued</span>
           </summary>
+          <p class="dev-batch-hint">Sprite generation for <strong>your roster</strong>. Queue More adds jobs for your taxa that are missing sprites; Submit Batch sends up to 100 queued jobs to OpenAI as one half-price image batch. Species without battle moves get those generated first.</p>
           <button class="secondary" id="batchPreviewButton" type="button" disabled>Show Batch Queue</button>
           <button class="secondary" id="batchSubmitButton" type="button" disabled>Submit Batch</button>
           <div class="batch-list" id="batchQueueList">Load a roster, then click Queue More.</div>
@@ -8789,6 +8797,7 @@ function renderAppHtml() {
             <h2>Global Seed</h2>
             <span class="subtle" id="seedQueueCount">0 queued</span>
           </summary>
+          <p class="dev-batch-hint">Builds the <strong>shared sprite library</strong> everyone draws from: the most-observed plant and animal species across North America and Europe. Queue 200 grabs the next 200 species that still lack a sprite (ready sprites and in-flight jobs are skipped); Submit 200 sends them to OpenAI — moves first, then sprite images. Repeat Queue &rarr; Submit to work through the pool.</p>
           <button class="secondary" id="seedImportButton" type="button">Import Plants + Animals</button>
           <button class="secondary" id="seedQueueButton" type="button">Queue 200</button>
           <button class="secondary" id="seedSubmitButton" type="button" disabled>Submit 200</button>
