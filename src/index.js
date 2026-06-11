@@ -55,6 +55,12 @@ const INAT_TAXON_CACHE_TTL_SECONDS = 24 * 60 * 60;
 const INAT_RATE_LIMIT_COOLDOWN_SECONDS = 5 * 60;
 const TRAINING_COUNT_SOURCE_RESEARCH = "research_grade";
 const TRAINING_COUNT_SOURCE_ROSTER_FALLBACK = "roster_fallback";
+const D1_ID_CHUNK_SIZE = 80;
+const INLINE_MOVE_GENERATION_LIMIT = 5;
+const AUTO_MOVE_BATCH_SYNC_LIMIT = 3;
+const AUTO_SPRITE_BATCH_SYNC_LIMIT = 2;
+const AUTO_SPRITE_BATCH_SYNC_ITEMS = 50;
+const MOVE_BATCH_TERMINAL_FAILURE_STATUSES = new Set(["cancelled", "canceled", "expired", "failed"]);
 const INAT_SPECIES_COUNT_FIELDS = [
   "count",
   "taxon.id",
@@ -87,6 +93,10 @@ const INAT_TAXON_INFO_FIELDS = [
   "name",
   "rank",
   "complete_species_count"
+].join(",");
+const INAT_TAXON_WIKIPEDIA_FIELDS = [
+  "id",
+  "wikipedia_summary"
 ].join(",");
 const GLOBAL_SEED_KEY = "na_europe_plants_animals_v1";
 const GLOBAL_SEED_LIMIT_PER_GROUP = 1000;
@@ -126,6 +136,18 @@ export default {
   async scheduled(controller, env, ctx) {
     try {
       await syncSpriteSubmissions(env, 25);
+    } catch (error) {
+      console.error(error);
+    }
+
+    try {
+      await syncAutoMoveBatchImageSubmissions(env, AUTO_MOVE_BATCH_SYNC_LIMIT);
+    } catch (error) {
+      console.error(error);
+    }
+
+    try {
+      await syncPendingSpriteBatches(env, AUTO_SPRITE_BATCH_SYNC_LIMIT, AUTO_SPRITE_BATCH_SYNC_ITEMS);
     } catch (error) {
       console.error(error);
     }
@@ -325,6 +347,14 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await getRoster(env, userId, limit, q));
   }
 
+  const spritePreferenceMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/(\d+)\/preference$/);
+  if (request.method === "POST" && spritePreferenceMatch) {
+    const userId = decodeURIComponent(spritePreferenceMatch[1]);
+    const taxonId = Number(spritePreferenceMatch[2]);
+    const payload = await readJson(request);
+    return jsonResponse(await setUserSpritePreference(env, userId, taxonId, String(payload.assetId ?? "")));
+  }
+
   const queueMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/queue-missing$/);
   if (request.method === "POST" && queueMatch) {
     const userId = decodeURIComponent(queueMatch[1]);
@@ -387,6 +417,12 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-submit") {
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, maxBatchSubmitLimit(env), 2);
+    const taxonIds = Array.isArray(payload.taxonIds)
+      ? payload.taxonIds.map((value) => Number.parseInt(value, 10)).filter(Number.isFinite).slice(0, limit)
+      : [];
+    if (taxonIds.length > 0) {
+      return jsonResponse(await submitSpriteBatchForTaxa(env, request.url, taxonIds));
+    }
     const userId = payload.userId ? String(payload.userId) : "";
     const queueMissing = payload.queueMissing !== false;
     return jsonResponse(await submitDevSpriteBatch(env, request.url, { limit, userId, queueMissing }));
@@ -396,12 +432,23 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await getLatestSpriteBatch(env));
   }
 
+  if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-auto-sync") {
+    const limit = clampInt(url.searchParams.get("limit"), 1, 10, AUTO_SPRITE_BATCH_SYNC_LIMIT);
+    const maxItems = clampInt(url.searchParams.get("maxItems"), 1, 200, AUTO_SPRITE_BATCH_SYNC_ITEMS);
+    return jsonResponse(await syncPendingSpriteBatches(env, limit, maxItems));
+  }
+
   if (request.method === "POST" && url.pathname === "/api/move-batches/dev-submit") {
     const payload = await readJson(request);
     return jsonResponse(await submitMoveBatch(env, {
       limit: clampInt(payload.limit, 1, 60, 10),
       userId: payload.userId ? String(payload.userId) : ""
     }));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/move-batches/dev-auto-sync") {
+    const limit = clampInt(url.searchParams.get("limit"), 1, 20, AUTO_MOVE_BATCH_SYNC_LIMIT);
+    return jsonResponse(await syncAutoMoveBatchImageSubmissions(env, limit));
   }
 
   const moveBatchSyncMatch = url.pathname.match(/^\/api\/move-batches\/([^/]+)\/sync$/);
@@ -422,6 +469,26 @@ async function routeRequest(request, env, ctx) {
   const genomeMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/genome$/);
   if (request.method === "GET" && genomeMatch) {
     return jsonResponse(await getTaxonGenome(env, Number(genomeMatch[1])));
+  }
+
+  const devLabMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/dev-lab$/);
+  if (request.method === "GET" && devLabMatch) {
+    return jsonResponse(await getTaxonDevLab(env, Number(devLabMatch[1])));
+  }
+
+  const spriteQueueMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-queue$/);
+  if (request.method === "POST" && spriteQueueMatch) {
+    return jsonResponse(await queueSpriteJobForTaxon(env, Number(spriteQueueMatch[1]), 40));
+  }
+
+  const spriteGenerateMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-generate$/);
+  if (request.method === "POST" && spriteGenerateMatch) {
+    return jsonResponse(await devGenerateSpriteForTaxon(env, Number(spriteGenerateMatch[1])));
+  }
+
+  const spriteSubmitBatchMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-submit-batch$/);
+  if (request.method === "POST" && spriteSubmitBatchMatch) {
+    return jsonResponse(await submitSpriteBatchForTaxon(env, request.url, Number(spriteSubmitBatchMatch[1])));
   }
 
   const spriteBatchSyncMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)\/sync$/);
@@ -459,6 +526,12 @@ async function routeRequest(request, env, ctx) {
     const limit = clampInt(url.searchParams.get("limit"), 1, 1000, 500);
     const q = String(url.searchParams.get("q") ?? "");
     return jsonResponse(await getSpriteTree(env, { limit, q }));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/recent-sprites") {
+    const limit = clampInt(url.searchParams.get("limit"), 1, 200, 80);
+    const q = String(url.searchParams.get("q") ?? "");
+    return jsonResponse(await getRecentSprites(env, { limit, q }));
   }
 
   const teamMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/teams$/);
@@ -1314,6 +1387,244 @@ async function queueMissingSpritesForUser(env, userId, limit, priority) {
   return queued;
 }
 
+async function ensureTaxonInDb(env, taxonId) {
+  const existing = await env.DB.prepare("SELECT * FROM taxa WHERE taxon_id = ?").bind(taxonId).first();
+  if (existing) return existing;
+
+  const taxon = await resolveInatTaxonForManualUpload({ taxonId: String(taxonId), scientificName: "", commonName: "" });
+  await upsertTaxonFromInat(env, taxon, new Date().toISOString());
+
+  const row = await env.DB.prepare("SELECT * FROM taxa WHERE taxon_id = ?").bind(taxonId).first();
+  if (!row) throw new Error(`Could not store taxon ${taxonId}`);
+  return row;
+}
+
+async function currentSpritePromptInfo(env, taxonId) {
+  const promptSpec = await getOrCreatePromptSpec(env, taxonId);
+  const promptHash = await sha256Hex(promptSpec.sprite_prompt);
+  return {
+    promptSpec,
+    promptHash,
+    jobId: `${DEFAULT_ASSET_KIND}:v${ASSET_VERSION}:${taxonId}:${promptHash}`
+  };
+}
+
+function spriteAssetSummary(row) {
+  if (!row) return null;
+  return {
+    assetId: row.asset_id,
+    promptHash: row.prompt_hash,
+    model: row.model,
+    status: row.status,
+    contentType: row.content_type,
+    r2Key: row.r2_key,
+    url: row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null,
+    createdAt: row.created_at
+  };
+}
+
+async function getSpriteAssetForPrompt(env, taxonId, promptHash) {
+  const row = await env.DB.prepare(`
+    SELECT *
+    FROM sprite_assets
+    WHERE taxon_id = ?
+      AND asset_kind = ?
+      AND asset_version = ?
+      AND prompt_hash = ?
+      AND status = 'ready'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).bind(taxonId, DEFAULT_ASSET_KIND, ASSET_VERSION, promptHash).first();
+
+  return spriteAssetSummary(row);
+}
+
+async function getLatestSpriteAssetForTaxon(env, taxonId) {
+  const row = await env.DB.prepare(`
+    SELECT *
+    FROM sprite_assets
+    WHERE taxon_id = ?
+      AND asset_kind = ?
+      AND asset_version = ?
+      AND status = 'ready'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).bind(taxonId, DEFAULT_ASSET_KIND, ASSET_VERSION).first();
+
+  return spriteAssetSummary(row);
+}
+
+async function getSpriteJobForPrompt(env, taxonId, promptHash) {
+  return env.DB.prepare(`
+    SELECT sj.*,
+      (
+        SELECT bi.batch_id
+        FROM openai_sprite_batch_items bi
+        WHERE bi.job_id = sj.job_id
+        ORDER BY bi.created_at DESC
+        LIMIT 1
+      ) AS batch_id
+    FROM sprite_jobs sj
+    WHERE sj.taxon_id = ?
+      AND sj.asset_kind = ?
+      AND sj.asset_version = ?
+      AND sj.prompt_hash = ?
+    ORDER BY sj.created_at DESC
+    LIMIT 1
+  `).bind(taxonId, DEFAULT_ASSET_KIND, ASSET_VERSION, promptHash).first();
+}
+
+async function getTaxonDevLab(env, taxonId) {
+  const taxon = await ensureTaxonInDb(env, taxonId);
+  const { promptSpec, promptHash, jobId } = await currentSpritePromptInfo(env, taxonId);
+  const genomeRow = await env.DB.prepare(`
+    SELECT genome_version, genome_json, prompt_json
+    FROM creature_genomes
+    WHERE taxon_id = ?
+    ORDER BY genome_version DESC
+    LIMIT 1
+  `).bind(taxonId).first();
+  const genome = genomeRow?.genome_json ? JSON.parse(genomeRow.genome_json) : promptSpec.genome ?? null;
+  const asset = await getSpriteAssetForPrompt(env, taxonId, promptHash);
+  const latestAsset = await getLatestSpriteAssetForTaxon(env, taxonId);
+  const job = await getSpriteJobForPrompt(env, taxonId, promptHash);
+
+  return {
+    taxon: {
+      taxonId,
+      name: taxon.common_name || taxon.scientific_name,
+      scientificName: taxon.scientific_name,
+      commonName: taxon.common_name,
+      iconicTaxonName: taxon.iconic_taxon_name
+    },
+    genomeVersion: Number(genomeRow?.genome_version ?? promptSpec.prompt_version ?? ASSET_VERSION),
+    hasSignatureMoves: Boolean(Array.isArray(genome?.moves) && genome.moves.some((move) => move.signature)),
+    facts: genome?.facts ?? [],
+    moves: Array.isArray(genome?.moves) ? genome.moves : [],
+    promptHash,
+    promptVersion: promptSpec.prompt_version ?? 1,
+    jobId,
+    asset,
+    latestAsset,
+    job: job ? {
+      jobId: job.job_id,
+      status: job.status,
+      attempts: Number(job.attempts ?? 0),
+      error: job.error ?? null,
+      batchId: job.batch_id ?? null,
+      updatedAt: job.updated_at
+    } : null
+  };
+}
+
+async function queueSpriteJobForTaxon(env, taxonId, priority) {
+  await ensureTaxonInDb(env, taxonId);
+  const { promptHash, jobId } = await currentSpritePromptInfo(env, taxonId);
+  const asset = await getSpriteAssetForPrompt(env, taxonId, promptHash);
+  if (asset) {
+    return { queued: false, existingAsset: true, taxonId, jobId, promptHash, asset };
+  }
+
+  const queued = await ensureSpriteJob(env, taxonId, DEFAULT_ASSET_KIND, ASSET_VERSION, priority);
+  const job = await getSpriteJobForPrompt(env, taxonId, promptHash);
+
+  return {
+    queued,
+    existingAsset: false,
+    taxonId,
+    jobId,
+    promptHash,
+    job: job ? {
+      jobId: job.job_id,
+      status: job.status,
+      batchId: job.batch_id ?? null,
+      error: job.error ?? null
+    } : null
+  };
+}
+
+async function devGenerateSpriteForTaxon(env, taxonId) {
+  const queued = await queueSpriteJobForTaxon(env, taxonId, 20);
+  if (queued.existingAsset) {
+    return {
+      generated: false,
+      message: "Current-prompt sprite already exists",
+      taxonId,
+      asset: queued.asset
+    };
+  }
+
+  return {
+    generated: true,
+    taxonId,
+    jobId: queued.jobId,
+    ...(await devGenerateSpriteForJob(env, queued.jobId))
+  };
+}
+
+async function submitSpriteBatchForTaxon(env, requestUrl, taxonId) {
+  return submitSpriteBatchForTaxa(env, requestUrl, [taxonId]);
+}
+
+async function submitSpriteBatchForTaxa(env, requestUrl, taxonIds) {
+  const cleanTaxonIds = [...new Set(
+    taxonIds.map((taxonId) => Number.parseInt(taxonId, 10)).filter(Number.isFinite)
+  )];
+  if (cleanTaxonIds.length === 0) throw new Error("No taxon IDs provided");
+
+  const jobs = [];
+  const existingAssets = [];
+  const skipped = [];
+
+  for (const taxonId of cleanTaxonIds) {
+    const queued = await queueSpriteJobForTaxon(env, taxonId, 20);
+    if (queued.existingAsset) {
+      existingAssets.push({ taxonId, asset: queued.asset });
+      continue;
+    }
+
+    const jobId = queued.jobId || queued.job?.jobId;
+    if (!jobId) {
+      skipped.push({ taxonId, reason: "No sprite job was created" });
+      continue;
+    }
+
+    const job = await getSpriteJobForBatch(env, jobId);
+    if (!job) {
+      skipped.push({ taxonId, reason: "Sprite job could not be loaded" });
+      continue;
+    }
+    jobs.push(job);
+  }
+
+  if (jobs.length === 0) {
+    return {
+      submitted: false,
+      message: existingAssets.length
+        ? "Current-prompt sprites already exist for all provided taxa"
+        : "No queued sprite jobs available for those taxa",
+      existingAssets,
+      skipped
+    };
+  }
+
+  const result = await submitSpriteJobsBatch(env, requestUrl, jobs);
+  return {
+    ...result,
+    existingAssets,
+    skipped: [...(result.skipped ?? []), ...skipped]
+  };
+}
+
+async function getSpriteJobForBatch(env, jobId) {
+  return env.DB.prepare(`
+    SELECT sj.*, t.scientific_name, t.common_name, t.iconic_taxon_name, t.default_photo_url
+    FROM sprite_jobs sj
+    JOIN taxa t ON t.taxon_id = sj.taxon_id
+    WHERE sj.job_id = ?
+  `).bind(jobId).first();
+}
+
 async function ensureSpriteJob(env, taxonId, assetKind, assetVersion, priority) {
   const promptSpec = await getOrCreatePromptSpec(env, taxonId);
   const promptHash = await sha256Hex(promptSpec.sprite_prompt);
@@ -1563,10 +1874,6 @@ async function listSpriteJobs(env, status, userId = "", limit = 100) {
 }
 
 async function submitDevSpriteBatch(env, requestUrl, options) {
-  if (!env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is not configured");
-  }
-
   if (options.userId && options.queueMissing !== false) {
     await queueMissingSpritesForUser(env, options.userId, options.limit, 80);
   }
@@ -1581,11 +1888,133 @@ async function submitDevSpriteBatch(env, requestUrl, options) {
     return { submitted: false, message: "No queued sprite jobs available for batch submission" };
   }
 
+  return submitSpriteJobsBatch(env, requestUrl, jobs);
+}
+
+async function prepareSpriteJobsForImageBatch(env, jobs) {
+  const sourceJobs = Array.isArray(jobs) ? jobs : [];
+  const taxonIds = [...new Set(sourceJobs.map((job) => Number(job.taxon_id)).filter(Number.isFinite))];
+  const existingMoveTaxa = await loadMoveGenomeTaxonIds(env, taxonIds);
+  const missingMoveTaxa = taxonIds.filter((taxonId) => !existingMoveTaxa.has(taxonId));
+  const skipped = [];
+  let movesGenerated = 0;
+
+  if (missingMoveTaxa.length > 0) {
+    if (missingMoveTaxa.length > INLINE_MOVE_GENERATION_LIMIT) {
+      const taxa = await loadTaxaRows(env, missingMoveTaxa);
+      return {
+        jobs: [],
+        skipped,
+        movesGenerated,
+        moveBatch: await createMoveBatchForTaxa(env, taxa, { autoSubmitImages: true })
+      };
+    }
+
+    for (const taxonId of missingMoveTaxa) {
+      await generateMovesForTaxon(env, taxonId);
+      movesGenerated += 1;
+    }
+  }
+
+  const preparedJobs = [];
+  for (const job of sourceJobs) {
+    const taxonId = Number(job.taxon_id);
+    if (!Number.isFinite(taxonId)) continue;
+
+    const queued = await queueSpriteJobForTaxon(env, taxonId, Number(job.priority ?? 80));
+    if (queued.existingAsset) {
+      skipped.push({ taxonId, reason: "Current move-aware sprite already exists", asset: queued.asset });
+      continue;
+    }
+
+    const jobId = queued.jobId || queued.job?.jobId;
+    const currentJob = jobId ? await getSpriteJobForBatch(env, jobId) : null;
+    if (!currentJob) {
+      skipped.push({ taxonId, reason: "Current move-aware sprite job could not be loaded" });
+      continue;
+    }
+
+    if (currentJob.status !== "queued") {
+      skipped.push({
+        taxonId,
+        reason: `Current move-aware sprite job is ${currentJob.status}`,
+        jobId: currentJob.job_id,
+        batchId: queued.job?.batchId ?? null
+      });
+      continue;
+    }
+
+    preparedJobs.push(currentJob);
+  }
+
+  return { jobs: preparedJobs, skipped, movesGenerated, moveBatch: null };
+}
+
+async function loadMoveGenomeTaxonIds(env, taxonIds) {
+  const ids = [...new Set(taxonIds.map(Number).filter(Number.isFinite))];
+  const set = new Set();
+  for (const chunk of chunkArray(ids, D1_ID_CHUNK_SIZE)) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(`
+      SELECT taxon_id
+      FROM creature_genomes
+      WHERE genome_version >= ?
+        AND taxon_id IN (${placeholders})
+    `).bind(GENOME_VERSION_MOVES, ...chunk).all();
+
+    for (const row of rows.results ?? []) set.add(Number(row.taxon_id));
+  }
+  return set;
+}
+
+async function loadTaxaRows(env, taxonIds) {
+  const ids = [...new Set(taxonIds.map(Number).filter(Number.isFinite))];
+  const rows = [];
+  for (const chunk of chunkArray(ids, D1_ID_CHUNK_SIZE)) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const result = await env.DB.prepare(`
+      SELECT *
+      FROM taxa
+      WHERE taxon_id IN (${placeholders})
+    `).bind(...chunk).all();
+    rows.push(...(result.results ?? []));
+  }
+  return rows;
+}
+
+async function submitSpriteJobsBatch(env, requestUrl, jobs) {
+  if (!env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is not configured");
+  }
+
+  const prepared = await prepareSpriteJobsForImageBatch(env, jobs);
+  if (prepared.moveBatch) {
+    return {
+      submitted: false,
+      stage: "moves",
+      message: `Submitted move batch ${prepared.moveBatch.batchId} for ${prepared.moveBatch.queued} taxa; the image batch will submit automatically after the moves finish.`,
+      moveBatchId: prepared.moveBatch.batchId,
+      moveBatch: prepared.moveBatch,
+      skipped: prepared.skipped
+    };
+  }
+
+  if (prepared.jobs.length === 0) {
+    return {
+      submitted: false,
+      message: "No queued sprite jobs available after move-prep",
+      movesGenerated: prepared.movesGenerated,
+      skipped: prepared.skipped
+    };
+  }
+
   const endpoint = "/v1/images/edits";
   const jsonlLines = [];
   const items = [];
 
-  for (const job of jobs) {
+  for (const job of prepared.jobs) {
     const reserved = await reserveGlobalGenerationAttempt(env);
     if (!reserved) break;
 
@@ -1674,6 +2103,8 @@ async function submitDevSpriteBatch(env, requestUrl, options) {
     inputFileId: inputFile.id,
     endpoint,
     itemCount: items.length,
+    movesGenerated: prepared.movesGenerated,
+    skipped: prepared.skipped,
     items: items.map((item) => ({
       customId: item.customId,
       jobId: item.job.job_id,
@@ -1757,6 +2188,14 @@ function buildBatchReferenceImages(env, requestUrl, taxon) {
   }
 
   return references;
+}
+
+function publicRequestUrl(env) {
+  return `${publicBaseUrl(env)}/`;
+}
+
+function publicBaseUrl(env) {
+  return String(env.PUBLIC_BASE_URL || "https://inat-battler.intrinsic3141.workers.dev").replace(/\/+$/, "");
 }
 
 function openAIImageEditJsonBody(env, promptSpec, referenceImages) {
@@ -1935,6 +2374,45 @@ async function syncSpriteBatch(env, batchId, options = {}) {
   };
 }
 
+async function syncPendingSpriteBatches(
+  env,
+  batchLimit = AUTO_SPRITE_BATCH_SYNC_LIMIT,
+  maxItems = AUTO_SPRITE_BATCH_SYNC_ITEMS
+) {
+  if (!env.OPENAI_API_KEY) {
+    return { checked: 0, results: [], error: "OPENAI_API_KEY is not configured" };
+  }
+
+  const rows = await env.DB.prepare(`
+    SELECT b.batch_id
+    FROM openai_sprite_batches b
+    WHERE b.status IN ('submitted', 'validating', 'in_progress', 'finalizing', 'completed')
+      AND EXISTS (
+        SELECT 1
+        FROM openai_sprite_batch_items bi
+        WHERE bi.batch_id = b.batch_id
+          AND bi.status NOT IN ('ready', 'failed')
+      )
+    ORDER BY b.created_at ASC
+    LIMIT ?
+  `).bind(batchLimit).all();
+
+  const results = [];
+  for (const row of rows.results ?? []) {
+    try {
+      results.push(await syncSpriteBatch(env, row.batch_id, { maxItems }));
+    } catch (error) {
+      results.push({
+        batchId: row.batch_id,
+        synced: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  return { checked: results.length, results };
+}
+
 async function retrieveOpenAIBatch(env, batchId) {
   const response = await fetch(`https://api.openai.com/v1/batches/${encodeURIComponent(batchId)}`, {
     headers: {
@@ -2013,6 +2491,14 @@ async function* streamOpenAIFileJsonlLines(env, fileId) {
     if (!doneReading) await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
+}
+
+async function fetchOpenAIFileContent(env, fileId) {
+  const lines = [];
+  for await (const line of streamOpenAIFileJsonlLines(env, fileId)) {
+    lines.push(line);
+  }
+  return lines.join("\n");
 }
 
 async function getPendingBatchCustomIds(env, batchId) {
@@ -2319,9 +2805,11 @@ async function fetchWikipediaSummaries(env, taxonIds) {
   const map = new Map();
   for (const chunk of chunkArray(taxonIds, 30)) {
     try {
-      const res = await fetchInatWithRetry(
-        `https://api.inaturalist.org/v1/taxa/${chunk.join(",")}?per_page=${chunk.length}`
-      );
+      const url = new URL(`${INAT_API_BASE_URL}/taxa/${chunk.join(",")}`);
+      url.searchParams.set("per_page", String(chunk.length));
+      url.searchParams.set("fields", INAT_TAXON_WIKIPEDIA_FIELDS);
+      url.searchParams.set("ttl", String(INAT_TAXON_CACHE_TTL_SECONDS));
+      const res = await fetchInatWithRetry(url.toString());
       if (!res.ok) continue;
       const data = await res.json();
       for (const taxon of data.results ?? []) {
@@ -2369,22 +2857,24 @@ async function loadSpeciesMovesMap(env, taxonIds) {
   const ids = [...new Set(taxonIds.map(Number).filter(Number.isFinite))];
   if (!ids.length) return new Map();
 
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = await env.DB.prepare(`
-    SELECT taxon_id, genome_json
-    FROM creature_genomes
-    WHERE genome_version >= ? AND taxon_id IN (${placeholders})
-  `).bind(GENOME_VERSION_MOVES, ...ids).all();
-
   const map = new Map();
-  for (const row of rows.results ?? []) {
-    try {
-      const genome = JSON.parse(row.genome_json);
-      if (Array.isArray(genome.moves) && genome.moves.length === 4) {
-        map.set(Number(row.taxon_id), genome);
+  for (const chunk of chunkArray(ids, D1_ID_CHUNK_SIZE)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(`
+      SELECT taxon_id, genome_json
+      FROM creature_genomes
+      WHERE genome_version >= ? AND taxon_id IN (${placeholders})
+    `).bind(GENOME_VERSION_MOVES, ...chunk).all();
+
+    for (const row of rows.results ?? []) {
+      try {
+        const genome = JSON.parse(row.genome_json);
+        if (Array.isArray(genome.moves) && genome.moves.length === 4) {
+          map.set(Number(row.taxon_id), genome);
+        }
+      } catch {
+        // Ignore malformed rows; procedural moves remain the fallback.
       }
-    } catch {
-      // Ignore malformed rows; procedural moves remain the fallback.
     }
   }
   return map;
@@ -2393,9 +2883,7 @@ async function loadSpeciesMovesMap(env, taxonIds) {
 async function generateMovesForTaxon(env, taxonId) {
   if (!env.OPENAI_API_KEY) throw httpError("OPENAI_API_KEY is not configured", 400);
 
-  const taxonRow = await env.DB.prepare("SELECT * FROM taxa WHERE taxon_id = ?").bind(taxonId).first();
-  if (!taxonRow) throw httpError(`Unknown taxon ${taxonId}`, 404);
-
+  const taxonRow = await ensureTaxonInDb(env, taxonId);
   const summaries = await fetchWikipediaSummaries(env, [taxonId]);
   const messages = dossierMessages(taxonSummaryFromRow(taxonRow), summaries.get(taxonId) ?? null);
 
@@ -2460,10 +2948,20 @@ async function submitMoveBatch(env, { limit, userId }) {
     return { queued: 0, message: "Every eligible species already has signature moves." };
   }
 
-  const taxonIds = taxa.map((row) => Number(row.taxon_id));
+  return createMoveBatchForTaxa(env, taxa);
+}
+
+async function createMoveBatchForTaxa(env, taxa, options = {}) {
+  if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
+  const cleanTaxa = (Array.isArray(taxa) ? taxa : []).filter((row) => Number.isFinite(Number(row.taxon_id)));
+  if (!cleanTaxa.length) {
+    return { queued: 0, message: "No taxa available for move batch." };
+  }
+
+  const taxonIds = cleanTaxa.map((row) => Number(row.taxon_id));
   const summaries = await fetchWikipediaSummaries(env, taxonIds);
 
-  const jsonl = taxa.map((row) => JSON.stringify({
+  const jsonl = cleanTaxa.map((row) => JSON.stringify({
     custom_id: `moves:${row.taxon_id}`,
     method: "POST",
     url: "/v1/chat/completions",
@@ -2474,29 +2972,51 @@ async function submitMoveBatch(env, { limit, userId }) {
     }
   })).join("\n");
 
-  const inputFileId = await uploadOpenAIBatchFile(env, jsonl, `move-batch-${Date.now()}.jsonl`);
-  const batch = await createOpenAIBatch(env, inputFileId, "/v1/chat/completions", {
+  const inputFile = await uploadOpenAIBatchFile(env, jsonl, `move-batch-${Date.now()}.jsonl`);
+  const batch = await createOpenAIBatch(env, inputFile.id, "/v1/chat/completions", {
     purpose: "species_moves"
   });
 
   const now = new Date().toISOString();
   await env.DB.prepare(`
     INSERT INTO move_batches (
-      batch_id, input_file_id, status, model, item_count, taxon_ids_json, created_at, updated_at
+      batch_id, input_file_id, status, model, item_count, taxon_ids_json,
+      auto_submit_images, image_submit_status, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     batch.id,
-    inputFileId,
+    inputFile.id,
     batch.status ?? "submitted",
     moveModel(env),
-    taxa.length,
+    cleanTaxa.length,
     JSON.stringify(taxonIds),
+    options.autoSubmitImages === true ? 1 : 0,
+    options.autoSubmitImages === true ? "pending" : null,
     now,
     now
   ).run();
 
-  return { batchId: batch.id, status: batch.status, queued: taxa.length, taxonIds };
+  return {
+    batchId: batch.id,
+    status: batch.status,
+    queued: cleanTaxa.length,
+    taxonIds,
+    autoSubmitImages: options.autoSubmitImages === true
+  };
+}
+
+async function updateStoredMoveBatchRemoteStatus(env, batchId, batch, row = {}) {
+  await env.DB.prepare(`
+    UPDATE move_batches
+    SET status = ?, output_file_id = ?, updated_at = ?
+    WHERE batch_id = ?
+  `).bind(
+    batch.status ?? "unknown",
+    batch.output_file_id ?? row.output_file_id ?? null,
+    new Date().toISOString(),
+    batchId
+  ).run();
 }
 
 async function getMoveBatch(env, batchId) {
@@ -2505,9 +3025,7 @@ async function getMoveBatch(env, batchId) {
 
   try {
     const batch = await retrieveOpenAIBatch(env, batchId);
-    await env.DB.prepare(
-      "UPDATE move_batches SET status = ?, output_file_id = ?, updated_at = ? WHERE batch_id = ?"
-    ).bind(batch.status, batch.output_file_id ?? row.output_file_id, new Date().toISOString(), batchId).run();
+    await updateStoredMoveBatchRemoteStatus(env, batchId, batch, row);
     row.status = batch.status;
     row.output_file_id = batch.output_file_id ?? row.output_file_id;
   } catch {
@@ -2522,6 +3040,11 @@ async function getMoveBatch(env, batchId) {
     appliedCount: row.applied_count,
     failedCount: row.failed_count,
     error: row.error,
+    autoSubmitImages: Number(row.auto_submit_images) === 1,
+    imageBatchId: row.image_batch_id,
+    imageSubmitStatus: row.image_submit_status,
+    imageSubmitError: row.image_submit_error,
+    imageSubmittedAt: row.image_submitted_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -2532,6 +3055,7 @@ async function syncMoveBatch(env, batchId) {
   if (!row) throw httpError("Move batch not found", 404);
 
   const batch = await retrieveOpenAIBatch(env, batchId);
+  await updateStoredMoveBatchRemoteStatus(env, batchId, batch, row);
   let applied = 0;
   let failed = 0;
   const errors = [];
@@ -2575,6 +3099,310 @@ async function syncMoveBatch(env, batchId) {
   ).run();
 
   return { batchId, status: batch.status, applied, failed, errors };
+}
+
+async function syncAutoMoveBatchImageSubmissions(env, limit = AUTO_MOVE_BATCH_SYNC_LIMIT) {
+  if (!env.OPENAI_API_KEY) {
+    return { checked: 0, results: [], error: "OPENAI_API_KEY is not configured" };
+  }
+
+  const rows = await env.DB.prepare(`
+    SELECT *
+    FROM move_batches
+    WHERE auto_submit_images = 1
+      AND image_batch_id IS NULL
+      AND COALESCE(image_submit_status, 'pending') NOT IN ('submitted', 'skipped')
+    ORDER BY created_at ASC
+    LIMIT ?
+  `).bind(limit).all();
+
+  const results = [];
+  for (const row of rows.results ?? []) {
+    results.push(await syncAutoMoveBatchImageSubmission(env, row));
+  }
+
+  return { checked: results.length, results };
+}
+
+async function syncAutoMoveBatchImageSubmission(env, row) {
+  const moveBatchId = row.batch_id;
+  const result = {
+    moveBatchId,
+    status: row.status,
+    imageSubmitStatus: row.image_submit_status ?? "pending"
+  };
+
+  try {
+    const remote = await retrieveOpenAIBatch(env, moveBatchId);
+    await updateStoredMoveBatchRemoteStatus(env, moveBatchId, remote, row);
+    result.status = remote.status;
+
+    if (MOVE_BATCH_TERMINAL_FAILURE_STATUSES.has(String(remote.status ?? "").toLowerCase())) {
+      const error = `Move batch ended with status ${remote.status}`;
+      await setMoveBatchImageSubmitStatus(env, moveBatchId, {
+        status: "skipped",
+        error
+      });
+      return { ...result, imageSubmitStatus: "skipped", error };
+    }
+
+    if (remote.status !== "completed") {
+      await setMoveBatchImageSubmitStatus(env, moveBatchId, { status: "waiting" });
+      return { ...result, imageSubmitStatus: "waiting", requestCounts: remote.request_counts ?? null };
+    }
+
+    const syncResult = await syncMoveBatch(env, moveBatchId);
+    const taxonIds = moveBatchTaxonIds(row);
+    const moveGenomeTaxa = await loadMoveGenomeTaxonIds(env, taxonIds);
+    const imageTaxonIds = taxonIds.filter((taxonId) => moveGenomeTaxa.has(taxonId));
+    const skippedMoveTaxa = taxonIds.length - imageTaxonIds.length;
+
+    if (imageTaxonIds.length === 0) {
+      const error = "Move batch completed, but no taxa produced usable move genomes.";
+      await setMoveBatchImageSubmitStatus(env, moveBatchId, {
+        status: "skipped",
+        error
+      });
+      return {
+        ...result,
+        imageSubmitStatus: "skipped",
+        applied: syncResult.applied,
+        failed: syncResult.failed,
+        error
+      };
+    }
+
+    const submitResult = await submitSpriteBatchForTaxa(env, publicRequestUrl(env), imageTaxonIds);
+    if (submitResult.submitted) {
+      await setMoveBatchImageSubmitStatus(env, moveBatchId, {
+        status: "submitted",
+        imageBatchId: submitResult.batchId
+      });
+      return {
+        ...result,
+        imageSubmitStatus: "submitted",
+        imageBatchId: submitResult.batchId,
+        applied: syncResult.applied,
+        failed: syncResult.failed,
+        skippedMoveTaxa,
+        imageItemCount: submitResult.itemCount,
+        existingAssets: submitResult.existingAssets?.length ?? 0
+      };
+    }
+
+    const status = submitResult.stage === "moves" ? "error" : "skipped";
+    const error = submitResult.message ?? "Image batch was not submitted.";
+    await setMoveBatchImageSubmitStatus(env, moveBatchId, { status, error });
+    return {
+      ...result,
+      imageSubmitStatus: status,
+      applied: syncResult.applied,
+      failed: syncResult.failed,
+      skippedMoveTaxa,
+      error,
+      submitResult
+    };
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    await setMoveBatchImageSubmitStatus(env, moveBatchId, {
+      status: "error",
+      error: message
+    });
+    return { ...result, imageSubmitStatus: "error", error: message };
+  }
+}
+
+function moveBatchTaxonIds(row) {
+  try {
+    const parsed = JSON.parse(row.taxon_ids_json ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.map((taxonId) => Number(taxonId)).filter(Number.isFinite))];
+  } catch {
+    return [];
+  }
+}
+
+async function setMoveBatchImageSubmitStatus(env, batchId, { status, imageBatchId = null, error = null }) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    UPDATE move_batches
+    SET image_batch_id = ?,
+        image_submit_status = ?,
+        image_submit_error = ?,
+        image_submitted_at = ?,
+        updated_at = ?
+    WHERE batch_id = ?
+  `).bind(
+    imageBatchId,
+    status,
+    error,
+    imageBatchId ? now : null,
+    now,
+    batchId
+  ).run();
+}
+
+async function loadReadySpriteVariantMap(env, taxonIds) {
+  const ids = [...new Set(taxonIds.map(Number).filter(Number.isFinite))];
+  const map = new Map();
+
+  for (const chunk of chunkArray(ids, D1_ID_CHUNK_SIZE)) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(`
+      SELECT
+        asset_id,
+        taxon_id,
+        model,
+        prompt_hash,
+        r2_key,
+        width,
+        height,
+        content_type,
+        created_at
+      FROM sprite_assets
+      WHERE taxon_id IN (${placeholders})
+        AND asset_kind = ?
+        AND asset_version = ?
+        AND status = 'ready'
+      ORDER BY
+        taxon_id ASC,
+        CASE
+          WHEN model = 'manual-upload' OR model = 'manual-upload-web' OR prompt_hash LIKE 'manual-upload:%' THEN 1
+          WHEN prompt_hash LIKE 'manual-%' THEN 2
+          ELSE 3
+        END,
+        created_at DESC,
+        asset_id DESC
+    `).bind(...chunk, DEFAULT_ASSET_KIND, ASSET_VERSION).all();
+
+    for (const row of rows.results ?? []) {
+      const taxonId = Number(row.taxon_id);
+      if (!map.has(taxonId)) map.set(taxonId, []);
+      map.get(taxonId).push(spriteVariantFromRow(row));
+    }
+  }
+
+  for (const variants of map.values()) {
+    variants.forEach((variant, index) => {
+      variant.index = index;
+      variant.count = variants.length;
+      variant.label = `Sprite ${index + 1} of ${variants.length}`;
+    });
+  }
+
+  return map;
+}
+
+function spriteVariantFromRow(row) {
+  return {
+    assetId: row.asset_id,
+    taxonId: Number(row.taxon_id),
+    r2Key: row.r2_key,
+    url: `/api/assets/${encodeR2Key(row.r2_key)}`,
+    model: row.model || null,
+    promptHash: row.prompt_hash || null,
+    width: row.width === null || row.width === undefined ? null : Number(row.width),
+    height: row.height === null || row.height === undefined ? null : Number(row.height),
+    contentType: row.content_type || null,
+    createdAt: row.created_at,
+    index: 0,
+    count: 1,
+    label: "Sprite 1 of 1"
+  };
+}
+
+function publicSpriteVariant(variant) {
+  if (!variant) return null;
+  return {
+    assetId: variant.assetId,
+    url: variant.url,
+    model: variant.model,
+    promptHash: variant.promptHash,
+    width: variant.width,
+    height: variant.height,
+    contentType: variant.contentType,
+    createdAt: variant.createdAt,
+    index: variant.index,
+    count: variant.count,
+    label: variant.label
+  };
+}
+
+function selectSpriteVariant(variants, preferredAssetId) {
+  const safeVariants = Array.isArray(variants) ? variants : [];
+  if (safeVariants.length === 0) return null;
+
+  if (preferredAssetId) {
+    const preferred = safeVariants.find((variant) => variant.assetId === preferredAssetId);
+    if (preferred) return preferred;
+  }
+
+  return safeVariants[0];
+}
+
+async function loadUserSpritePreferenceMap(env, userId, taxonIds) {
+  const ids = [...new Set(taxonIds.map(Number).filter(Number.isFinite))];
+  const map = new Map();
+
+  for (const chunk of chunkArray(ids, D1_ID_CHUNK_SIZE)) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(`
+      SELECT taxon_id, asset_id
+      FROM user_sprite_preferences
+      WHERE user_id = ?
+        AND taxon_id IN (${placeholders})
+    `).bind(userId, ...chunk).all();
+
+    for (const row of rows.results ?? []) {
+      map.set(Number(row.taxon_id), String(row.asset_id));
+    }
+  }
+
+  return map;
+}
+
+async function setUserSpritePreference(env, userId, taxonId, assetId) {
+  if (!userId) throw httpError("Missing userId", 400);
+  if (!Number.isFinite(taxonId) || taxonId <= 0) throw httpError("Missing taxonId", 400);
+  if (!assetId) throw httpError("Missing assetId", 400);
+
+  const owned = await env.DB.prepare(`
+    SELECT 1
+    FROM user_taxa
+    WHERE user_id = ?
+      AND taxon_id = ?
+  `).bind(userId, taxonId).first();
+  if (!owned) throw httpError("That species is not in this user's roster", 404);
+
+  const variants = (await loadReadySpriteVariantMap(env, [taxonId])).get(taxonId) ?? [];
+  const selected = variants.find((variant) => variant.assetId === assetId);
+  if (!selected) throw httpError("That sprite version is not available for this species", 400);
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    INSERT INTO user_sprite_preferences (
+      user_id, taxon_id, asset_id, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, taxon_id)
+    DO UPDATE SET asset_id = excluded.asset_id, updated_at = excluded.updated_at
+  `).bind(userId, taxonId, assetId, now, now).run();
+
+  return {
+    userId,
+    taxonId,
+    selectedAssetId: selected.assetId,
+    sprite: {
+      status: "ready",
+      url: selected.url,
+      assetId: selected.assetId,
+      variantIndex: selected.index,
+      variantCount: selected.count,
+      variants: variants.map(publicSpriteVariant)
+    }
+  };
 }
 
 async function getRoster(env, userId, limit, q = "") {
@@ -2669,14 +3497,20 @@ async function getRoster(env, userId, limit, q = "") {
 
   const buffMap = await loadUserBuffMap(env, userId);
   const rosterRows = rows.results ?? [];
-  const movesMap = await loadSpeciesMovesMap(env, rosterRows.map((row) => Number(row.taxon_id)));
+  const rosterTaxonIds = rosterRows.map((row) => Number(row.taxon_id));
+  const movesMap = await loadSpeciesMovesMap(env, rosterTaxonIds);
+  const variantMap = await loadReadySpriteVariantMap(env, rosterTaxonIds);
+  const preferenceMap = await loadUserSpritePreferenceMap(env, userId, rosterTaxonIds);
 
   return {
     userId,
     taxa: rosterRows.map((row) => {
       // The roster is the owner's own view, so pending or approved custom
       // sprites win here; rejected submissions fall back to the global sprite.
-      const finalKey = row.custom_r2_key || row.r2_key;
+      const taxonId = Number(row.taxon_id);
+      const variants = variantMap.get(taxonId) ?? [];
+      const selectedVariant = selectSpriteVariant(variants, preferenceMap.get(taxonId));
+      const finalKey = row.custom_r2_key || selectedVariant?.r2Key || row.r2_key;
       const spriteReady = Boolean(finalKey);
       const spriteUrl = spriteReady ? `/api/assets/${encodeR2Key(finalKey)}` : null;
       const taxon = taxonSummaryFromRow(row, spriteUrl);
@@ -2700,7 +3534,14 @@ async function getRoster(env, userId, limit, q = "") {
         affinityLevel: row.bond_level,
         defaultPhotoUrl: row.default_photo_url,
         sprite: spriteReady
-          ? { status: "ready", url: spriteUrl }
+          ? {
+              status: "ready",
+              url: spriteUrl,
+              assetId: row.custom_r2_key ? null : selectedVariant?.assetId ?? null,
+              variantIndex: row.custom_r2_key ? 0 : selectedVariant?.index ?? 0,
+              variantCount: row.custom_r2_key ? 1 : Math.max(1, variants.length),
+              variants: row.custom_r2_key ? [] : variants.map(publicSpriteVariant)
+            }
           : {
               status: row.sprite_job_status || "missing",
               url: null,
@@ -2727,32 +3568,36 @@ async function getRoster(env, userId, limit, q = "") {
 async function getSpriteStatus(env, taxonIds) {
   if (taxonIds.length === 0) return { sprites: [] };
 
-  const placeholders = taxonIds.map(() => "?").join(",");
-  const rows = await env.DB.prepare(`
-    SELECT
-      t.taxon_id,
-      (
-        SELECT sa.r2_key
-        FROM sprite_assets sa
-        WHERE sa.taxon_id = t.taxon_id
-          AND sa.asset_kind = ?
-          AND sa.asset_version = ?
-          AND sa.status = 'ready'
-        ORDER BY
-          CASE
-            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
-            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
-            ELSE 3
-          END,
-          sa.created_at DESC
-        LIMIT 1
-      ) AS r2_key
-    FROM taxa t
-    WHERE t.taxon_id IN (${placeholders})
-  `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION, ...taxonIds).all();
+  const results = [];
+  for (const chunk of chunkArray(taxonIds, D1_ID_CHUNK_SIZE)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(`
+      SELECT
+        t.taxon_id,
+        (
+          SELECT sa.r2_key
+          FROM sprite_assets sa
+          WHERE sa.taxon_id = t.taxon_id
+            AND sa.asset_kind = ?
+            AND sa.asset_version = ?
+            AND sa.status = 'ready'
+          ORDER BY
+            CASE
+              WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+              WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+              ELSE 3
+            END,
+            sa.created_at DESC
+          LIMIT 1
+        ) AS r2_key
+      FROM taxa t
+      WHERE t.taxon_id IN (${placeholders})
+    `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION, ...chunk).all();
+    results.push(...(rows.results ?? []));
+  }
 
   return {
-    sprites: (rows.results ?? []).map((row) => ({
+    sprites: results.map((row) => ({
       taxonId: row.taxon_id,
       status: row.r2_key ? "ready" : "missing",
       url: row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null
@@ -2861,6 +3706,77 @@ async function getSpriteTree(env, options = {}) {
     limit: options.limit ?? 500,
     q,
     roots: tree
+  };
+}
+
+async function getRecentSprites(env, options = {}) {
+  const q = String(options.q ?? "").trim();
+  const limit = Math.max(1, Math.min(200, Number(options.limit ?? 80)));
+  const rows = await env.DB.prepare(`
+    SELECT
+      sa.asset_id,
+      sa.taxon_id,
+      sa.model,
+      sa.prompt_hash,
+      sa.r2_key,
+      sa.width,
+      sa.height,
+      sa.content_type,
+      sa.created_at,
+      t.scientific_name,
+      t.common_name,
+      t.rank,
+      t.iconic_taxon_name
+    FROM sprite_assets sa
+    JOIN taxa t ON t.taxon_id = sa.taxon_id
+    WHERE sa.asset_kind = ?
+      AND sa.asset_version = ?
+      AND sa.status = 'ready'
+      AND (
+        ? = ''
+        OR lower(t.scientific_name) LIKE '%' || lower(?) || '%'
+        OR lower(COALESCE(t.common_name, '')) LIKE '%' || lower(?) || '%'
+        OR lower(COALESCE(t.iconic_taxon_name, '')) LIKE '%' || lower(?) || '%'
+        OR CAST(sa.taxon_id AS TEXT) = ?
+      )
+    ORDER BY sa.created_at DESC, sa.asset_id DESC
+    LIMIT ?
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    q,
+    q,
+    q,
+    q,
+    q,
+    limit
+  ).all();
+
+  const sprites = (rows.results ?? []).map((row) => ({
+    assetId: row.asset_id,
+    taxonId: Number(row.taxon_id),
+    name: row.common_name || row.scientific_name,
+    scientificName: row.scientific_name,
+    commonName: row.common_name ?? null,
+    rank: row.rank || "taxon",
+    iconicTaxonName: row.iconic_taxon_name || "Life",
+    sprite: {
+      status: "ready",
+      url: `/api/assets/${encodeR2Key(row.r2_key)}`,
+      model: row.model || null,
+      promptHash: row.prompt_hash || null,
+      width: row.width === null || row.width === undefined ? null : Number(row.width),
+      height: row.height === null || row.height === undefined ? null : Number(row.height),
+      contentType: row.content_type || null,
+      createdAt: row.created_at
+    }
+  }));
+
+  return {
+    sprites,
+    totalSprites: sprites.length,
+    limit,
+    q
   };
 }
 
@@ -3092,6 +4008,8 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
 
   const buffMap = await loadUserBuffMap(env, userId);
   const movesMap = await loadSpeciesMovesMap(env, cleanTaxonIds);
+  const variantMap = await loadReadySpriteVariantMap(env, cleanTaxonIds);
+  const preferenceMap = await loadUserSpritePreferenceMap(env, userId, cleanTaxonIds);
   const byId = new Map((rows.results ?? []).map((row) => [Number(row.taxon_id), row]));
   return cleanTaxonIds.map((taxonId, index) => {
     const row = byId.get(taxonId);
@@ -3101,7 +4019,8 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
     // only sees it once Discord QA approved it. Rejected submissions fall
     // back to the shared global sprite for all viewers.
     const customKey = personalView === "owner" ? row.own_custom_key : row.approved_custom_key;
-    const finalKey = customKey || row.r2_key;
+    const selectedVariant = selectSpriteVariant(variantMap.get(taxonId) ?? [], preferenceMap.get(taxonId));
+    const finalKey = customKey || selectedVariant?.r2Key || row.r2_key;
     const spriteUrl = finalKey ? `/api/assets/${encodeR2Key(finalKey)}` : null;
     return createBattleCreature(
       taxonSummaryFromRow(row, spriteUrl),
@@ -6656,6 +7575,55 @@ function renderAppHtml() {
       width: 92%;
     }
 
+    .sprite-picker {
+      position: absolute;
+      left: 50%;
+      bottom: 8px;
+      z-index: 4;
+      display: grid;
+      grid-template-columns: 28px auto 28px;
+      align-items: center;
+      gap: 5px;
+      min-height: 30px;
+      border: 1px solid rgba(23, 32, 27, 0.18);
+      border-radius: 999px;
+      padding: 3px 5px;
+      background: rgba(255, 255, 255, 0.94);
+      box-shadow: 0 8px 18px rgba(23, 32, 27, 0.12);
+      transform: translateX(-50%);
+    }
+
+    .sprite-picker button {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 24px;
+      min-height: 24px;
+      border: 0;
+      border-radius: 999px;
+      padding: 0;
+      background: #e4f2ef;
+      color: #17433f;
+      font-size: 0.9rem;
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .sprite-picker button:hover,
+    .sprite-picker button:focus-visible {
+      background: var(--teal);
+      color: #fff;
+    }
+
+    .sprite-picker span {
+      min-width: 28px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 900;
+      text-align: center;
+      white-space: nowrap;
+    }
+
     .anim-idle { --row-pos: 0%; }
     .anim-move { --row-pos: 33.333333%; }
     .anim-attack { --row-pos: 66.666667%; animation-duration: 520ms; }
@@ -7094,6 +8062,79 @@ function renderAppHtml() {
       align-items: center;
     }
 
+    .dev-lab-tools {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) repeat(5, auto);
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .dev-lab-sync {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) auto;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .dev-summary {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+      gap: 12px;
+      align-items: start;
+    }
+
+    .dev-sprite-preview {
+      width: 100%;
+      aspect-ratio: 1;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7f7f1;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    .dev-sprite-preview .sheet-sprite {
+      width: 96%;
+    }
+
+    .dev-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .dev-meta-grid .stat {
+      min-height: auto;
+    }
+
+    .dev-output {
+      display: grid;
+      gap: 10px;
+    }
+
+    .dev-preview-controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .dev-preview-controls button {
+      min-height: 32px;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 900;
+      padding: 6px 8px;
+    }
+
+    .dev-preview-controls button.active {
+      background: var(--teal);
+      color: #fff;
+      border-color: var(--teal);
+    }
+
     .train-tools input {
       flex: 1;
       min-width: 120px;
@@ -7316,6 +8357,13 @@ function renderAppHtml() {
         grid-template-columns: 1fr;
       }
 
+      .dev-lab-tools,
+      .dev-lab-sync,
+      .dev-summary,
+      .dev-meta-grid {
+        grid-template-columns: 1fr;
+      }
+
       .tree-menu-branch {
         grid-template-columns: 18px minmax(0, 1fr) auto;
       }
@@ -7448,6 +8496,8 @@ function renderAppHtml() {
           <button class="view-tab" id="battleTabButton" type="button" data-view-tab="battle">Battle</button>
           <button class="view-tab" id="trainingTabButton" type="button" data-view-tab="training">Training</button>
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
+          <button class="view-tab" id="recentTabButton" type="button" data-view-tab="recent">Recently Added</button>
+          <button class="view-tab" id="devTabButton" type="button" data-view-tab="dev">Dev Lab</button>
         </nav>
         <section class="view-panel" id="rosterView">
           <div class="roster-head">
@@ -7497,6 +8547,40 @@ function renderAppHtml() {
             <div class="empty">Load the sprite tree to browse ready assets.</div>
           </div>
         </section>
+        <section class="view-panel" id="recentView" hidden>
+          <div class="roster-head">
+            <h2>Recently Added</h2>
+            <span class="subtle" id="recentRefreshLabel"></span>
+          </div>
+          <div class="tree-tools">
+            <input id="recentSearchInput" placeholder="Search recent sprites">
+            <button class="secondary" id="recentRefreshButton" type="button">Refresh</button>
+          </div>
+          <div class="tree-browser" id="recentSpritesPanel">
+            <div class="empty">Open this tab to load recently added sprites.</div>
+          </div>
+        </section>
+        <section class="view-panel" id="devView" hidden>
+          <div class="roster-head">
+            <h2>Dev Lab</h2>
+            <span class="subtle" id="devLabState">idle</span>
+          </div>
+          <div class="dev-lab-tools">
+            <input id="devTaxonIdInput" inputmode="numeric" placeholder="iNaturalist taxon ID">
+            <button class="secondary" id="devInspectButton" type="button">Inspect</button>
+            <button class="secondary" id="devMovesButton" type="button">Generate Moves</button>
+            <button class="secondary" id="devQueueSpriteButton" type="button">Queue Sprite</button>
+            <button class="primary" id="devGenerateSpriteButton" type="button">Generate Sprite</button>
+            <button class="secondary" id="devGenerateSvgButton" type="button">Dev SVG</button>
+          </div>
+          <div class="dev-lab-sync">
+            <input id="devBatchIdInput" placeholder="Sprite batch ID">
+            <button class="secondary" id="devSyncBatchButton" type="button">Sync Batch</button>
+          </div>
+          <div class="batch-list" id="devLabPanel">
+            <div class="empty">Enter a taxon ID.</div>
+          </div>
+        </section>
       </section>
     </section>
   </main>
@@ -7518,6 +8602,8 @@ function renderAppHtml() {
       taxa: [],
       spriteTree: null,
       treeSearch: "",
+      recentSprites: null,
+      recentSearch: "",
       expandedTreeNodes: new Set(),
       selectedTaxa: new Set(),
       flippedTaxa: new Set(),
@@ -7543,6 +8629,11 @@ function renderAppHtml() {
       training: null,
       trainingFilter: "",
       trainingBusy: false,
+      devLab: null,
+      devBusy: false,
+      devBatchId: "",
+      devPreviewAnimation: "anim-idle",
+      devPreviewKey: "row1",
       bskyBusy: false,
       bskyAction: "",
       bskyMessage: "",
@@ -7584,12 +8675,18 @@ function renderAppHtml() {
       refreshLabel: document.getElementById("refreshLabel"),
       rosterTabButton: document.getElementById("rosterTabButton"),
       treeTabButton: document.getElementById("treeTabButton"),
+      recentTabButton: document.getElementById("recentTabButton"),
       rosterView: document.getElementById("rosterView"),
       treeView: document.getElementById("treeView"),
+      recentView: document.getElementById("recentView"),
       treeSearchInput: document.getElementById("treeSearchInput"),
       treeRefreshButton: document.getElementById("treeRefreshButton"),
       treeRefreshLabel: document.getElementById("treeRefreshLabel"),
       spriteTreePanel: document.getElementById("spriteTreePanel"),
+      recentSearchInput: document.getElementById("recentSearchInput"),
+      recentRefreshButton: document.getElementById("recentRefreshButton"),
+      recentRefreshLabel: document.getElementById("recentRefreshLabel"),
+      recentSpritesPanel: document.getElementById("recentSpritesPanel"),
       rosterGrid: document.getElementById("rosterGrid"),
       emptyState: document.getElementById("emptyState"),
       battlePanel: document.getElementById("battlePanel"),
@@ -7605,6 +8702,18 @@ function renderAppHtml() {
       trainingEmptyState: document.getElementById("trainingEmptyState"),
       trainingMasteries: document.getElementById("trainingMasteries"),
       trainingList: document.getElementById("trainingList"),
+      devTabButton: document.getElementById("devTabButton"),
+      devView: document.getElementById("devView"),
+      devLabState: document.getElementById("devLabState"),
+      devTaxonIdInput: document.getElementById("devTaxonIdInput"),
+      devInspectButton: document.getElementById("devInspectButton"),
+      devMovesButton: document.getElementById("devMovesButton"),
+      devQueueSpriteButton: document.getElementById("devQueueSpriteButton"),
+      devGenerateSpriteButton: document.getElementById("devGenerateSpriteButton"),
+      devGenerateSvgButton: document.getElementById("devGenerateSvgButton"),
+      devBatchIdInput: document.getElementById("devBatchIdInput"),
+      devSyncBatchButton: document.getElementById("devSyncBatchButton"),
+      devLabPanel: document.getElementById("devLabPanel"),
       bskyStateLabel: document.getElementById("bskyStateLabel"),
       bskyBody: document.getElementById("bskyBody")
     };
@@ -7620,6 +8729,8 @@ function renderAppHtml() {
     els.battleTabButton.addEventListener("click", () => switchView("battle"));
     els.trainingTabButton.addEventListener("click", () => switchView("training"));
     els.treeTabButton.addEventListener("click", () => switchView("tree"));
+    els.recentTabButton.addEventListener("click", () => switchView("recent"));
+    els.devTabButton.addEventListener("click", () => switchView("dev"));
 
     els.trainingSyncButton.addEventListener("click", syncTraining);
 
@@ -7657,6 +8768,25 @@ function renderAppHtml() {
       await saveNickname(event.target.getAttribute("data-train-nick-input"));
     });
 
+    els.devInspectButton.addEventListener("click", () => inspectDevLab(true));
+    els.devMovesButton.addEventListener("click", generateDevMoves);
+    els.devQueueSpriteButton.addEventListener("click", queueDevSprite);
+    els.devGenerateSpriteButton.addEventListener("click", generateDevSpriteBatch);
+    els.devGenerateSvgButton.addEventListener("click", generateDevSvg);
+    els.devSyncBatchButton.addEventListener("click", syncDevSpriteBatch);
+    els.devTaxonIdInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      inspectDevLab(true);
+    });
+    els.devLabPanel.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-dev-preview-anim]");
+      if (!button) return;
+      state.devPreviewAnimation = button.getAttribute("data-dev-preview-anim") || "anim-idle";
+      state.devPreviewKey = button.getAttribute("data-dev-preview-key") || "row1";
+      renderDevLab();
+    });
+
     els.treeRefreshButton.addEventListener("click", async () => {
       state.treeSearch = els.treeSearchInput.value.trim();
       await loadSpriteTree(true);
@@ -7666,6 +8796,17 @@ function renderAppHtml() {
       if (state.activeView !== "tree") return;
       state.treeSearch = els.treeSearchInput.value.trim();
       await loadSpriteTree(false);
+    }, 250));
+
+    els.recentRefreshButton.addEventListener("click", async () => {
+      state.recentSearch = els.recentSearchInput.value.trim();
+      await loadRecentSprites(true);
+    });
+
+    els.recentSearchInput.addEventListener("input", debounce(async () => {
+      if (state.activeView !== "recent") return;
+      state.recentSearch = els.recentSearchInput.value.trim();
+      await loadRecentSprites(false);
     }, 250));
 
     els.queueMoreButton.addEventListener("click", async () => {
@@ -7846,7 +8987,17 @@ function renderAppHtml() {
       await submitBattleMove(button.getAttribute("data-move-id"));
     });
 
-    els.rosterGrid.addEventListener("click", (event) => {
+    els.rosterGrid.addEventListener("click", async (event) => {
+      const spriteButton = event.target.closest("[data-sprite-shift]");
+      if (spriteButton) {
+        event.stopPropagation();
+        await chooseSpriteVariant(
+          spriteButton.getAttribute("data-taxon-id"),
+          Number(spriteButton.getAttribute("data-sprite-shift") || 0)
+        );
+        return;
+      }
+
       const detailsButton = event.target.closest("[data-card-details]");
       if (detailsButton) {
         event.stopPropagation();
@@ -8761,11 +9912,14 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = ["tree", "battle", "training"].includes(view) ? view : "roster";
+      state.activeView = ["tree", "recent", "battle", "training", "dev"].includes(view) ? view : "roster";
       renderViewTabs();
 
       if (state.activeView === "tree" && !state.spriteTree) {
         await loadSpriteTree(false);
+      }
+      if (state.activeView === "recent" && !state.recentSprites) {
+        await loadRecentSprites(false);
       }
       if (state.activeView === "training" && !state.training) {
         await loadTraining();
@@ -8786,10 +9940,14 @@ function renderAppHtml() {
       els.battleTabButton.classList.toggle("active", view === "battle");
       els.trainingTabButton.classList.toggle("active", view === "training");
       els.treeTabButton.classList.toggle("active", view === "tree");
+      els.recentTabButton.classList.toggle("active", view === "recent");
+      els.devTabButton.classList.toggle("active", view === "dev");
       els.rosterView.hidden = view !== "roster";
       els.battleView.hidden = view !== "battle";
       els.trainingView.hidden = view !== "training";
       els.treeView.hidden = view !== "tree";
+      els.recentView.hidden = view !== "recent";
+      els.devView.hidden = view !== "dev";
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
     }
 
@@ -8807,6 +9965,264 @@ function renderAppHtml() {
       } catch (error) {
         setStatus(error.message);
       }
+    }
+
+    async function loadRecentSprites(showStatus) {
+      const q = state.recentSearch || "";
+      if (showStatus) setStatus("Loading recently added sprites");
+
+      try {
+        const res = await apiFetch("/api/recent-sprites?limit=100&q=" + encodeURIComponent(q));
+        state.recentSprites = res;
+        renderRecentSprites();
+        if (showStatus) setStatus("Loaded " + Number(res.totalSprites || 0) + " recently added sprites");
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
+    function currentDevTaxonId() {
+      const id = Number.parseInt(String(els.devTaxonIdInput.value || "").trim(), 10);
+      if (!Number.isFinite(id) || id <= 0) throw new Error("Enter a numeric iNaturalist taxon ID.");
+      return id;
+    }
+
+    async function inspectDevLab(showStatus) {
+      const taxonId = currentDevTaxonId();
+      const previousTaxonId = Number(state.devLab?.taxon?.taxonId || 0);
+      if (previousTaxonId !== taxonId) {
+        state.devPreviewAnimation = "anim-idle";
+        state.devPreviewKey = "row1";
+      }
+      state.devBusy = true;
+      renderDevLab();
+      if (showStatus) setStatus("Loading dev taxon " + taxonId);
+
+      try {
+        state.devLab = await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/dev-lab");
+        renderDevLab();
+        if (showStatus) setStatus("Loaded " + (state.devLab.taxon?.name || "taxon " + taxonId));
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.devBusy = false;
+        renderDevLab();
+      }
+    }
+
+    async function generateDevMoves() {
+      const taxonId = currentDevTaxonId();
+      state.devBusy = true;
+      renderDevLab();
+      setStatus("Generating signature moves for taxon " + taxonId);
+
+      try {
+        await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/moves/dev-generate", { method: "POST" });
+        await inspectDevLab(false);
+        state.rosterStale = true;
+        setStatus("Generated signature moves for taxon " + taxonId);
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.devBusy = false;
+        renderDevLab();
+      }
+    }
+
+    async function queueDevSprite() {
+      const taxonId = currentDevTaxonId();
+      state.devBusy = true;
+      renderDevLab();
+      setStatus("Queueing current-prompt sprite for taxon " + taxonId);
+
+      try {
+        const res = await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/sprites/dev-queue", { method: "POST" });
+        await inspectDevLab(false);
+        setStatus(res.existingAsset ? "Current-prompt sprite already exists." : "Queued sprite job " + (res.jobId || ""));
+        await loadBatchQueue(false);
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.devBusy = false;
+        renderDevLab();
+      }
+    }
+
+    async function generateDevSpriteBatch() {
+      const taxonId = currentDevTaxonId();
+      state.devBusy = true;
+      renderDevLab();
+      setStatus("Submitting one-sprite OpenAI batch for taxon " + taxonId);
+
+      try {
+        const res = await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/sprites/dev-submit-batch", { method: "POST" });
+        if (res.batchId) {
+          state.devBatchId = res.batchId;
+          els.devBatchIdInput.value = res.batchId;
+          state.lastBatch = normalizeSubmittedBatch(res);
+          saveLastBatch();
+          scheduleBatchPolling();
+        }
+        await inspectDevLab(false);
+        setStatus(res.submitted ? "Submitted sprite batch " + res.batchId : (res.message || "Sprite batch was not submitted."));
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.devBusy = false;
+        renderDevLab();
+      }
+    }
+
+    async function generateDevSvg() {
+      const taxonId = currentDevTaxonId();
+      state.devBusy = true;
+      renderDevLab();
+      setStatus("Generating dev SVG sprite for taxon " + taxonId);
+
+      try {
+        const res = await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/sprites/dev-generate", { method: "POST" });
+        await inspectDevLab(false);
+        state.rosterStale = true;
+        setStatus(res.generated ? "Generated dev SVG sprite." : (res.message || "Dev SVG sprite was not generated."));
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.devBusy = false;
+        renderDevLab();
+      }
+    }
+
+    async function syncDevSpriteBatch() {
+      const batchId = String(els.devBatchIdInput.value || state.devBatchId || "").trim();
+      if (!batchId) {
+        setStatus("Enter a sprite batch ID.");
+        return;
+      }
+
+      state.devBusy = true;
+      renderDevLab();
+      setStatus("Syncing sprite batch " + batchId);
+
+      try {
+        const res = await apiFetch("/api/sprite-batches/" + encodeURIComponent(batchId) + "/sync?maxItems=" + BATCH_SYNC_ITEM_LIMIT, { method: "POST" });
+        state.devBatchId = batchId;
+        const hydrated = await apiFetch("/api/sprite-batches/" + encodeURIComponent(batchId));
+        state.lastBatch = normalizeBatchResponse(hydrated);
+        saveLastBatch();
+        await inspectDevLab(false);
+        state.rosterStale = true;
+        setStatus("Synced sprite batch " + batchId + ": " + Number(res.ready || 0) + " ready, " + Number(res.failed || 0) + " failed.");
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        state.devBusy = false;
+        renderDevLab();
+      }
+    }
+
+    function renderDevLab() {
+      const busy = state.devBusy;
+      els.devLabState.textContent = busy ? "busy" : "idle";
+      els.devInspectButton.disabled = busy;
+      els.devMovesButton.disabled = busy;
+      els.devQueueSpriteButton.disabled = busy;
+      els.devGenerateSpriteButton.disabled = busy;
+      els.devGenerateSvgButton.disabled = busy;
+      els.devSyncBatchButton.disabled = busy;
+      els.devTaxonIdInput.disabled = busy;
+      els.devBatchIdInput.disabled = busy;
+
+      const lab = state.devLab;
+      if (!lab) {
+        els.devLabPanel.innerHTML = '<div class="empty">Enter a taxon ID.</div>';
+        return;
+      }
+
+      const taxon = lab.taxon || {};
+      const currentAsset = lab.asset || null;
+      const previewAsset = currentAsset || lab.latestAsset || null;
+      const job = lab.job || null;
+      const batchId = job?.batchId || state.devBatchId || "";
+      if (batchId && !els.devBatchIdInput.value) els.devBatchIdInput.value = batchId;
+      const previewAnimation = state.devPreviewAnimation || "anim-idle";
+
+      const spritePreview = previewAsset?.url
+        ? renderSheetSprite(previewAsset.url, previewAnimation)
+        : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(taxon.iconicTaxonName)) + '"></div>';
+      const previewControls = renderDevPreviewControls(lab.moves || [], state.devPreviewKey || "row1");
+
+      const assetLabel = currentAsset
+        ? "current prompt"
+        : previewAsset
+          ? "latest sprite"
+          : "no sprite";
+
+      const movesHtml = Array.isArray(lab.moves) && lab.moves.length
+        ? renderMoveRows(lab.moves)
+        : '<div class="ability"><div><strong>No moves</strong><span>Generate moves first.</span></div></div>';
+
+      const factsHtml = Array.isArray(lab.facts) && lab.facts.length
+        ? lab.facts.map((fact) => '<div class="subtle">' + escapeHtml(fact) + '</div>').join("")
+        : '<div class="subtle">No facts stored.</div>';
+
+      els.devLabPanel.innerHTML =
+        '<div class="dev-summary">' +
+          '<div class="dev-output">' +
+            '<div class="batch-item">' +
+              '<strong>' + escapeHtml(taxon.name || "Taxon " + Number(taxon.taxonId || 0)) + '</strong>' +
+              '<span><em>' + escapeHtml(taxon.scientificName || "") + '</em></span>' +
+              '<span>taxon ' + Number(taxon.taxonId || 0) + ' / genome v' + Number(lab.genomeVersion || 0) + ' / prompt v' + Number(lab.promptVersion || 0) + '</span>' +
+              '<span>prompt ' + escapeHtml(String(lab.promptHash || "").slice(0, 16)) + '</span>' +
+            '</div>' +
+            '<div class="batch-item">' +
+              '<strong>Moves</strong>' +
+              '<div>' + movesHtml + '</div>' +
+            '</div>' +
+            '<div class="batch-item">' +
+              '<strong>Facts</strong>' +
+              '<div>' + factsHtml + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="dev-output">' +
+            '<div class="dev-sprite-preview">' + spritePreview + '</div>' +
+            previewControls +
+            '<div class="dev-meta-grid">' +
+              '<div class="stat"><span class="subtle">Sprite</span><strong>' + escapeHtml(assetLabel) + '</strong></div>' +
+              '<div class="stat"><span class="subtle">Job</span><strong>' + escapeHtml(job?.status || "none") + '</strong></div>' +
+              '<div class="stat"><span class="subtle">Batch</span><strong>' + escapeHtml(batchId || "none") + '</strong></div>' +
+              '<div class="stat"><span class="subtle">Source</span><strong>' + escapeHtml(previewAsset?.model || "none") + '</strong></div>' +
+            '</div>' +
+            (previewAsset?.url ? '<a class="manual-result-link" href="' + escapeAttr(previewAsset.url) + '" target="_blank" rel="noreferrer">Open Sprite</a>' : '') +
+            (job?.error ? '<div class="subtle">' + escapeHtml(job.error) + '</div>' : '') +
+          '</div>' +
+        '</div>';
+    }
+
+    function renderDevPreviewControls(moves, activeKey) {
+      const baseButtons = [
+        { key: "row1", label: "Row 1", title: "Idle loop", anim: "anim-idle" },
+        { key: "row2", label: "Row 2", title: "Movement loop", anim: "anim-move" }
+      ];
+      const moveButtons = (Array.isArray(moves) ? moves : []).slice(0, 4).map((move, index) => ({
+        key: "move" + (index + 1),
+        label: "Move " + (index + 1),
+        title: move?.name || "Move " + (index + 1),
+        anim: moveAnimationClass(move)
+      }));
+      const buttons = baseButtons.concat(moveButtons);
+
+      return '<div class="dev-preview-controls">' + buttons.map((button) => (
+        '<button class="secondary' + (button.key === activeKey ? ' active' : '') + '" type="button" ' +
+          'data-dev-preview-key="' + escapeAttr(button.key) + '" data-dev-preview-anim="' + escapeAttr(button.anim) + '" title="' + escapeAttr(button.title) + '">' +
+          escapeHtml(button.label) +
+        '</button>'
+      )).join("") + '</div>';
+    }
+
+    function moveAnimationClass(move) {
+      if (move && Number(move.animRow) === 4) return "anim-special";
+      if (move && Number(move.animRow) === 3) return "anim-attack";
+      return move && move.category === "special" ? "anim-special" : "anim-attack";
     }
 
     function render() {
@@ -8834,6 +10250,8 @@ function renderAppHtml() {
       renderGlobalSeedQueue();
       renderViewTabs();
       renderSpriteTree();
+      renderRecentSprites();
+      renderDevLab();
       renderBattle();
     }
 
@@ -8856,6 +10274,78 @@ function renderAppHtml() {
       els.spriteTreePanel.innerHTML =
         '<div class="tree-summary">' + treeSummaryText(tree) + '</div>' +
         renderTreeMenu(tree.roots);
+    }
+
+    function renderRecentSprites() {
+      const recent = state.recentSprites;
+
+      if (!recent) {
+        els.recentRefreshLabel.textContent = "";
+        els.recentSpritesPanel.innerHTML = '<div class="empty">Open this tab to load recently added sprites.</div>';
+        return;
+      }
+
+      const sprites = Array.isArray(recent.sprites) ? recent.sprites : [];
+      els.recentRefreshLabel.textContent = Number(recent.totalSprites || sprites.length) + " newest sprites";
+
+      if (sprites.length === 0) {
+        els.recentSpritesPanel.innerHTML = '<div class="empty">No ready sprites match this search.</div>';
+        return;
+      }
+
+      els.recentSpritesPanel.innerHTML =
+        '<div class="tree-summary">' + recentSummaryText(recent) + '</div>' +
+        '<div class="sprite-tree" role="list">' +
+          sprites.map(renderRecentSprite).join("") +
+        '</div>';
+    }
+
+    function recentSummaryText(recent) {
+      const q = String(recent.q || "").trim();
+      const total = Number(recent.totalSprites || 0);
+      if (q) return total + ' newest ready sprites matching "' + escapeHtml(q) + '"';
+      return total + " newest ready sprites, newest first";
+    }
+
+    function renderRecentSprite(item) {
+      const sprite = item.sprite?.url
+        ? renderSheetSprite(item.sprite.url, "anim-idle")
+        : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(item.iconicTaxonName)) + '"></div>';
+      const createdAt = formatRecentSpriteDate(item.sprite?.createdAt);
+      const model = item.sprite?.model || "sprite";
+      const dimensions = item.sprite?.width && item.sprite?.height
+        ? Number(item.sprite.width) + "x" + Number(item.sprite.height)
+        : "";
+      const meta = [
+        escapeHtml((item.rank || "taxon") + " / " + (item.iconicTaxonName || "Life")),
+        "taxon " + Number(item.taxonId || 0),
+        escapeHtml(model),
+        escapeHtml(dimensions)
+      ].filter(Boolean).join(" / ");
+
+      return '<div class="tree-menu-row tree-menu-leaf recent-sprite-row" role="listitem">' +
+        '<div class="tree-leaf-sprite">' + sprite + '</div>' +
+        '<div class="tree-leaf-copy">' +
+          '<div class="tree-leaf-name">' + escapeHtml(item.name || item.scientificName || "Unnamed taxon") + '</div>' +
+          '<div class="tree-leaf-meta"><em>' + escapeHtml(item.scientificName || "") + '</em></div>' +
+          '<div class="tree-leaf-meta">' + meta + '</div>' +
+          '<div class="tree-leaf-meta">added ' + escapeHtml(createdAt) + '</div>' +
+        '</div>' +
+        '<a class="manual-result-link" href="' + escapeAttr(item.sprite?.url || "#") + '" target="_blank" rel="noreferrer">Open</a>' +
+      '</div>';
+    }
+
+    function formatRecentSpriteDate(value) {
+      if (!value) return "unknown";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
     }
 
     function syncTreeExpansion(tree, query, previousQuery) {
@@ -9387,6 +10877,41 @@ function renderAppHtml() {
       render();
     }
 
+    async function chooseSpriteVariant(taxonId, direction) {
+      if (!state.userId || !taxonId || !direction) return;
+      const taxon = state.taxa.find((entry) => String(entry.taxonId) === String(taxonId));
+      const variants = Array.isArray(taxon?.sprite?.variants) ? taxon.sprite.variants : [];
+      if (!taxon || variants.length < 2) return;
+
+      const currentIndex = Math.max(0, variants.findIndex((variant) => variant.assetId === taxon.sprite.assetId));
+      const nextIndex = (currentIndex + direction + variants.length) % variants.length;
+      const next = variants[nextIndex];
+      if (!next?.assetId) return;
+
+      try {
+        const res = await apiFetch(
+          "/api/users/" + encodeURIComponent(state.userId) +
+            "/sprites/" + encodeURIComponent(String(taxonId)) +
+            "/preference",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ assetId: next.assetId })
+          }
+        );
+
+        taxon.sprite = {
+          ...taxon.sprite,
+          ...res.sprite,
+          placeholder: taxon.sprite.placeholder
+        };
+        setStatus("Selected " + (res.sprite?.variantIndex + 1 || nextIndex + 1) + " / " + variants.length + " for " + (taxon.name || taxon.scientificName));
+        render();
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
     function renderCard(taxon) {
       const status = taxon.sprite.status;
       const isReady = status === "ready";
@@ -9409,6 +10934,7 @@ function renderAppHtml() {
             '<div class="sprite ' + (isReady ? "ready" : "") + '">' +
               image +
               '<span class="badge">' + escapeHtml(badge) + '</span>' +
+              renderSpritePicker(taxon) +
             '</div>' +
             '<div class="meta">' +
               '<div class="name">' + escapeHtml(taxon.nickname || taxon.name) +
@@ -9434,6 +10960,23 @@ function renderAppHtml() {
           '</div>' +
         '</div>' +
       '</article>';
+    }
+
+    function renderSpritePicker(taxon) {
+      const variants = Array.isArray(taxon?.sprite?.variants) ? taxon.sprite.variants : [];
+      if (taxon?.sprite?.status !== "ready" || variants.length < 2) return "";
+
+      const taxonId = String(taxon.taxonId);
+      const index = Math.max(0, Math.min(
+        variants.length - 1,
+        Number(taxon.sprite.variantIndex ?? variants.findIndex((variant) => variant.assetId === taxon.sprite.assetId) ?? 0)
+      ));
+
+      return '<div class="sprite-picker" aria-label="Sprite version">' +
+        '<button type="button" data-sprite-shift="-1" data-taxon-id="' + escapeAttr(taxonId) + '" aria-label="Previous sprite version">&lt;</button>' +
+        '<span>' + (index + 1) + '/' + variants.length + '</span>' +
+        '<button type="button" data-sprite-shift="1" data-taxon-id="' + escapeAttr(taxonId) + '" aria-label="Next sprite version">&gt;</button>' +
+      '</div>';
     }
 
     function renderCardBack(taxon, types) {
@@ -10352,6 +11895,16 @@ function renderAppHtml() {
       els.manualAddToRoster.disabled = isBusy;
       els.treeSearchInput.disabled = isBusy;
       els.treeRefreshButton.disabled = isBusy;
+      els.recentSearchInput.disabled = isBusy;
+      els.recentRefreshButton.disabled = isBusy;
+      els.devTaxonIdInput.disabled = isBusy;
+      els.devInspectButton.disabled = isBusy;
+      els.devMovesButton.disabled = isBusy;
+      els.devQueueSpriteButton.disabled = isBusy;
+      els.devGenerateSpriteButton.disabled = isBusy;
+      els.devGenerateSvgButton.disabled = isBusy;
+      els.devBatchIdInput.disabled = isBusy;
+      els.devSyncBatchButton.disabled = isBusy;
       els.clearTeamButton.disabled = isBusy || state.selectedTaxa.size === 0;
       els.startBattleButton.disabled = isBusy || !state.userId || state.selectedTaxa.size !== 5;
       if (message) setStatus(message);

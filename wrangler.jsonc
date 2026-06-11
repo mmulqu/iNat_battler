@@ -3,6 +3,7 @@
   "main": "src/index.js",
   "compatibility_date": "2026-05-03",
   "vars": {
+    "PUBLIC_BASE_URL": "https://inat-battler.intrinsic3141.workers.dev",
     "MOVE_MODEL": "gpt-5.4-nano",
     "OAUTH_SCOPE": "atproto repo:app.bsky.feed.post?action=create",
     "DISCORD_QA_CHANNEL_ID": "1514221998077902870",
