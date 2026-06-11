@@ -1,16 +1,16 @@
 const DEFAULT_STATS = {
   passerine_bird: { vigor: 42, strike: 42, guard: 34, tempo: 68, sense: 52 },
-  raptor_bird: { vigor: 54, strike: 72, guard: 44, tempo: 64, sense: 58 },
+  raptor_bird: { vigor: 54, strike: 66, guard: 44, tempo: 56, sense: 54 },
   waterbird: { vigor: 58, strike: 48, guard: 52, tempo: 44, sense: 48 },
   insect: { vigor: 34, strike: 46, guard: 32, tempo: 66, sense: 48 },
   moth_butterfly: { vigor: 32, strike: 34, guard: 28, tempo: 60, sense: 66 },
   dragonfly: { vigor: 38, strike: 64, guard: 34, tempo: 82, sense: 56 },
   bee_wasp_ant: { vigor: 36, strike: 58, guard: 38, tempo: 62, sense: 52 },
-  plant_herb: { vigor: 52, strike: 38, guard: 48, tempo: 24, sense: 60 },
-  tree_shrub: { vigor: 76, strike: 42, guard: 70, tempo: 16, sense: 52 },
-  grass_sedge: { vigor: 48, strike: 34, guard: 44, tempo: 32, sense: 54 },
-  fern: { vigor: 50, strike: 36, guard: 46, tempo: 28, sense: 58 },
-  fungus: { vigor: 62, strike: 38, guard: 58, tempo: 18, sense: 68 },
+  plant_herb: { vigor: 60, strike: 42, guard: 52, tempo: 24, sense: 64 },
+  tree_shrub: { vigor: 72, strike: 42, guard: 62, tempo: 16, sense: 52 },
+  grass_sedge: { vigor: 56, strike: 40, guard: 50, tempo: 32, sense: 54 },
+  fern: { vigor: 58, strike: 40, guard: 50, tempo: 28, sense: 62 },
+  fungus: { vigor: 54, strike: 38, guard: 54, tempo: 18, sense: 64 },
   mammal: { vigor: 58, strike: 52, guard: 46, tempo: 58, sense: 50 },
   amphibian: { vigor: 46, strike: 42, guard: 38, tempo: 48, sense: 62 },
   reptile: { vigor: 58, strike: 52, guard: 62, tempo: 38, sense: 48 },
@@ -22,22 +22,23 @@ const DEFAULT_STATS = {
 const MOVE_LIBRARY = {
   jab: { id: "jab", name: "Jab", type: "Urban", category: "physical", power: 28, accuracy: 96, description: "A quick close-range strike." },
   peck: { id: "peck", name: "Peck", type: "Sky", category: "physical", power: 34, accuracy: 95, description: "A sharp beak jab." },
-  wing_flick: { id: "wing_flick", name: "Wing Flick", type: "Sky", category: "physical", power: 38, accuracy: 92, priority: 1, description: "A fast wing-assisted strike." },
+  wing_flick: { id: "wing_flick", name: "Wing Flick", type: "Sky", category: "physical", power: 26, accuracy: 92, priority: 1, description: "A fast wing-assisted strike." },
   crumb_rush: { id: "crumb_rush", name: "Crumb Rush", type: "Urban", category: "physical", power: 42, accuracy: 90, description: "A scrappy urban dash attack." },
-  flock_burst: { id: "flock_burst", name: "Flock Burst", type: "Swarm", category: "special", power: 48, accuracy: 88, effect: { kind: "debuff", stat: "sense", amount: 1 }, description: "A confusing burst of echoing wings." },
+  flock_burst: { id: "flock_burst", name: "Flock Burst", type: "Swarm", category: "special", power: 42, accuracy: 88, effect: { kind: "debuff", stat: "sense", amount: 1 }, description: "A confusing burst of echoing wings." },
   dust_bath: { id: "dust_bath", name: "Dust Bath", type: "Urban", category: "status", power: 0, accuracy: 100, effect: { kind: "buff", stat: "guard", amount: 1 }, description: "Raises Guard with a gritty dust cloud." },
   sting: { id: "sting", name: "Sting", type: "Venom", category: "physical", power: 40, accuracy: 92, effect: { kind: "status", status: "marked", chance: 25 }, description: "A venom-touched strike." },
   pollen_pulse: { id: "pollen_pulse", name: "Pollen Pulse", type: "Bloom", category: "special", power: 36, accuracy: 95, effect: { kind: "debuff", stat: "tempo", amount: 1 }, description: "A soft burst of pollen slows the target." },
   vine_lash: { id: "vine_lash", name: "Vine Lash", type: "Bloom", category: "physical", power: 42, accuracy: 90, description: "A flexible plant strike." },
   sunroot: { id: "sunroot", name: "Sunroot", type: "Sun", category: "status", power: 0, accuracy: 100, effect: { kind: "heal", amountPct: 18 }, description: "Recovers a little HP in sunlight." },
   spore_puff: { id: "spore_puff", name: "Spore Puff", type: "Fungus", category: "special", power: 34, accuracy: 92, effect: { kind: "status", status: "stunned", chance: 18 }, description: "A puff of spores may stun." },
-  heartrot: { id: "heartrot", name: "Heartrot", type: "Decay", category: "special", power: 46, accuracy: 86, effect: { kind: "debuff", stat: "guard", amount: 1 }, description: "Decay magic that weakens defenses." },
+  heartrot: { id: "heartrot", name: "Heartrot", type: "Decay", category: "special", power: 40, accuracy: 86, effect: { kind: "debuff", stat: "guard", amount: 1 }, description: "Decay magic that weakens defenses." },
   shell_guard: { id: "shell_guard", name: "Shell Guard", type: "Stone", category: "status", power: 0, accuracy: 100, effect: { kind: "buff", stat: "guard", amount: 2 }, description: "Raises Guard sharply." },
   stone_bump: { id: "stone_bump", name: "Stone Bump", type: "Stone", category: "physical", power: 40, accuracy: 92, description: "A heavy, grounded hit." },
   night_feint: { id: "night_feint", name: "Night Feint", type: "Night", category: "special", power: 40, accuracy: 92, effect: { kind: "debuff", stat: "sense", amount: 1 }, description: "A shadowy misdirection." },
   wetland_surge: { id: "wetland_surge", name: "Wetland Surge", type: "Wetland", category: "special", power: 42, accuracy: 90, description: "A rush of marsh energy." },
   burrow_trip: { id: "burrow_trip", name: "Burrow Trip", type: "Burrow", category: "physical", power: 36, accuracy: 94, effect: { kind: "debuff", stat: "tempo", amount: 1 }, description: "A low strike that slows the foe." },
-  chorus_call: { id: "chorus_call", name: "Chorus Call", type: "Voice", category: "status", power: 0, accuracy: 100, effect: { kind: "buff", stat: "sense", amount: 1 }, description: "A call that focuses the team spirit." }
+  chorus_call: { id: "chorus_call", name: "Chorus Call", type: "Voice", category: "status", power: 0, accuracy: 100, effect: { kind: "buff", stat: "sense", amount: 1 }, description: "A call that focuses the team spirit." },
+  seed_volley: { id: "seed_volley", name: "Seed Volley", type: "Meadow", category: "special", power: 40, accuracy: 92, description: "A scattering burst of hard seeds." }
 };
 
 const BODY_MOVES = {
@@ -48,9 +49,9 @@ const BODY_MOVES = {
   moth_butterfly: ["pollen_pulse", "wing_flick", "night_feint", "flock_burst"],
   dragonfly: ["wing_flick", "wetland_surge", "jab", "night_feint"],
   bee_wasp_ant: ["sting", "pollen_pulse", "jab", "flock_burst"],
-  plant_herb: ["vine_lash", "pollen_pulse", "sunroot", "dust_bath"],
+  plant_herb: ["vine_lash", "seed_volley", "sunroot", "pollen_pulse"],
   tree_shrub: ["vine_lash", "sunroot", "shell_guard", "heartrot"],
-  grass_sedge: ["vine_lash", "pollen_pulse", "wetland_surge", "sunroot"],
+  grass_sedge: ["vine_lash", "seed_volley", "wetland_surge", "sunroot"],
   fern: ["vine_lash", "night_feint", "sunroot", "dust_bath"],
   fungus: ["spore_puff", "heartrot", "night_feint", "shell_guard"],
   mammal: ["jab", "burrow_trip", "dust_bath", "crumb_rush"],
@@ -76,7 +77,7 @@ const TYPE_MOVES = {
   Sun: ["sunroot"],
   Frost: ["night_feint"],
   Wood: ["vine_lash"],
-  Meadow: ["pollen_pulse"],
+  Meadow: ["seed_volley", "pollen_pulse"],
   Voice: ["chorus_call"]
 };
 
@@ -88,23 +89,33 @@ const ROLE_MOVES = {
   trickster: ["night_feint", "dust_bath", "burrow_trip"]
 };
 
+// Attacker-keyed multipliers: TYPE_CHART[attackType][defenderType].
+// Built around teachable triangles (strong 1.5 / resisted 0.65, mids 1.3/0.8):
+//   Sky > Bloom > Stone > Sky
+//   Sun > Fungus > Wood > Sun
+//   Venom > Swarm > Meadow > Venom
+//   Night > Voice > Urban > Night
+//   Sky > Burrow > Urban  (and Burrow hides from Sky? no - Sky dives on Burrow)
+//   Wetland > Stone, Sun > Wetland-ish via Bloom
+// Every type keeps at least one 1.3+ attack and at least one type that hits
+// it for 1.3+. No mutual super-effective pairs (audited by scripts/simulate.mjs).
 const TYPE_CHART = {
-  Sky: { Burrow: 1.35, Bloom: 1.25, Swarm: 1.2, Stone: 0.75, Night: 0.85, Frost: 0.9 },
-  Urban: { Swarm: 1.25, Burrow: 1.2, Meadow: 1.1, Decay: 0.8, Wood: 0.85, Wetland: 0.9 },
-  Wetland: { Stone: 1.25, Burrow: 1.2, Sun: 0.8, Frost: 0.85 },
-  Bloom: { Stone: 1.25, Burrow: 1.25, Venom: 0.75, Frost: 0.75, Urban: 0.85, Decay: 0.9 },
-  Venom: { Bloom: 1.35, Swarm: 1.25, Fungus: 0.8, Stone: 0.75, Decay: 0.85, Meadow: 1.15 },
-  Decay: { Bloom: 1.25, Wood: 1.25, Fungus: 0.9, Sun: 0.75, Frost: 0.85 },
-  Fungus: { Bloom: 1.15, Decay: 1.1, Wood: 1.2, Sun: 0.75, Venom: 0.8 },
-  Stone: { Sky: 1.25, Venom: 1.15, Wetland: 0.75, Bloom: 0.85, Wood: 0.9 },
-  Burrow: { Urban: 1.15, Stone: 0.85, Sky: 0.75, Sun: 0.9 },
-  Night: { Sky: 1.15, Bloom: 1.15, Voice: 1.15, Sun: 0.7, Urban: 0.85 },
-  Swarm: { Bloom: 1.2, Urban: 1.1, Sky: 0.75, Venom: 0.75, Frost: 0.8 },
-  Sun: { Fungus: 1.3, Decay: 1.2, Night: 1.25, Wetland: 0.85, Frost: 1.15 },
-  Frost: { Bloom: 1.25, Swarm: 1.2, Wetland: 1.1, Sun: 0.75 },
-  Wood: { Urban: 0.85, Decay: 0.75, Sun: 1.05, Fungus: 0.85 },
-  Meadow: { Urban: 0.9, Swarm: 0.95, Bloom: 1.05, Sky: 0.9 },
-  Voice: { Night: 1.1, Swarm: 1.1, Stone: 0.85, Urban: 1.05 }
+  Sky: { Bloom: 1.5, Burrow: 1.5, Swarm: 1.3, Stone: 0.65, Night: 0.8, Voice: 0.8 },
+  Urban: { Night: 1.5, Swarm: 1.3, Fungus: 1.3, Meadow: 0.8, Burrow: 0.65, Decay: 0.8, Voice: 0.65 },
+  Wetland: { Stone: 1.5, Sun: 1.3, Burrow: 1.2, Bloom: 0.8, Frost: 0.65 },
+  Bloom: { Stone: 1.5, Sun: 1.3, Wetland: 1.2, Venom: 0.65, Sky: 0.65, Frost: 0.8 },
+  Venom: { Swarm: 1.5, Bloom: 1.3, Voice: 1.2, Meadow: 0.65, Fungus: 0.8, Stone: 0.65 },
+  Decay: { Wood: 1.5, Bloom: 1.3, Urban: 1.2, Sun: 0.65, Frost: 0.8 },
+  Fungus: { Wood: 1.5, Decay: 1.3, Bloom: 1.2, Sun: 0.65, Venom: 0.8 },
+  Stone: { Sky: 1.5, Venom: 1.3, Frost: 1.2, Wetland: 0.65, Fungus: 0.8, Burrow: 0.8 },
+  Burrow: { Urban: 1.5, Stone: 1.3, Venom: 1.2, Sky: 0.65, Wetland: 0.8 },
+  Night: { Voice: 1.5, Sky: 1.3, Meadow: 1.2, Sun: 0.65, Urban: 0.65 },
+  Swarm: { Meadow: 1.5, Bloom: 1.3, Fungus: 1.3, Wetland: 1.2, Sky: 0.65, Venom: 0.65, Urban: 0.8 },
+  Sun: { Fungus: 1.5, Night: 1.3, Decay: 1.3, Wetland: 0.8, Stone: 0.8 },
+  Frost: { Wetland: 1.5, Bloom: 1.3, Swarm: 1.2, Sun: 0.65, Stone: 0.8 },
+  Wood: { Sun: 1.5, Urban: 1.3, Stone: 1.2, Decay: 0.65, Fungus: 0.65 },
+  Meadow: { Venom: 1.5, Burrow: 1.3, Urban: 1.2, Swarm: 0.65, Night: 0.8 },
+  Voice: { Urban: 1.5, Stone: 1.3, Swarm: 1.2, Night: 0.65, Sky: 0.8 }
 };
 
 const NPC_TAXA = {
@@ -259,14 +270,73 @@ export function chooseNpcMove(state, difficulty, rng) {
   return scored[0].move.id;
 }
 
+function performSwitch(state, team, index, label) {
+  const target = team.creatures[index];
+  if (!target || target.fainted || index === team.activeIndex) return false;
+
+  const outgoing = getActive(team);
+  team.activeIndex = index;
+  team.lastSwitchTurn = state.turn;
+  state.log.push({
+    turn: state.turn,
+    text: `${label} withdrew ${outgoing.name} and sent in ${target.name}.`
+  });
+  return true;
+}
+
+// Move-or-switch decision for the NPC side. Switches when the active
+// creature has no decent type matchup and a benched one does, with a
+// cooldown so the AI can't switch-stall.
+export function chooseNpcAction(state, difficulty, rng) {
+  const team = state.opponent;
+  const active = getActive(team);
+  const target = getActive(state.player);
+
+  const bestOffense = (creature) => {
+    const options = creature.moves
+      .filter((move) => move.category !== "status")
+      .map((move) => getTypeMultiplier(move.type, target.types));
+    return options.length ? Math.max(...options) : 0;
+  };
+
+  const bench = team.creatures
+    .map((creature, index) => ({ creature, index }))
+    .filter(({ creature, index }) => !creature.fainted && index !== team.activeIndex);
+
+  const cooledDown = (team.lastSwitchTurn ?? -10) <= state.turn - 4;
+  if (bench.length > 0 && difficulty !== "random" && difficulty !== "easy" && cooledDown) {
+    const activeBest = bestOffense(active);
+    if (activeBest <= 0.8 && active.hp > active.maxHp * 0.25) {
+      const candidate = bench
+        .map((entry) => ({ ...entry, mult: bestOffense(entry.creature) }))
+        .sort((left, right) => right.mult - left.mult)[0];
+      if (candidate && candidate.mult >= 1.2) {
+        return { kind: "switch", index: candidate.index };
+      }
+    }
+  }
+
+  return { kind: "move", moveId: chooseNpcMove(state, difficulty, rng) };
+}
+
 export function resolveTurn(state, playerAction, npcAction, rng) {
   const next = structuredClone(state);
+
+  // Switches resolve before any move; the incoming creature eats this
+  // turn's attack. That is the cost of playing around a bad matchup.
+  if (playerAction?.kind === "switch") {
+    performSwitch(next, next.player, Number(playerAction.index), next.player.name || "Player");
+  }
+  if (npcAction?.kind === "switch") {
+    performSwitch(next, next.opponent, Number(npcAction.index), next.opponent.name || "Opponent");
+  }
+
   const playerCreature = getActive(next.player);
   const npcCreature = getActive(next.opponent);
   const actions = [
     { actor: playerCreature, target: npcCreature, action: playerAction },
     { actor: npcCreature, target: playerCreature, action: npcAction }
-  ];
+  ].filter((item) => item.action?.kind !== "switch");
 
   actions.sort((left, right) => {
     const moveLeft = left.actor.moves.find((move) => move.id === left.action.moveId);
@@ -281,6 +351,8 @@ export function resolveTurn(state, playerAction, npcAction, rng) {
 
     if (hasStatus(item.actor, "stunned")) {
       removeStatus(item.actor, "stunned");
+      const meta = item.actor.statusMeta ?? (item.actor.statusMeta = {});
+      meta.stunImmuneUntilTurn = next.turn + 2;
       next.log.push({ turn: next.turn, text: `${item.actor.name} is stunned and cannot move.` });
       continue;
     }
@@ -398,14 +470,16 @@ function inferTypes(taxon, bodyPlan) {
   if (["reptile", "mollusk"].includes(bodyPlan)) add("Stone");
   if (bodyPlan === "tree_shrub") add("Wood");
 
-  if (/urban|house|city|pavement|sidewalk|rock pigeon|starling|sparrow|dandelion|squirrel|rat|mouse/.test(name)) add("Urban");
-  if (/venom|poison|stinging|nettles|wasp|bee|snake|milkweed/.test(name)) add("Venom");
-  if (/night|nocturnal|owl|bat|moth|moon/.test(name)) add("Night");
-  if (/sun|sunflower|daisy|goldenrod|aster|meadow|prairie|clover/.test(name)) add("Sun");
-  if (/swarm|flock|ant|bee|wasp|termite|sparrow|starling|blackbird/.test(name)) add("Swarm");
-  if (/burrow|groundhog|mole|chipmunk|rabbit|toad|salamander/.test(name)) add("Burrow");
-  if (/frost|snow|winter|ice/.test(name)) add("Frost");
-  if (/warbler|sparrow|robin|thrush|wren|oriole|blackbird|starling|frog|toad/.test(name)) add("Voice");
+  // Word boundaries matter: bare substrings mistype species (e.g. Buteo
+  // jama-ICE-nsis would become Frost, "aster" hides inside many epithets).
+  if (/\b(urban|house|city|pavement|sidewalk|rock pigeon|starling|sparrow|dandelion|squirrel|rat|mouse)\b/.test(name)) add("Urban");
+  if (/\b(venom|venomous|poison|poisonous|stinging|nettles?|wasp|bee|snake|milkweed)\b/.test(name)) add("Venom");
+  if (/\b(night|nocturnal|owl|bat|moth|moon)\b/.test(name)) add("Night");
+  if (/\b(sun|sunflower|daisy|goldenrod|aster|meadow|prairie|clover)\b/.test(name)) add("Sun");
+  if (/\b(swarm|flock|ant|bee|wasp|termite|sparrow|starling|blackbird)\b/.test(name)) add("Swarm");
+  if (/\b(burrow|burrowing|groundhog|mole|chipmunk|rabbit|toad|salamander)\b/.test(name)) add("Burrow");
+  if (/\b(frost|snow|snowy|winter|ice)\b/.test(name)) add("Frost");
+  if (/\b(warbler|sparrow|robin|thrush|wren|oriole|blackbird|starling|frog|toad)\b/.test(name)) add("Voice");
 
   for (const fallback of [bodyPlan === "unknown" ? "Meadow" : "Urban", "Meadow", "Sky"]) {
     if (types.length >= 2) break;
@@ -464,17 +538,26 @@ function stagedStat(base, stage = 0) {
   return base / (1 + Math.abs(clamped) * 0.25);
 }
 
+// Global damage scale: tuned with scripts/simulate.mjs so 1v1 duels average
+// roughly 6-10 turns instead of 2-3 (statuses and stat stages need time to
+// matter).
+const DAMAGE_SCALE = 0.6;
+
 function estimateDamage(attacker, defender, move) {
   if (move.category === "status") return 0;
 
   const attackKey = move.category === "physical" ? "strike" : "sense";
-  const defenseKey = move.category === "physical" ? "guard" : "sense";
   const attackStat = stagedStat(attacker.stats[attackKey], attacker.statStages[attackKey] ?? 0);
-  const defenseStat = stagedStat(defender.stats[defenseKey], defender.statStages[defenseKey] ?? 0);
+  // Special defense blends guard and sense so high-sense creatures don't both
+  // hit hard AND wall special attacks with the same stat.
+  const defenseStat = move.category === "physical"
+    ? stagedStat(defender.stats.guard, defender.statStages.guard ?? 0)
+    : (stagedStat(defender.stats.guard, defender.statStages.guard ?? 0) +
+       stagedStat(defender.stats.sense, defender.statStages.sense ?? 0)) / 2;
   const sameTypeBonus = attacker.types.includes(move.type) ? 1.15 : 1;
   const typeMultiplier = getTypeMultiplier(move.type, defender.types);
   const bondNudge = 1 + Math.min(0.08, attacker.bondLevel * 0.002);
-  const base = move.power * (attackStat / Math.max(1, defenseStat)) * sameTypeBonus * typeMultiplier * bondNudge;
+  const base = move.power * (attackStat / Math.max(1, defenseStat)) * sameTypeBonus * typeMultiplier * bondNudge * DAMAGE_SCALE;
 
   return Math.max(1, Math.floor(base));
 }
@@ -493,7 +576,12 @@ function applyMove(state, attacker, defender, move, rng) {
   }
 
   if (move.category !== "status") {
-    let damage = estimateDamage(attacker, defender, move);
+    // Variance keeps repeated matchups from feeling fully scripted; the
+    // fatigue ramp ensures heal/tank stalls always converge (battles past
+    // turn 20 escalate 6% per turn).
+    const variance = 0.9 + rng() * 0.15;
+    const fatigue = 1 + Math.max(0, (state.turn ?? 0) - 20) * 0.06;
+    let damage = Math.max(1, Math.floor(estimateDamage(attacker, defender, move) * variance * fatigue));
     let hits = 1;
 
     if (move.effect?.kind === "multihit") {
@@ -514,12 +602,20 @@ function applyMove(state, attacker, defender, move, rng) {
       state.log.push({ turn: state.turn, text: `${defender.name}'s shield softened the blow.` });
     }
 
+    const effectiveness = getTypeMultiplier(move.type, defender.types);
     defender.hp -= damage;
+    attacker.damageDealt = (attacker.damageDealt ?? 0) + damage;
+    defender.damageTaken = (defender.damageTaken ?? 0) + damage;
     state.log.push({
       turn: state.turn,
       text: `${attacker.name} used ${move.name} and dealt ${damage} damage.`,
-      data: { damage, moveId: move.id }
+      data: { damage, moveId: move.id, effectiveness }
     });
+    if (effectiveness >= 1.2) {
+      state.log.push({ turn: state.turn, text: "It's super effective!" });
+    } else if (effectiveness <= 0.85) {
+      state.log.push({ turn: state.turn, text: "It's not very effective…" });
+    }
     if (hits > 1) {
       state.log.push({ turn: state.turn, text: `It struck ${hits} times.` });
     }
@@ -568,6 +664,10 @@ function applyEffect(state, attacker, defender, move, rng) {
   if (effect.kind === "status" && rng() * 100 <= (effect.chance ?? 100)) {
     // Shields protect the user; every other status afflicts the target.
     const target = effect.status === "shielded" ? attacker : defender;
+    if (effect.status === "stunned" && (target.statusMeta?.stunImmuneUntilTurn ?? 0) > state.turn) {
+      state.log.push({ turn: state.turn, text: `${target.name} shrugged off the stun.` });
+      return;
+    }
     if (!target.statuses.includes(effect.status)) {
       target.statuses.push(effect.status);
       if (effect.status === "poisoned") {

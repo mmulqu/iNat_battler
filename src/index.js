@@ -1,9 +1,11 @@
 import {
+  chooseNpcAction,
   chooseNpcMove,
   createBattleCreature,
   createGenome,
   createSeededRng,
-  resolveTurn
+  resolveTurn,
+  TYPE_CHART
 } from "./game.js";
 
 import {
@@ -553,9 +555,10 @@ async function routeRequest(request, env, ctx) {
     const userId = String(payload.userId ?? "");
     const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
     const npcTemplate = String(payload.npcTemplate ?? "backyard_beginner");
+    const difficulty = ["easy", "normal", "hard"].includes(payload.difficulty) ? payload.difficulty : "normal";
 
     if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
-    return jsonResponse(await startNpcBattle(env, userId, taxonIds, npcTemplate));
+    return jsonResponse(await startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty));
   }
 
   if (request.method === "POST" && url.pathname === "/api/battles/demo/start") {
@@ -574,7 +577,8 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await submitBattleMove(
       env,
       decodeURIComponent(battleActionMatch[1]),
-      String(payload.moveId ?? "")
+      String(payload.moveId ?? ""),
+      payload.switchIndex
     ));
   }
 
@@ -4156,7 +4160,7 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
   });
 }
 
-async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
+async function startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty = "normal") {
   const creatures = await loadUserBattleCreatures(env, userId, taxonIds, "p");
   const cleanTaxonIds = creatures.map((creature) => Number(creature.taxonId)).filter(Number.isFinite);
   const opponent = await createRandomReadyNpcTeam(env, cleanTaxonIds, 5);
@@ -4167,11 +4171,12 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate) {
   const state = {
     battleId,
     mode: "npc",
+    difficulty,
     seed,
     turn: 1,
     player: { userId, name: "Your Team", activeIndex: 0, creatures },
     opponent,
-    log: [{ turn: 0, text: `${opponent.name} challenges your field team.` }],
+    log: [{ turn: 0, text: `${opponent.name} challenges your field team. (${difficulty})` }],
     status: "active"
   };
 
@@ -4380,26 +4385,32 @@ async function getBattle(env, battleId) {
   return row?.state_json ? JSON.parse(row.state_json) : null;
 }
 
-async function submitBattleMove(env, battleId, moveId) {
-  if (!moveId) throw new Error("Missing moveId");
-
+async function submitBattleMove(env, battleId, moveId, switchIndex = null) {
   const state = await getBattle(env, battleId);
   if (!state) throw new Error("Battle not found");
   if (state.status !== "active") return state;
 
-  const active = state.player.creatures[state.player.activeIndex];
-  if (!active.moves.some((move) => move.id === moveId)) {
-    throw new Error("Move is not available to the active creature");
+  let playerAction;
+  if (switchIndex !== null && switchIndex !== undefined && switchIndex !== "") {
+    const index = Number.parseInt(String(switchIndex), 10);
+    const target = state.player.creatures[index];
+    if (!Number.isFinite(index) || !target) throw new Error("Invalid switch target");
+    if (target.fainted) throw new Error("That creature has fainted");
+    if (index === state.player.activeIndex) throw new Error("That creature is already active");
+    playerAction = { kind: "switch", index };
+  } else {
+    if (!moveId) throw new Error("Missing moveId");
+    const active = state.player.creatures[state.player.activeIndex];
+    if (!active.moves.some((move) => move.id === moveId)) {
+      throw new Error("Move is not available to the active creature");
+    }
+    playerAction = { kind: "move", moveId };
   }
 
+  const difficulty = ["easy", "normal", "hard"].includes(state.difficulty) ? state.difficulty : "normal";
   const rng = createSeededRng(`${state.seed}:${state.turn}`);
-  const npcMoveId = chooseNpcMove(state, "normal", rng);
-  const next = resolveTurn(
-    state,
-    { kind: "move", moveId },
-    { kind: "move", moveId: npcMoveId },
-    rng
-  );
+  const npcAction = chooseNpcAction(state, difficulty, rng);
+  const next = resolveTurn(state, playerAction, npcAction, rng);
   const now = new Date().toISOString();
 
   await env.DB.prepare(`
@@ -8838,6 +8849,36 @@ function renderAppHtml() {
       background: #e4f2ef;
     }
 
+    button.bench-slot.switchable {
+      cursor: pointer;
+      opacity: 0.9;
+      font: inherit;
+      font-size: 0.72rem;
+      font-weight: 800;
+    }
+
+    button.bench-slot.switchable:hover {
+      border-color: var(--teal);
+      background: #e4f2ef;
+      opacity: 1;
+    }
+
+    .bench-hp {
+      display: block;
+      color: var(--muted);
+      font-size: 0.66rem;
+    }
+
+    .team-picker select {
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 10px;
+      background: var(--surface);
+      color: var(--ink);
+      font: inherit;
+    }
+
     .moves {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -8853,6 +8894,37 @@ function renderAppHtml() {
       background: #edf1ec;
       border: 1px solid var(--line);
       font-weight: 800;
+      text-align: left;
+    }
+
+    .move-button.eff-strong {
+      border-color: #2e9e4f;
+      box-shadow: inset 3px 0 0 #2e9e4f;
+    }
+
+    .move-button.eff-weak {
+      border-color: #c0593a;
+      box-shadow: inset 3px 0 0 #c0593a;
+    }
+
+    .move-button .eff-tag {
+      font-weight: 900;
+    }
+
+    .move-button.eff-strong .eff-tag {
+      color: #2e9e4f;
+    }
+
+    .move-button.eff-weak .eff-tag {
+      color: #c0593a;
+    }
+
+    .overlay-contrib {
+      display: grid;
+      gap: 3px;
+      margin: 10px 0;
+      font-size: 0.8rem;
+      color: var(--muted);
       text-align: left;
     }
 
@@ -9013,6 +9085,11 @@ function renderAppHtml() {
             </div>
             <button class="secondary" id="clearTeamButton" type="button" disabled>Clear</button>
           </div>
+          <select id="npcDifficultySelect" aria-label="NPC difficulty">
+            <option value="easy">Easy NPC</option>
+            <option value="normal">Normal NPC</option>
+            <option value="hard">Hard NPC</option>
+          </select>
           <button class="primary" id="startBattleButton" type="button" disabled>Battle NPC</button>
         </div>
         <button class="secondary" id="queueMoreButton" type="button" disabled>Queue More</button>
@@ -9201,6 +9278,14 @@ function renderAppHtml() {
     const LAST_BATCH_STORAGE_KEY = "inatBattler:lastBatch";
     const ROSTER_PAGE_SIZE = 100;
     ${placeholderFor.toString()}
+    const TYPE_CHART = ${JSON.stringify(TYPE_CHART)};
+
+    function typeMultiplierFor(moveType, defenderTypes) {
+      return (defenderTypes || []).reduce(
+        (multiplier, defenderType) => multiplier * (TYPE_CHART[moveType]?.[defenderType] ?? 1),
+        1
+      );
+    }
     const BATCH_POLL_MS = 60000;
     const DEV_QUEUE_MORE_LIMIT = 100;
     const DEV_BATCH_SUBMIT_LIMIT = 100;
@@ -9294,6 +9379,7 @@ function renderAppHtml() {
       teamCount: document.getElementById("teamCount"),
       clearTeamButton: document.getElementById("clearTeamButton"),
       startBattleButton: document.getElementById("startBattleButton"),
+      npcDifficultySelect: document.getElementById("npcDifficultySelect"),
       statusLine: document.getElementById("statusLine"),
       accountLabel: document.getElementById("accountLabel"),
       taxaCount: document.getElementById("taxaCount"),
@@ -9643,6 +9729,13 @@ function renderAppHtml() {
         return;
       }
 
+      const benchButton = event.target.closest("[data-switch-index]");
+      if (benchButton) {
+        if (state.battleBusy || state.battlePhase === "intro") return;
+        await submitBattleMove(null, Number(benchButton.getAttribute("data-switch-index")));
+        return;
+      }
+
       const button = event.target.closest("[data-move-id]");
       if (!button || state.battleBusy || state.battlePhase === "intro") return;
       await submitBattleMove(button.getAttribute("data-move-id"));
@@ -9748,6 +9841,11 @@ function renderAppHtml() {
       state.recentZoom = Number(els.recentZoomInput.value) || 150;
       localStorage.setItem("inatBattler:recentZoom", String(state.recentZoom));
       els.recentSpritesPanel.style.setProperty("--tile-min", state.recentZoom + "px");
+    });
+
+    els.npcDifficultySelect.value = localStorage.getItem("inatBattler:npcDifficulty") || "normal";
+    els.npcDifficultySelect.addEventListener("change", () => {
+      localStorage.setItem("inatBattler:npcDifficulty", els.npcDifficultySelect.value);
     });
 
     els.rosterZoomInput.value = String(state.rosterZoom);
@@ -11988,7 +12086,12 @@ function renderAppHtml() {
         const battle = await apiFetch("/api/battles/npc/start", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ userId: state.userId, taxonIds, npcTemplate: "random_ready" })
+          body: JSON.stringify({
+            userId: state.userId,
+            taxonIds,
+            npcTemplate: "random_ready",
+            difficulty: els.npcDifficultySelect.value || "normal"
+          })
         });
 
         setStatus("NPC battle ready");
@@ -12032,14 +12135,14 @@ function renderAppHtml() {
       }
     }
 
-    async function submitBattleMove(moveId) {
-      if (!state.battle || !moveId || state.battleBusy) return;
+    async function submitBattleMove(moveId, switchIndex) {
+      const isSwitch = switchIndex !== undefined && switchIndex !== null;
+      if (!state.battle || (!moveId && !isSwitch) || state.battleBusy) return;
 
       const prev = state.battle;
       const active = getActiveCreature(prev.player);
-      const move = active.moves.find((candidate) => candidate.id === moveId);
       state.battleBusy = true;
-      state.battleAnimation = moveAnimClassFor(active, moveId);
+      state.battleAnimation = isSwitch ? "anim-idle" : moveAnimClassFor(active, moveId);
       playSfx("click");
       renderBattle();
 
@@ -12047,7 +12150,7 @@ function renderAppHtml() {
         const next = await apiFetch("/api/battles/" + encodeURIComponent(prev.battleId) + "/action", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ moveId })
+          body: JSON.stringify(isSwitch ? { switchIndex } : { moveId })
         });
         await playTurnEvents(prev, next);
         state.battle = next;
@@ -12549,11 +12652,25 @@ function renderAppHtml() {
     function renderResultOverlay(battle) {
       const title = battle.status === "won" ? "Victory!" : battle.status === "lost" ? "Defeat" : "Draw";
       const cls = battle.status === "won" ? "win" : battle.status === "lost" ? "lose" : "";
+      const contributions = battle.player.creatures
+        .map((creature) => ({
+          name: creature.name,
+          dealt: Number(creature.damageDealt || 0),
+          taken: Number(creature.damageTaken || 0)
+        }))
+        .filter((row) => row.dealt > 0 || row.taken > 0)
+        .sort((a, b) => b.dealt - a.dealt);
+      const contribHtml = contributions.length
+        ? '<div class="overlay-contrib">' + contributions.map((row) =>
+            '<div><strong>' + escapeHtml(row.name) + '</strong> &mdash; ' + row.dealt + ' dmg dealt / ' + row.taken + ' taken</div>'
+          ).join("") + '</div>'
+        : "";
       return '<div class="battle-overlay">' +
         '<div class="overlay-card">' +
           '<div class="overlay-title ' + cls + '">' + title + '</div>' +
           '<div class="overlay-sub">' + escapeHtml(battle.player.name || "Your Team") + " vs " + escapeHtml(battle.opponent.name || "Opponent") +
             " &middot; " + Math.max(1, Number(battle.turn || 1) - 1) + " turns</div>" +
+          contribHtml +
           '<button class="primary" type="button" data-battle-exit>Back to Roster</button>' +
         '</div>' +
       '</div>';
@@ -12569,13 +12686,18 @@ function renderAppHtml() {
       const playerActive = getActiveCreature(battle.player);
       const opponentActive = getActiveCreature(battle.opponent);
       const moveButtons = battle.status === "active"
-        ? playerActive.moves.map((move) => (
-            '<button class="move-button' + (move.signature ? " signature" : "") + '" type="button" data-move-id="' + escapeAttr(move.id) + '" ' +
+        ? playerActive.moves.map((move) => {
+            const eff = move.category === "status" ? 1 : typeMultiplierFor(move.type, opponentActive.types);
+            const effClass = eff >= 1.2 ? " eff-strong" : eff <= 0.85 ? " eff-weak" : "";
+            const effTag = eff >= 1.2 || eff <= 0.85
+              ? ' <span class="eff-tag">x' + eff.toFixed(2).replace(/0+$/, "").replace(/\.$/, "") + '</span>'
+              : "";
+            return '<button class="move-button' + (move.signature ? " signature" : "") + effClass + '" type="button" data-move-id="' + escapeAttr(move.id) + '" ' +
               (move.flavor ? 'title="' + escapeAttr(move.flavor) + '" ' : "") + (state.battleBusy ? "disabled" : "") + '>' +
               escapeHtml(move.name) + (move.signature ? ' <span class="sig-star">★</span>' : "") +
-              '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + '</span>' +
-            '</button>'
-          )).join("")
+              '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + effTag + '</span>' +
+            '</button>';
+          }).join("")
         : '<button class="move-button" type="button" disabled>Battle ' + escapeHtml(battle.status) + '</button>';
       const recentLog = battle.log.slice(-8).reverse().map((entry) => (
         '<div>Turn ' + Number(entry.turn || 0) + ': ' + escapeHtml(entry.text) + '</div>'
@@ -12613,15 +12735,30 @@ function renderAppHtml() {
       const sprite = creature.spriteUrl
         ? renderSheetSprite(creature.spriteUrl, animation + (creature.fainted ? " fainted" : ""))
         : '<div class="dummy-sprite' + (creature.fainted ? " fainted" : "") + '">Dummy</div>';
-      const bench = team.creatures.map((member, index) => (
-        '<div class="bench-slot ' + (index === team.activeIndex ? "active" : "") + (member.fainted ? '" style="opacity:0.35' : "") + '">' + escapeHtml(member.name) + '</div>'
-      )).join("");
+      const battleActive = state.battle && state.battle.status === "active";
+      const bench = team.creatures.map((member, index) => {
+        const isActive = index === team.activeIndex;
+        const memberHpPct = member.maxHp ? Math.max(0, Math.round((member.hp / member.maxHp) * 100)) : 0;
+        const canSwitch = side === "player" && battleActive && !member.fainted && !isActive;
+        if (canSwitch) {
+          return '<button type="button" class="bench-slot switchable" data-switch-index="' + index + '" ' +
+            (state.battleBusy ? "disabled " : "") + 'title="Switch in (the opponent still moves this turn)">' +
+            escapeHtml(member.name) +
+            '<span class="bench-hp">' + memberHpPct + '% HP</span>' +
+          '</button>';
+        }
+        return '<div class="bench-slot ' + (isActive ? "active" : "") + (member.fainted ? '" style="opacity:0.35' : "") + '">' +
+          escapeHtml(member.name) +
+          (isActive ? "" : '<span class="bench-hp">' + memberHpPct + '% HP</span>') +
+        '</div>';
+      }).join("");
 
       return '<article class="combatant ' + side + '">' +
         '<div class="plate">' +
           '<div class="combatant-head">' +
             '<div class="combatant-name">' + escapeHtml(creature.name) +
               (Number(creature.trainingLevel) > 0 ? ' <span class="lv-chip">Lv ' + Number(creature.trainingLevel) + '</span>' : '') +
+              (Number(creature.trainingBuffPct) > 0 ? ' <span class="lv-chip">+' + Math.round(Number(creature.trainingBuffPct) * 100) + '% mastery</span>' : '') +
             '</div>' +
             '<div class="combatant-role">' + escapeHtml((creature.types || []).join(" / ")) + '</div>' +
           '</div>' +
