@@ -8315,10 +8315,42 @@ function renderAppHtml() {
       margin-bottom: 4%;
     }
 
+    /* Movement arcs use the standalone translate property so they can
+       run alongside spriteFrames (background-position), hitFlash (filter),
+       and faintDrop (transform) without clobbering each other. The lunge
+       distance and arc height come from CSS vars randomized per attack. */
+    .combatant-sprite .sheet-sprite.lunge {
+      animation:
+        spriteFrames 900ms steps(1, end) infinite,
+        lungeArc 560ms cubic-bezier(0.32, 0.05, 0.3, 1) 1;
+      z-index: 3;
+    }
+
+    .combatant-sprite .dummy-sprite.lunge {
+      animation: lungeArc 560ms cubic-bezier(0.32, 0.05, 0.3, 1) 1;
+      z-index: 3;
+    }
+
+    @keyframes lungeArc {
+      0% { translate: 0 0; }
+      38% { translate: calc(var(--lunge-x, 44px) * 0.62) calc(var(--lunge-y, -26px) - var(--arc-h, 20px)); }
+      58% { translate: var(--lunge-x, 44px) var(--lunge-y, -26px); }
+      78% { translate: calc(var(--lunge-x, 44px) * 0.3) calc(var(--lunge-y, -26px) * 0.3); }
+      100% { translate: 0 0; }
+    }
+
+    @keyframes knockBack {
+      0% { translate: 0 0; }
+      35% { translate: var(--kb-x, -14px) var(--kb-y, 6px); }
+      70% { translate: calc(var(--kb-x, -14px) * 0.35) calc(var(--kb-y, 6px) * 0.35); }
+      100% { translate: 0 0; }
+    }
+
     .sheet-sprite.hit-flash {
       animation:
         spriteFrames 900ms steps(1, end) infinite,
-        hitFlash 380ms steps(2, end) 1;
+        hitFlash 380ms steps(2, end) 1,
+        knockBack 420ms ease-out 1;
     }
 
     @keyframes hitFlash {
@@ -8328,7 +8360,9 @@ function renderAppHtml() {
     }
 
     .dummy-sprite.hit-flash {
-      animation: hitFlash 380ms steps(2, end) 1;
+      animation:
+        hitFlash 380ms steps(2, end) 1,
+        knockBack 420ms ease-out 1;
     }
 
     .sheet-sprite.fainted,
@@ -12340,7 +12374,7 @@ function renderAppHtml() {
 
         const statusMoveMatch = text.match(/^(.+) used (.+)\.$/);
         if (statusMoveMatch) {
-          triggerAttackVisual(sideForName(statusMoveMatch[1], prev), "anim-special");
+          triggerAttackVisual(sideForName(statusMoveMatch[1], prev), "anim-special", "brace");
           playSfx("status");
           await delay(420);
           continue;
@@ -12356,14 +12390,33 @@ function renderAppHtml() {
       );
     }
 
-    function triggerAttackVisual(side, animClass) {
+    function triggerAttackVisual(side, animClass, mode) {
       const el = spriteEl(side);
-      if (!el || !el.classList.contains("sheet-sprite")) return;
-      el.classList.remove("anim-idle", "anim-attack", "anim-special");
-      el.classList.add(animClass);
+      if (!el) return;
+
+      // Player sits bottom-left, opponent top-right. Attacks lunge toward
+      // the foe; defensive/status moves brace with a small back-step hop.
+      // Distance and arc height jitter so no two moves trace the same path.
+      const dir = side === "player" ? 1 : -1;
+      const jitter = (range) => (Math.random() * 2 - 1) * range;
+      if (mode === "brace") {
+        el.style.setProperty("--lunge-x", Math.round(-dir * (14 + jitter(6))) + "px");
+        el.style.setProperty("--lunge-y", Math.round(-(5 + Math.random() * 7)) + "px");
+        el.style.setProperty("--arc-h", Math.round(3 + Math.random() * 7) + "px");
+      } else {
+        el.style.setProperty("--lunge-x", Math.round(dir * (44 + jitter(14))) + "px");
+        el.style.setProperty("--lunge-y", Math.round(-dir * (24 + jitter(10))) + "px");
+        el.style.setProperty("--arc-h", Math.round(12 + Math.random() * 24) + "px");
+      }
+
+      const isSheet = el.classList.contains("sheet-sprite");
+      el.classList.remove("anim-idle", "anim-attack", "anim-special", "lunge");
+      void el.offsetWidth;
+      el.classList.add("lunge");
+      if (isSheet) el.classList.add(animClass);
       setTimeout(() => {
-        el.classList.remove("anim-attack", "anim-special");
-        el.classList.add("anim-idle");
+        el.classList.remove("anim-attack", "anim-special", "lunge");
+        if (isSheet) el.classList.add("anim-idle");
       }, 620);
     }
 
@@ -12372,10 +12425,16 @@ function renderAppHtml() {
 
       const el = spriteEl(targetSide);
       if (el) {
+        // Knocked away from the attacker, harder for bigger hits, with a
+        // little vertical jitter so each recoil reads differently.
+        const dir = targetSide === "player" ? -1 : 1;
+        const force = Math.min(1.6, 0.8 + damage / 40);
+        el.style.setProperty("--kb-x", Math.round(dir * (10 + Math.random() * 8) * force) + "px");
+        el.style.setProperty("--kb-y", Math.round(-dir * (3 + Math.random() * 7) * force) + "px");
         el.classList.remove("hit-flash");
         void el.offsetWidth;
         el.classList.add("hit-flash");
-        setTimeout(() => el.classList.remove("hit-flash"), 420);
+        setTimeout(() => el.classList.remove("hit-flash"), 460);
       }
 
       const stage = document.getElementById("battleStage");
