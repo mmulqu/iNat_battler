@@ -47,6 +47,8 @@ import {
   searchActorsTypeahead
 } from "./atproto.js";
 
+import landingHeroBattleImage from "./assets/landing-hero-battle.png";
+
 const ASSET_VERSION = 1;
 const DEFAULT_ASSET_KIND = "sprite_sheet";
 const INAT_API_BASE_URL = "https://api.inaturalist.org/v2";
@@ -197,6 +199,10 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "GET" && url.pathname === "/") {
     return htmlResponse(renderAppHtml());
+  }
+
+  if (request.method === "GET" && url.pathname === "/assets/landing-hero-battle.png") {
+    return bundledImageResponse(landingHeroBattleImage, "image/png");
   }
 
   if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/health")) {
@@ -6912,6 +6918,15 @@ function htmlResponse(html) {
   });
 }
 
+function bundledImageResponse(bytes, contentType) {
+  return new Response(bytes, {
+    headers: {
+      "content-type": contentType,
+      "cache-control": "public, max-age=31536000, immutable"
+    }
+  });
+}
+
 function corsHeaders() {
   return {
     "access-control-allow-origin": "*",
@@ -7032,6 +7047,181 @@ function renderAppHtml() {
       padding: 0 12px;
       background: var(--surface);
       color: var(--ink);
+    }
+
+    .landing {
+      display: grid;
+      gap: 28px;
+      padding: 28px 0 42px;
+    }
+
+    .landing[hidden] {
+      display: none;
+    }
+
+    .landing-hero {
+      position: relative;
+      display: grid;
+      align-items: end;
+      min-height: clamp(430px, 66vh, 680px);
+      overflow: hidden;
+      border-radius: 8px;
+      background:
+        linear-gradient(90deg, rgba(12, 21, 16, 0.78) 0%, rgba(12, 21, 16, 0.54) 36%, rgba(12, 21, 16, 0.16) 72%),
+        linear-gradient(180deg, rgba(12, 21, 16, 0.08), rgba(12, 21, 16, 0.36)),
+        url("/assets/landing-hero-battle.png") center / cover no-repeat;
+      box-shadow: 0 24px 70px rgba(22, 32, 27, 0.18);
+      isolation: isolate;
+    }
+
+    .landing-copy {
+      width: min(620px, 100%);
+      padding: clamp(26px, 6vw, 64px);
+      color: #fffaf0;
+    }
+
+    .landing-kicker {
+      margin-bottom: 12px;
+      color: #f4d487;
+      font-size: 0.78rem;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .landing h2 {
+      margin: 0;
+      max-width: 10ch;
+      color: #fffaf0;
+      font-size: clamp(2.45rem, 7vw, 5.8rem);
+      line-height: 0.94;
+      letter-spacing: 0;
+    }
+
+    .landing-lede {
+      max-width: 560px;
+      margin: 18px 0 0;
+      color: rgba(255, 250, 240, 0.9);
+      font-size: clamp(1rem, 2vw, 1.24rem);
+      line-height: 1.5;
+      font-weight: 650;
+    }
+
+    .landing-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-top: 24px;
+    }
+
+    .landing-actions .primary,
+    .landing-actions .secondary {
+      display: inline-flex;
+      align-items: center;
+      min-width: 156px;
+      justify-content: center;
+      text-decoration: none;
+    }
+
+    .landing-actions .secondary {
+      color: #fffaf0;
+      background: rgba(255, 255, 255, 0.14);
+      border-color: rgba(255, 255, 255, 0.34);
+    }
+
+    .landing-auth {
+      display: grid;
+      grid-template-columns: minmax(220px, 340px) auto;
+      gap: 8px;
+      align-items: start;
+      width: min(540px, 100%);
+      margin-top: 18px;
+    }
+
+    .landing-auth .typeahead,
+    .landing-auth input {
+      min-width: 0;
+    }
+
+    .landing-auth input {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid rgba(255, 255, 255, 0.42);
+      border-radius: 8px;
+      padding: 0 12px;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--ink);
+    }
+
+    .landing-auth-note,
+    .landing-auth .bsky-status {
+      grid-column: 1 / -1;
+    }
+
+    .landing-auth-note {
+      color: rgba(255, 250, 240, 0.82);
+      font-size: 0.86rem;
+      line-height: 1.45;
+    }
+
+    .landing-auth .bsky-status {
+      background: rgba(255, 255, 255, 0.92);
+    }
+
+    .landing-section {
+      display: grid;
+      gap: 18px;
+      padding: 8px 0;
+    }
+
+    .landing-section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+    }
+
+    .landing-section h3 {
+      margin: 0;
+      font-size: 1.12rem;
+      line-height: 1.2;
+    }
+
+    .landing-section p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .landing-steps,
+    .landing-trust {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .landing-step,
+    .landing-trust-item {
+      min-width: 0;
+      border-left: 3px solid var(--teal);
+      padding: 2px 12px 4px;
+    }
+
+    .landing-step strong,
+    .landing-trust-item strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 0.96rem;
+    }
+
+    .landing-step span,
+    .landing-trust-item span {
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.45;
     }
 
     .primary,
@@ -8981,6 +9171,15 @@ function renderAppHtml() {
         grid-template-columns: 1fr;
       }
 
+      .landing-section-head {
+        display: grid;
+      }
+
+      .landing-steps,
+      .landing-trust {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .panel {
         position: static;
       }
@@ -8996,9 +9195,33 @@ function renderAppHtml() {
       }
 
       .login,
+      .landing-auth,
       .roster-head {
         grid-template-columns: 1fr;
         display: grid;
+      }
+
+      .landing {
+        gap: 22px;
+        padding-top: 18px;
+      }
+
+      .landing-hero {
+        min-height: 520px;
+        background-position: 58% center;
+      }
+
+      .landing-copy {
+        padding: 24px;
+      }
+
+      .landing h2 {
+        max-width: 9ch;
+      }
+
+      .landing-steps,
+      .landing-trust {
+        grid-template-columns: 1fr;
       }
 
       .primary,
@@ -9083,7 +9306,71 @@ function renderAppHtml() {
       </form>
     </header>
 
-    <section class="layout">
+    <section class="landing" id="publicLanding">
+      <section class="landing-hero" aria-label="Fantasy biodiversity battle">
+        <div class="landing-copy">
+          <div class="landing-kicker">Pre-alpha creature battles from real observations</div>
+          <h2>iNat Battler</h2>
+          <p class="landing-lede">Turn your iNaturalist observations into a roster of species battlers, link them to your Bluesky identity, and challenge friends with creatures you actually found.</p>
+          <div class="landing-actions">
+            <a class="secondary" href="#how-it-works">See how it works</a>
+          </div>
+          <div class="landing-auth" id="landingAuth">Checking Bluesky session...</div>
+        </div>
+      </section>
+
+      <section class="landing-section" id="how-it-works">
+        <div class="landing-section-head">
+          <h3>How It Works</h3>
+          <p>Sign in, verify your iNaturalist account, import your public observations, then build a team from your real-life species list.</p>
+        </div>
+        <div class="landing-steps">
+          <div class="landing-step">
+            <strong>1. Sign in with Bluesky</strong>
+            <span>Bluesky gives the app an identity for challenges and posts.</span>
+          </div>
+          <div class="landing-step">
+            <strong>2. Verify iNaturalist</strong>
+            <span>Paste a temporary code into your iNaturalist profile to prove ownership.</span>
+          </div>
+          <div class="landing-step">
+            <strong>3. Import observations</strong>
+            <span>Your public species counts become a playable roster.</span>
+          </div>
+          <div class="landing-step">
+            <strong>4. Battle with species</strong>
+            <span>Pick ready sprites, train favorites, and challenge other naturalists.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="landing-section">
+        <div class="landing-section-head">
+          <h3>Alpha Notes</h3>
+          <p>The core systems are working, but broader public testing is still being prepared.</p>
+        </div>
+        <div class="landing-trust">
+          <div class="landing-trust-item">
+            <strong>Public iNat data</strong>
+            <span>Uses public observation summaries and taxon metadata.</span>
+          </div>
+          <div class="landing-trust-item">
+            <strong>No iNat password</strong>
+            <span>Verification uses a profile code, not iNaturalist OAuth.</span>
+          </div>
+          <div class="landing-trust-item">
+            <strong>Bluesky identity</strong>
+            <span>Challenges are tied to your Bluesky account.</span>
+          </div>
+          <div class="landing-trust-item">
+            <strong>Still pre-alpha</strong>
+            <span>Expect rough edges while sprite generation and battles mature.</span>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="layout" id="appLayout">
       <aside class="panel">
         <details class="dev-batch bsky-panel" id="bskyPanelDetails" open>
           <summary class="dev-batch-head">
@@ -9391,6 +9678,9 @@ function renderAppHtml() {
       form: document.getElementById("loginForm"),
       input: document.getElementById("inatLogin"),
       importButton: document.getElementById("importButton"),
+      publicLanding: document.getElementById("publicLanding"),
+      landingAuth: document.getElementById("landingAuth"),
+      appLayout: document.getElementById("appLayout"),
       queueMoreButton: document.getElementById("queueMoreButton"),
       batchPreviewButton: document.getElementById("batchPreviewButton"),
       batchSubmitButton: document.getElementById("batchSubmitButton"),
@@ -9483,6 +9773,7 @@ function renderAppHtml() {
     };
 
     els.input.value = state.inatLogin;
+    renderLanding();
 
     els.form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -9889,7 +10180,7 @@ function renderAppHtml() {
     els.recentZoomInput.value = String(state.recentZoom);
     els.recentSpritesPanel.style.setProperty("--tile-min", state.recentZoom + "px");
 
-    els.bskyBody.addEventListener("click", (event) => {
+    function handleBskyContainerClick(event) {
       const pick = event.target.closest("[data-typeahead-pick]");
       if (pick) {
         const input = document.getElementById(pick.getAttribute("data-input-id"));
@@ -9907,15 +10198,15 @@ function renderAppHtml() {
       button.disabled = true;
       button.textContent = bskyBusyButtonText(action);
       handleBskyAction(action, button.getAttribute("data-challenge-id"));
-    });
+    }
 
-    els.bskyBody.addEventListener("input", (event) => {
+    function handleBskyContainerInput(event) {
       if (event.target.getAttribute && event.target.getAttribute("data-bsky-typeahead")) {
         handleTypeaheadInput(event.target);
       }
-    });
+    }
 
-    els.bskyBody.addEventListener("keydown", (event) => {
+    function handleBskyContainerKeydown(event) {
       if (event.target.tagName !== "INPUT") return;
 
       if (event.key === "Escape") {
@@ -9927,7 +10218,14 @@ function renderAppHtml() {
       closeTypeaheadLists();
       const action = event.target.getAttribute("data-bsky-enter");
       if (action) handleBskyAction(action, null);
-    });
+    }
+
+    els.bskyBody.addEventListener("click", handleBskyContainerClick);
+    els.bskyBody.addEventListener("input", handleBskyContainerInput);
+    els.bskyBody.addEventListener("keydown", handleBskyContainerKeydown);
+    els.landingAuth.addEventListener("click", handleBskyContainerClick);
+    els.landingAuth.addEventListener("input", handleBskyContainerInput);
+    els.landingAuth.addEventListener("keydown", handleBskyContainerKeydown);
 
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".typeahead")) closeTypeaheadLists();
@@ -10029,6 +10327,7 @@ function renderAppHtml() {
       }
 
       renderBsky();
+      renderLanding();
     }
 
     function selectedTeamIds() {
@@ -10063,6 +10362,7 @@ function renderAppHtml() {
         state.bskyBusy = false;
         state.bskyAction = "";
         renderBsky();
+        renderLanding();
       }
     }
 
@@ -10091,7 +10391,8 @@ function renderAppHtml() {
     }
 
     async function bskyLogin() {
-      const input = document.getElementById("bskyHandleInput");
+      const inputs = Array.from(document.querySelectorAll("[data-bsky-login-input]"));
+      const input = inputs.find((candidate) => candidate.offsetParent !== null) || inputs[0] || null;
       const handle = input ? input.value.trim() : "";
       if (!handle) {
         setStatus("Enter your Bluesky handle (like name.bsky.social).");
@@ -10671,8 +10972,9 @@ function renderAppHtml() {
     }
 
     function renderTypeaheadInput(inputId, placeholder, enterAction) {
+      const loginAttr = enterAction === "login" ? ' data-bsky-login-input="1"' : "";
       return '<div class="typeahead">' +
-        '<input id="' + escapeAttr(inputId) + '" data-bsky-enter="' + escapeAttr(enterAction) + '" data-bsky-typeahead="1"' +
+        '<input id="' + escapeAttr(inputId) + '" data-bsky-enter="' + escapeAttr(enterAction) + '" data-bsky-typeahead="1"' + loginAttr +
           ' placeholder="' + escapeAttr(placeholder) + '" autocomplete="off" spellcheck="false">' +
         '<div class="typeahead-list" hidden></div>' +
       '</div>';
@@ -10683,7 +10985,7 @@ function renderAppHtml() {
     }
 
     function closeTypeaheadLists() {
-      els.bskyBody.querySelectorAll(".typeahead-list").forEach((list) => {
+      document.querySelectorAll(".typeahead-list").forEach((list) => {
         list.hidden = true;
         list.innerHTML = "";
       });
@@ -10735,6 +11037,32 @@ function renderAppHtml() {
         return;
       }
       runTypeahead(input.id, query);
+    }
+
+    function renderLanding() {
+      if (!els.publicLanding || !els.appLayout || !els.landingAuth) return;
+
+      const signedIn = Boolean(state.me && state.me.loggedIn);
+      const showLanding = !state.userId && !signedIn;
+      els.publicLanding.hidden = !showLanding;
+      els.appLayout.hidden = showLanding;
+      els.form.hidden = showLanding;
+
+      if (!showLanding) return;
+
+      const busyAttr = state.bskyBusy ? " disabled" : "";
+      if (!state.me) {
+        els.landingAuth.innerHTML = '<div class="landing-auth-note">Checking Bluesky session...</div>';
+        return;
+      }
+
+      els.landingAuth.innerHTML =
+        renderBskyStatus() +
+        renderTypeaheadInput("landingBskyHandleInput", "you.bsky.social", "login") +
+        '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
+          (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
+        '</button>' +
+        '<div class="landing-auth-note">Uses Bluesky OAuth for identity and challenge posts. iNaturalist linking happens after sign-in.</div>';
     }
 
     function renderBskyStatus() {
@@ -11168,6 +11496,7 @@ function renderAppHtml() {
     }
 
     function render() {
+      renderLanding();
       els.accountLabel.textContent = state.inatLogin ? "@" + state.inatLogin : "No roster loaded";
 
       const hasFilters = Boolean(state.rosterSearch || state.rosterIconic || state.rosterStatus !== "all");

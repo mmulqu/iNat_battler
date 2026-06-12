@@ -2,6 +2,13 @@
   "name": "inat-battler",
   "main": "src/index.js",
   "compatibility_date": "2026-05-03",
+  "rules": [
+    {
+      "type": "Data",
+      "globs": ["**/*.png"],
+      "fallthrough": true
+    }
+  ],
   "vars": {
     "PUBLIC_BASE_URL": "https://inat-battler.intrinsic3141.workers.dev",
     "MOVE_MODEL": "gpt-5.4-nano",
