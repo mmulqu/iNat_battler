@@ -3489,6 +3489,79 @@ const ROSTER_SORT_CLAUSES = {
   status: "(r2_key IS NOT NULL OR custom_r2_key IS NOT NULL) DESC, obs_count DESC"
 };
 
+async function getRosterSummary(env, userId) {
+  const row = await env.DB.prepare(`
+    WITH roster_status AS (
+      SELECT
+        ut.obs_count,
+        ut.bond_level,
+        COALESCE(st.points_spent, 0) AS points_spent,
+        EXISTS (
+          SELECT 1
+          FROM sprite_assets sa
+          WHERE sa.taxon_id = ut.taxon_id
+            AND sa.asset_kind = ?
+            AND sa.asset_version = ?
+            AND sa.status = 'ready'
+        ) OR EXISTS (
+          SELECT 1
+          FROM user_sprite_submissions uss
+          WHERE uss.user_id = ut.user_id
+            AND uss.taxon_id = ut.taxon_id
+            AND uss.status != 'rejected'
+        ) AS has_ready,
+        EXISTS (
+          SELECT 1
+          FROM sprite_jobs sj
+          WHERE sj.taxon_id = ut.taxon_id
+            AND sj.asset_kind = ?
+            AND sj.asset_version = ?
+            AND sj.status IN ('queued', 'running', 'batch_submitted')
+        ) AS has_pending,
+        EXISTS (
+          SELECT 1
+          FROM sprite_jobs sj
+          WHERE sj.taxon_id = ut.taxon_id
+            AND sj.asset_kind = ?
+            AND sj.asset_version = ?
+            AND sj.status = 'failed'
+        ) AS has_failed
+      FROM user_taxa ut
+      LEFT JOIN species_training st ON st.user_id = ut.user_id AND st.taxon_id = ut.taxon_id
+      WHERE ut.user_id = ?
+    )
+    SELECT
+      COUNT(*) AS total_count,
+      SUM(CASE WHEN has_ready THEN 1 ELSE 0 END) AS ready_count,
+      SUM(CASE WHEN NOT has_ready AND has_pending THEN 1 ELSE 0 END) AS pending_count,
+      SUM(CASE WHEN NOT has_ready AND NOT has_pending AND has_failed THEN 1 ELSE 0 END) AS failed_count,
+      SUM(CASE WHEN NOT has_ready AND NOT has_pending AND NOT has_failed THEN 1 ELSE 0 END) AS missing_count,
+      SUM(COALESCE(obs_count, 0)) AS observation_total,
+      SUM(COALESCE(bond_level, 0)) AS affinity_total,
+      SUM(COALESCE(points_spent, 0)) AS training_spent
+    FROM roster_status
+  `).bind(
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    DEFAULT_ASSET_KIND,
+    ASSET_VERSION,
+    userId
+  ).first();
+
+  return {
+    totalCount: Number(row?.total_count ?? 0),
+    readyCount: Number(row?.ready_count ?? 0),
+    pendingCount: Number(row?.pending_count ?? 0),
+    failedCount: Number(row?.failed_count ?? 0),
+    missingCount: Number(row?.missing_count ?? 0),
+    observationTotal: Number(row?.observation_total ?? 0),
+    affinityTotal: Number(row?.affinity_total ?? 0),
+    trainingSpent: Number(row?.training_spent ?? 0)
+  };
+}
+
 async function getRoster(env, userId, options = {}) {
   const limit = clampInt(options.limit, 1, 250, 100);
   const offset = clampInt(options.offset, 0, 1000000, 0);
@@ -3633,6 +3706,7 @@ async function getRoster(env, userId, options = {}) {
   return {
     userId,
     total: Number(totalRow?.total ?? rosterRows.length),
+    summary: await getRosterSummary(env, userId),
     limit,
     offset,
     iconicCounts: (iconicRows.results ?? []).map((row) => ({
@@ -7267,6 +7341,329 @@ function renderAppHtml() {
       margin-top: 8px;
     }
 
+    .home-dashboard {
+      display: grid;
+      gap: 18px;
+    }
+
+    .home-hero-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+      gap: 18px;
+      align-items: stretch;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(4, 124, 120, 0.12), rgba(244, 212, 135, 0.12)),
+        rgba(255, 255, 255, 0.88);
+      box-shadow: var(--shadow);
+    }
+
+    .home-hero-card h2,
+    .home-panel h3 {
+      margin: 0;
+      line-height: 1.15;
+    }
+
+    .home-hero-card h2 {
+      font-size: clamp(1.65rem, 3vw, 2.4rem);
+    }
+
+    .home-hero-card p,
+    .home-panel p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .home-copy {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .home-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .home-actions .primary,
+    .home-actions .secondary {
+      width: auto;
+    }
+
+    .home-next {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcf9;
+    }
+
+    .home-next strong {
+      font-size: 1rem;
+    }
+
+    .home-metrics,
+    .home-panels {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .home-metric,
+    .home-panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: var(--shadow);
+    }
+
+    .home-metric {
+      padding: 13px;
+    }
+
+    .home-metric strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 1.55rem;
+      line-height: 1.05;
+    }
+
+    .home-panel {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+    }
+
+    .home-panel.wide {
+      grid-column: span 2;
+    }
+
+    .home-team-slots,
+    .home-ready-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .home-team-slot,
+    .home-ready-item {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr) auto;
+      gap: 9px;
+      align-items: center;
+      min-height: 54px;
+      border: 1px solid #e5e9e2;
+      border-radius: 8px;
+      padding: 7px;
+      background: #fbfcf9;
+      text-align: left;
+      color: var(--ink);
+    }
+
+    .home-team-slot.empty {
+      grid-template-columns: 44px minmax(0, 1fr);
+      color: var(--muted);
+    }
+
+    .home-slot-index,
+    .home-ready-thumb {
+      display: grid;
+      place-items: center;
+      width: 44px;
+      aspect-ratio: 1 / 1;
+      border-radius: 8px;
+      background: #e7eee9;
+      color: var(--teal);
+      font-weight: 900;
+      overflow: hidden;
+    }
+
+    .home-ready-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .home-ready-thumb .sheet-sprite {
+      width: 92%;
+      filter: none;
+    }
+
+    .home-team-slot strong,
+    .home-ready-item strong {
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 0.9rem;
+    }
+
+    .home-team-slot span,
+    .home-ready-item span {
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+
+    .home-ready-item:hover {
+      border-color: var(--teal);
+      background: #eef7f0;
+    }
+
+    .home-progress {
+      height: 9px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #dfe5df;
+    }
+
+    .home-progress > span {
+      display: block;
+      height: 100%;
+      width: var(--progress, 0%);
+      background: linear-gradient(90deg, var(--teal), var(--green));
+    }
+
+    .onboarding-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(300px, 0.95fr);
+      gap: 18px;
+      align-items: start;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(4, 124, 120, 0.12), rgba(242, 206, 114, 0.18)),
+        rgba(255, 255, 255, 0.9);
+      box-shadow: var(--shadow);
+    }
+
+    .onboarding-copy,
+    .onboarding-form {
+      display: grid;
+      gap: 14px;
+    }
+
+    .onboarding-copy h2 {
+      margin: 0;
+      max-width: 12ch;
+      font-size: clamp(1.9rem, 4vw, 3.2rem);
+      line-height: 0.98;
+    }
+
+    .onboarding-form h3 {
+      margin: 0;
+    }
+
+    .onboarding-copy p,
+    .onboarding-form p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .onboarding-steps {
+      display: grid;
+      gap: 9px;
+      margin-top: 4px;
+    }
+
+    .onboarding-step {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+    }
+
+    .onboarding-step-index {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      aspect-ratio: 1 / 1;
+      border-radius: 50%;
+      background: #e7eee9;
+      color: var(--teal);
+      font-weight: 900;
+    }
+
+    .onboarding-step.complete .onboarding-step-index {
+      background: var(--teal);
+      color: #fff;
+    }
+
+    .onboarding-step.active .onboarding-step-index {
+      background: #f4d487;
+      color: #533b0c;
+    }
+
+    .onboarding-step strong,
+    .onboarding-step span {
+      display: block;
+      min-width: 0;
+    }
+
+    .onboarding-step span {
+      color: var(--muted);
+      font-size: 0.86rem;
+      line-height: 1.4;
+    }
+
+    .onboarding-form {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcf9;
+    }
+
+    .onboarding-form label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 800;
+    }
+
+    .onboarding-form input {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 12px;
+      background: var(--surface);
+      color: var(--ink);
+      font: inherit;
+    }
+
+    .onboarding-code {
+      display: grid;
+      gap: 6px;
+      padding: 12px;
+      border: 1px solid #bfd6cc;
+      border-radius: 8px;
+      background: #edf7f0;
+    }
+
+    .onboarding-code strong {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1rem;
+      overflow-wrap: anywhere;
+      user-select: all;
+    }
+
+    .onboarding-form .bsky-status {
+      margin: 0;
+    }
+
     .panel h2,
     .roster-head h2 {
       margin: 0;
@@ -9180,6 +9577,20 @@ function renderAppHtml() {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
+      .home-hero-card,
+      .onboarding-card,
+      .home-panels {
+        grid-template-columns: 1fr;
+      }
+
+      .home-panel.wide {
+        grid-column: auto;
+      }
+
+      .home-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .panel {
         position: static;
       }
@@ -9222,6 +9633,14 @@ function renderAppHtml() {
       .landing-steps,
       .landing-trust {
         grid-template-columns: 1fr;
+      }
+
+      .home-metrics {
+        grid-template-columns: 1fr;
+      }
+
+      .home-actions {
+        display: grid;
       }
 
       .primary,
@@ -9458,14 +9877,18 @@ function renderAppHtml() {
 
       <section>
         <nav class="view-tabs" aria-label="Main views">
-          <button class="view-tab active" id="rosterTabButton" type="button" data-view-tab="roster">Roster</button>
+          <button class="view-tab active" id="homeTabButton" type="button" data-view-tab="home">Home</button>
+          <button class="view-tab" id="rosterTabButton" type="button" data-view-tab="roster">Roster</button>
           <button class="view-tab" id="battleTabButton" type="button" data-view-tab="battle">Battle</button>
           <button class="view-tab" id="trainingTabButton" type="button" data-view-tab="training">Training</button>
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
           <button class="view-tab" id="recentTabButton" type="button" data-view-tab="recent">Recently Added</button>
           <button class="view-tab" id="devTabButton" type="button" data-view-tab="dev">Dev Lab</button>
         </nav>
-        <section class="view-panel" id="rosterView">
+        <section class="view-panel" id="homeView">
+          <div class="home-dashboard" id="homeDashboard"></div>
+        </section>
+        <section class="view-panel" id="rosterView" hidden>
           <div class="roster-head">
             <h2>Roster</h2>
             <span class="subtle" id="refreshLabel"></span>
@@ -9618,8 +10041,9 @@ function renderAppHtml() {
     const state = {
       userId: localStorage.getItem("inatBattler:userId") || "",
       inatLogin: localStorage.getItem("inatBattler:inatLogin") || "",
-      activeView: "roster",
+      activeView: "home",
       taxa: [],
+      rosterSummary: null,
       rosterSearch: "",
       rosterSort: "default",
       rosterStatus: "all",
@@ -9711,6 +10135,9 @@ function renderAppHtml() {
       queuedCount: document.getElementById("queuedCount"),
       bondCount: document.getElementById("bondCount"),
       refreshLabel: document.getElementById("refreshLabel"),
+      homeTabButton: document.getElementById("homeTabButton"),
+      homeView: document.getElementById("homeView"),
+      homeDashboard: document.getElementById("homeDashboard"),
       rosterTabButton: document.getElementById("rosterTabButton"),
       treeTabButton: document.getElementById("treeTabButton"),
       recentTabButton: document.getElementById("recentTabButton"),
@@ -9780,6 +10207,7 @@ function renderAppHtml() {
       await importRoster(els.input.value);
     });
 
+    els.homeTabButton.addEventListener("click", () => switchView("home"));
     els.rosterTabButton.addEventListener("click", () => switchView("roster"));
     els.battleTabButton.addEventListener("click", () => switchView("battle"));
     els.trainingTabButton.addEventListener("click", () => switchView("training"));
@@ -10019,6 +10447,38 @@ function renderAppHtml() {
     els.startBattleButton.addEventListener("click", startNpcBattle);
     els.demoBattleButton.addEventListener("click", startDemoBattle);
 
+    els.homeDashboard.addEventListener("click", async (event) => {
+      const addButton = event.target.closest("[data-home-add-taxon]");
+      if (addButton) {
+        toggleTeamSelection(addButton.getAttribute("data-home-add-taxon"));
+        return;
+      }
+
+      const actionButton = event.target.closest("[data-home-action]");
+      if (!actionButton) return;
+
+      const action = actionButton.getAttribute("data-home-action");
+      if (action === "roster") {
+        await switchView("roster");
+      } else if (action === "ready-roster") {
+        state.rosterStatus = "ready";
+        state.rosterPage = 1;
+        els.rosterStatusFilter.value = "ready";
+        await reloadRosterPage(true);
+        await switchView("roster");
+      } else if (action === "battle") {
+        await switchView("battle");
+      } else if (action === "training") {
+        await switchView("training");
+      } else if (action === "recent") {
+        await switchView("recent");
+      } else if (action === "dev") {
+        await switchView("dev");
+      } else if (action === "start-battle") {
+        await startNpcBattle();
+      }
+    });
+
     els.spriteTreePanel.addEventListener("click", (event) => {
       const button = event.target.closest("[data-tree-toggle]");
       if (!button) return;
@@ -10226,6 +10686,9 @@ function renderAppHtml() {
     els.landingAuth.addEventListener("click", handleBskyContainerClick);
     els.landingAuth.addEventListener("input", handleBskyContainerInput);
     els.landingAuth.addEventListener("keydown", handleBskyContainerKeydown);
+    els.homeDashboard.addEventListener("click", handleBskyContainerClick);
+    els.homeDashboard.addEventListener("input", handleBskyContainerInput);
+    els.homeDashboard.addEventListener("keydown", handleBskyContainerKeydown);
 
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".typeahead")) closeTypeaheadLists();
@@ -10249,6 +10712,7 @@ function renderAppHtml() {
         state.rosterPage = 1;
         state.rosterSearch = "";
         state.rosterIconic = "";
+        state.activeView = "home";
         els.rosterSearchInput.value = "";
         const res = await apiFetch("/api/import", {
           method: "POST",
@@ -10328,6 +10792,7 @@ function renderAppHtml() {
 
       renderBsky();
       renderLanding();
+      renderHome();
     }
 
     function selectedTeamIds() {
@@ -10363,6 +10828,7 @@ function renderAppHtml() {
         state.bskyAction = "";
         renderBsky();
         renderLanding();
+        renderHome();
       }
     }
 
@@ -10416,7 +10882,15 @@ function renderAppHtml() {
     }
 
     async function inatLinkStart() {
-      const input = document.getElementById("inatLinkInput");
+      const inputs = Array.from(document.querySelectorAll("[data-inat-link-input]"));
+      const activeInput = document.activeElement && document.activeElement.matches?.("[data-inat-link-input]")
+        ? document.activeElement
+        : null;
+      const input = (activeInput && activeInput.value.trim() ? activeInput : null) ||
+        inputs.find((candidate) => candidate.offsetParent !== null && candidate.value.trim()) ||
+        inputs.find((candidate) => candidate.offsetParent !== null) ||
+        inputs[0] ||
+        null;
       const login = input ? input.value.trim() : "";
       if (!login) {
         setStatus("Enter your iNaturalist username first.");
@@ -11108,7 +11582,7 @@ function renderAppHtml() {
         html += '<div class="subtle">iNaturalist: <strong>' + escapeHtml(me.inatLogin) + '</strong> (verified)</div>';
       } else {
         html += '<div class="subtle">Link your iNaturalist account by proving ownership &mdash; no iNat OAuth, no write access:</div>' +
-          '<input id="inatLinkInput" data-bsky-enter="inat-start" placeholder="iNaturalist username" value="' + escapeAttr(me.inatPendingLogin || "") + '">' +
+          '<input id="inatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="iNaturalist username" value="' + escapeAttr(me.inatPendingLogin || "") + '">' +
           '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : "Get verification code") +
           '</button>';
@@ -11158,6 +11632,7 @@ function renderAppHtml() {
       const res = await apiFetch("/api/roster?" + params.toString());
       state.taxa = res.taxa || [];
       state.rosterTotal = Number(res.total ?? state.taxa.length);
+      state.rosterSummary = res.summary || null;
       state.rosterIconicCounts = Array.isArray(res.iconicCounts) ? res.iconicCounts : [];
 
       const pageCount = Math.max(1, Math.ceil(state.rosterTotal / ROSTER_PAGE_SIZE));
@@ -11181,7 +11656,7 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = ["tree", "recent", "battle", "training", "dev"].includes(view) ? view : "roster";
+      state.activeView = ["home", "roster", "tree", "recent", "battle", "training", "dev"].includes(view) ? view : "home";
       renderViewTabs();
 
       if (state.activeView === "tree" && !state.spriteTree) {
@@ -11193,7 +11668,7 @@ function renderAppHtml() {
       if (state.activeView === "training" && !state.training) {
         await loadTraining();
       }
-      if (state.activeView === "roster" && state.rosterStale && state.userId) {
+      if ((state.activeView === "home" || state.activeView === "roster") && state.rosterStale && state.userId) {
         state.rosterStale = false;
         try {
           await loadRoster();
@@ -11205,12 +11680,14 @@ function renderAppHtml() {
 
     function renderViewTabs() {
       const view = state.activeView;
+      els.homeTabButton.classList.toggle("active", view === "home");
       els.rosterTabButton.classList.toggle("active", view === "roster");
       els.battleTabButton.classList.toggle("active", view === "battle");
       els.trainingTabButton.classList.toggle("active", view === "training");
       els.treeTabButton.classList.toggle("active", view === "tree");
       els.recentTabButton.classList.toggle("active", view === "recent");
       els.devTabButton.classList.toggle("active", view === "dev");
+      els.homeView.hidden = view !== "home";
       els.rosterView.hidden = view !== "roster";
       els.battleView.hidden = view !== "battle";
       els.trainingView.hidden = view !== "training";
@@ -11495,6 +11972,279 @@ function renderAppHtml() {
       return move && move.category === "special" ? "anim-special" : "anim-attack";
     }
 
+    function formatHomeNumber(value) {
+      return Number(value || 0).toLocaleString();
+    }
+
+    function currentRosterSummary() {
+      const summary = state.rosterSummary || {};
+      const pageReady = state.taxa.filter((taxon) => taxon.sprite.status === "ready").length;
+      const pagePending = state.taxa.filter((taxon) => ["queued", "running", "batch_submitted"].includes(taxon.sprite.status)).length;
+      const totalCount = Number(summary.totalCount ?? state.rosterTotal ?? state.taxa.length);
+      const readyCount = Number(summary.readyCount ?? pageReady);
+      const pendingCount = Number(summary.pendingCount ?? pagePending);
+      const failedCount = Number(summary.failedCount ?? 0);
+      const missingCount = Number(summary.missingCount ?? Math.max(0, totalCount - readyCount - pendingCount - failedCount));
+
+      return {
+        totalCount,
+        readyCount,
+        pendingCount,
+        failedCount,
+        missingCount,
+        observationTotal: Number(summary.observationTotal ?? state.taxa.reduce((sum, taxon) => sum + Number(taxon.obsCount || 0), 0)),
+        affinityTotal: Number(summary.affinityTotal ?? state.taxa.reduce((sum, taxon) => sum + Number(affinityLevel(taxon) || 0), 0)),
+        trainingSpent: Number(summary.trainingSpent ?? 0)
+      };
+    }
+
+    function homeNextStep(summary, selectedCount) {
+      if (!state.me || !state.me.loggedIn) {
+        return {
+          title: "Sign in with Bluesky",
+          body: "Use the Bluesky panel to sign in before sending or accepting player challenges.",
+          action: null,
+          label: ""
+        };
+      }
+
+      if (!state.me.inatLogin) {
+        return {
+          title: "Verify your iNaturalist account",
+          body: "Use the Bluesky panel to create a profile code, verify ownership, and import your observations.",
+          action: null,
+          label: ""
+        };
+      }
+
+      if (!summary.totalCount) {
+        return {
+          title: "Import your observations",
+          body: "Enter your iNaturalist username in the top bar to build your species roster.",
+          action: null,
+          label: ""
+        };
+      }
+
+      if (summary.readyCount < 5) {
+        return {
+          title: "Get five ready sprites",
+          body: "You need at least five ready sprites to battle. Queue missing sprites or use the ready species already available.",
+          action: "ready-roster",
+          label: "Show Ready Species"
+        };
+      }
+
+      if (selectedCount < 5) {
+        return {
+          title: "Pick your battle team",
+          body: "Select " + (5 - selectedCount) + " more ready " + (5 - selectedCount === 1 ? "species" : "species") + " to open battle options.",
+          action: "ready-roster",
+          label: "Pick Ready Species"
+        };
+      }
+
+      return {
+        title: "Team ready",
+        body: "Your five-species team is selected. Start an NPC battle or send a Bluesky challenge.",
+        action: "start-battle",
+        label: "Battle NPC"
+      };
+    }
+
+    function renderHome() {
+      if (!els.homeDashboard) return;
+
+      if (state.me?.loggedIn && !state.me.inatLogin) {
+        els.homeDashboard.innerHTML = renderOnboardingHome();
+        return;
+      }
+
+      const summary = currentRosterSummary();
+      const selectedCount = state.selectedTaxa.size;
+      const readyPct = summary.totalCount > 0 ? Math.round((summary.readyCount / summary.totalCount) * 100) : 0;
+      const next = homeNextStep(summary, selectedCount);
+      const handle = state.me?.handle ? "@" + state.me.handle : (state.inatLogin ? "@" + state.inatLogin : "Field naturalist");
+      const groupText = state.rosterIconicCounts.length
+        ? state.rosterIconicCounts.slice(0, 4).map((row) => row.iconic + " " + row.count).join(" / ")
+        : "Import a roster to see your largest groups.";
+
+      els.homeDashboard.innerHTML =
+        '<section class="home-hero-card">' +
+          '<div class="home-copy">' +
+            '<div class="subtle">Player Home</div>' +
+            '<h2>' + escapeHtml(handle) + '</h2>' +
+            '<p>Manage your observed-species roster, pick a five-creature team, train favorites, and jump into battles without scrolling through the full collection first.</p>' +
+            '<div class="home-actions">' +
+              '<button class="primary" type="button" data-home-action="ready-roster">Pick Team</button>' +
+              '<button class="secondary" type="button" data-home-action="training">Training</button>' +
+              '<button class="secondary" type="button" data-home-action="recent">Recently Added</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="home-next">' +
+            '<span class="subtle">Next Action</span>' +
+            '<strong>' + escapeHtml(next.title) + '</strong>' +
+            '<p>' + escapeHtml(next.body) + '</p>' +
+            (next.action ? '<button class="primary" type="button" data-home-action="' + escapeAttr(next.action) + '">' + escapeHtml(next.label) + '</button>' : '') +
+          '</div>' +
+        '</section>' +
+        '<section class="home-metrics" aria-label="Roster summary">' +
+          renderHomeMetric("Taxa", summary.totalCount, "Imported species") +
+          renderHomeMetric("Ready", summary.readyCount, readyPct + "% battle-art ready") +
+          renderHomeMetric("Queued", summary.pendingCount, "Sprite jobs active") +
+          renderHomeMetric("Missing", summary.missingCount, "Need generated art") +
+        '</section>' +
+        '<section class="home-panels">' +
+          '<div class="home-panel wide">' +
+            '<div>' +
+              '<h3>Battle Team</h3>' +
+              '<p>' + selectedCount + ' / 5 ready species selected.</p>' +
+            '</div>' +
+            renderHomeTeamSlots() +
+            '<div class="home-actions">' +
+              '<button class="secondary" type="button" data-home-action="ready-roster">Edit Team</button>' +
+              '<button class="primary" type="button" data-home-action="start-battle"' + (selectedCount === 5 ? "" : " disabled") + '>Battle NPC</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="home-panel wide">' +
+            '<div>' +
+              '<h3>Ready Picks</h3>' +
+              '<p>Quick-add ready species from the current roster page.</p>' +
+            '</div>' +
+            renderHomeReadyPicks() +
+          '</div>' +
+          '<div class="home-panel">' +
+            '<h3>Roster Progress</h3>' +
+            '<p>' + formatHomeNumber(summary.readyCount) + ' of ' + formatHomeNumber(summary.totalCount) + ' imported taxa have ready sprites.</p>' +
+            '<div class="home-progress" aria-label="Ready sprite progress"><span style="--progress:' + Math.max(0, Math.min(100, readyPct)) + '%"></span></div>' +
+            '<p class="subtle">' + escapeHtml(groupText) + '</p>' +
+          '</div>' +
+          '<div class="home-panel">' +
+            '<h3>Training</h3>' +
+            '<p>' + formatHomeNumber(summary.trainingSpent) + ' points spent. ' + formatHomeNumber(summary.affinityTotal) + ' total roster affinity.</p>' +
+            '<button class="secondary" type="button" data-home-action="training">Open Training</button>' +
+          '</div>' +
+          '<div class="home-panel">' +
+            '<h3>Sprite Library</h3>' +
+            '<p>Browse the shared tree or inspect the newest global sprites added to the game.</p>' +
+            '<div class="home-actions">' +
+              '<button class="secondary" type="button" data-home-action="recent">Recent</button>' +
+              '<button class="secondary" type="button" data-home-action="dev">Dev Lab</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="home-panel">' +
+            '<h3>Observations</h3>' +
+            '<p>' + formatHomeNumber(summary.observationTotal) + ' imported observations across your current roster.</p>' +
+            '<button class="secondary" type="button" data-home-action="roster">Open Roster</button>' +
+          '</div>' +
+        '</section>';
+    }
+
+    function renderHomeMetric(label, value, detail) {
+      return '<div class="home-metric">' +
+        '<span class="subtle">' + escapeHtml(label) + '</span>' +
+        '<strong>' + formatHomeNumber(value) + '</strong>' +
+        '<span class="subtle">' + escapeHtml(detail) + '</span>' +
+      '</div>';
+    }
+
+    function renderHomeTeamSlots() {
+      const ids = Array.from(state.selectedTaxa);
+      const slots = [];
+      for (let index = 0; index < 5; index += 1) {
+        const taxonId = ids[index];
+        const taxon = taxonId ? state.taxa.find((candidate) => String(candidate.taxonId) === String(taxonId)) : null;
+        if (!taxonId) {
+          slots.push('<div class="home-team-slot empty"><div class="home-slot-index">' + (index + 1) + '</div><div><strong>Open slot</strong><span>Select a ready species</span></div></div>');
+        } else if (taxon) {
+          slots.push('<div class="home-team-slot">' +
+            renderHomeThumb(taxon) +
+            '<div><strong>' + escapeHtml(taxon.name || taxon.scientificName || "Selected species") + '</strong><span><em>' + escapeHtml(taxon.scientificName || "") + '</em></span></div>' +
+            '<span class="subtle">' + escapeHtml((taxon.types || []).join(" / ")) + '</span>' +
+          '</div>');
+        } else {
+          slots.push('<div class="home-team-slot empty"><div class="home-slot-index">' + (index + 1) + '</div><div><strong>Selected taxon ' + escapeHtml(String(taxonId)) + '</strong><span>Open roster page for details</span></div></div>');
+        }
+      }
+      return '<div class="home-team-slots">' + slots.join("") + '</div>';
+    }
+
+    function renderHomeReadyPicks() {
+      const picks = state.taxa
+        .filter((taxon) => taxon.sprite?.status === "ready" && !state.selectedTaxa.has(String(taxon.taxonId)))
+        .slice(0, 5);
+
+      if (!picks.length) {
+        return '<p class="subtle">No unselected ready species on this page. Open the ready roster filter to browse more.</p>' +
+          '<button class="secondary" type="button" data-home-action="ready-roster">Browse Ready Species</button>';
+      }
+
+      return '<div class="home-ready-list">' + picks.map((taxon) => (
+        '<button class="home-ready-item" type="button" data-home-add-taxon="' + escapeAttr(String(taxon.taxonId)) + '">' +
+          renderHomeThumb(taxon) +
+          '<div><strong>' + escapeHtml(taxon.name || taxon.scientificName || "Ready species") + '</strong><span><em>' + escapeHtml(taxon.scientificName || "") + '</em> / ' + Number(taxon.obsCount || 0) + ' obs</span></div>' +
+          '<span class="subtle">Add</span>' +
+        '</button>'
+      )).join("") + '</div>';
+    }
+
+    function renderHomeThumb(taxon) {
+      if (taxon.sprite?.url) {
+        return '<div class="home-ready-thumb">' + renderSheetSprite(taxon.sprite.url, "anim-idle") + '</div>';
+      }
+      return '<div class="home-ready-thumb">' + escapeHtml((taxon.iconicTaxonName || "Life").slice(0, 1).toUpperCase()) + '</div>';
+    }
+
+    function renderOnboardingHome() {
+      const me = state.me || {};
+      const busyAttr = state.bskyBusy ? " disabled" : "";
+      const pendingLogin = me.inatPendingLogin || "";
+      const hasCode = Boolean(me.inatPendingLogin && me.inatVerificationCode);
+
+      return '<section class="onboarding-card">' +
+        '<div class="onboarding-copy">' +
+          '<div class="subtle">Setup</div>' +
+          '<h2>Link your field life.</h2>' +
+          '<p>You are signed in with Bluesky. One quick iNaturalist verification connects your real observations to the game roster.</p>' +
+          '<div class="onboarding-steps">' +
+            renderOnboardingStep("1", "Bluesky connected", "Signed in as @" + (me.handle || "Bluesky"), "complete") +
+            renderOnboardingStep("2", "Choose iNaturalist username", "Enter the public iNaturalist account you want to battle with.", hasCode ? "complete" : "active") +
+            renderOnboardingStep("3", "Paste code and verify", "Add the code to your iNaturalist profile bio, verify here, then remove it.", hasCode ? "active" : "") +
+          '</div>' +
+        '</div>' +
+        '<div class="onboarding-form">' +
+          '<h3>Verify iNaturalist</h3>' +
+          renderBskyStatus() +
+          '<label>iNaturalist username' +
+            '<input id="homeInatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="mmulqueen" value="' + escapeAttr(pendingLogin) + '">' +
+          '</label>' +
+          '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : (hasCode ? "Refresh Code" : "Get Verification Code")) +
+          '</button>' +
+          (hasCode
+            ? '<div class="onboarding-code">' +
+                '<span class="subtle">Add this code to your iNaturalist profile bio</span>' +
+                '<strong>' + escapeHtml(me.inatVerificationCode) + '</strong>' +
+                '<span class="subtle">Use iNaturalist settings for "' + escapeHtml(pendingLogin) + '", save, then verify below.</span>' +
+              '</div>' +
+              '<a class="manual-result-link" href="https://www.inaturalist.org/users/edit" target="_blank" rel="noopener">Open iNaturalist settings</a>' +
+              '<button class="primary" type="button" data-bsky-action="inat-confirm"' + busyAttr + '>' +
+                (state.bskyBusy && state.bskyAction === "inat-confirm" ? "Verifying..." : "Verify and Import") +
+              '</button>'
+            : '<p>No iNaturalist password or write access needed. The temporary bio code only proves that the public profile is yours.</p>') +
+        '</div>' +
+      '</section>';
+    }
+
+    function renderOnboardingStep(index, title, body, stateClass) {
+      const className = stateClass ? " " + stateClass : "";
+      const marker = index;
+      return '<div class="onboarding-step' + className + '">' +
+        '<div class="onboarding-step-index">' + escapeHtml(marker) + '</div>' +
+        '<div><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(body) + '</span></div>' +
+      '</div>';
+    }
+
     function render() {
       renderLanding();
       els.accountLabel.textContent = state.inatLogin ? "@" + state.inatLogin : "No roster loaded";
@@ -11512,15 +12262,13 @@ function renderAppHtml() {
       renderTypeChips();
       renderRosterPagination();
 
-      const spriteCount = state.taxa.filter((taxon) => taxon.sprite.status === "ready").length;
-      const queuedCount = state.taxa.filter((taxon) => ["queued", "running"].includes(taxon.sprite.status)).length;
-      const bondCount = state.taxa.reduce((sum, taxon) => sum + Number(affinityLevel(taxon) || 0), 0);
+      const summary = currentRosterSummary();
       const selectedCount = state.selectedTaxa.size;
 
-      els.taxaCount.textContent = String(state.rosterTotal || state.taxa.length);
-      els.spriteCount.textContent = String(spriteCount);
-      els.queuedCount.textContent = String(queuedCount);
-      els.bondCount.textContent = String(bondCount);
+      els.taxaCount.textContent = String(summary.totalCount || state.rosterTotal || state.taxa.length);
+      els.spriteCount.textContent = String(summary.readyCount);
+      els.queuedCount.textContent = String(summary.pendingCount);
+      els.bondCount.textContent = String(summary.affinityTotal);
       els.teamCount.textContent = selectedCount + " / 5 selected";
       els.clearTeamButton.disabled = selectedCount === 0;
       els.startBattleButton.disabled = !state.userId || selectedCount !== 5;
@@ -11535,6 +12283,7 @@ function renderAppHtml() {
       renderBatchQueue();
       renderGlobalSeedQueue();
       renderViewTabs();
+      renderHome();
       renderSpriteTree();
       renderRecentSprites();
       renderDevLab();
