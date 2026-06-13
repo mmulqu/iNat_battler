@@ -7283,7 +7283,11 @@ function renderAppHtml() {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#047c78">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="iNat Battler">
   <title>iNat Battler</title>
   <style>
     :root {
@@ -7305,9 +7309,15 @@ function renderAppHtml() {
       box-sizing: border-box;
     }
 
+    html {
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+
     body {
       margin: 0;
       min-height: 100vh;
+      overflow-x: hidden;
       background:
         linear-gradient(180deg, rgba(4, 124, 120, 0.08), rgba(245, 242, 234, 0) 320px),
         var(--bg);
@@ -7324,6 +7334,14 @@ function renderAppHtml() {
     button {
       border: 0;
       cursor: pointer;
+      -webkit-tap-highlight-color: rgba(0, 0, 0, 0.08);
+      touch-action: manipulation;
+    }
+
+    img,
+    canvas,
+    svg {
+      max-width: 100%;
     }
 
     button:disabled {
@@ -8301,6 +8319,92 @@ function renderAppHtml() {
 
     .view-panel[hidden] {
       display: none;
+    }
+
+    /* Mobile bottom navigation (shown only at <=720px; see media query) */
+    .mobile-nav {
+      display: none;
+    }
+
+    .mobile-sheet[hidden] {
+      display: none;
+    }
+
+    .mobile-nav-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      flex: 1 1 0;
+      min-height: 56px;
+      padding: 6px 0 max(6px, env(safe-area-inset-bottom));
+      background: transparent;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .mobile-nav-item.active {
+      color: var(--teal);
+    }
+
+    .mobile-nav-ico {
+      font-size: 19px;
+      line-height: 1;
+    }
+
+    .mobile-nav-label {
+      font-size: 11px;
+      line-height: 1;
+    }
+
+    .mobile-sheet {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: flex;
+      align-items: flex-end;
+    }
+
+    .mobile-sheet-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(18, 26, 22, 0.42);
+    }
+
+    .mobile-sheet-panel {
+      position: relative;
+      width: 100%;
+      background: var(--surface);
+      border-radius: 16px 16px 0 0;
+      padding: 8px 14px calc(14px + env(safe-area-inset-bottom));
+      box-shadow: 0 -8px 30px rgba(22, 32, 27, 0.18);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .mobile-sheet-handle {
+      width: 40px;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--line);
+      margin: 6px auto 10px;
+    }
+
+    .mobile-sheet-item {
+      text-align: left;
+      background: transparent;
+      color: var(--ink);
+      font-weight: 700;
+      min-height: 48px;
+      padding: 0 8px;
+      border-radius: 10px;
+    }
+
+    .mobile-sheet-item.active {
+      color: var(--teal);
+      background: rgba(4, 124, 120, 0.08);
     }
 
     .tree-tools {
@@ -10281,6 +10385,37 @@ function renderAppHtml() {
       .login {
         grid-template-columns: 1fr auto;
       }
+
+      /* Put dev/Bluesky tools below the active view instead of above it. */
+      .layout > section {
+        order: 1;
+      }
+
+      .layout > .panel {
+        order: 2;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .view-tabs {
+        display: none;
+      }
+
+      body.app-active .mobile-nav {
+        display: flex;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 50;
+        background: var(--surface);
+        border-top: 1px solid var(--line);
+        box-shadow: 0 -4px 18px rgba(22, 32, 27, 0.08);
+      }
+
+      body.app-active .shell {
+        padding-bottom: calc(72px + env(safe-area-inset-bottom));
+      }
     }
 
     @media (max-width: 520px) {
@@ -10724,6 +10859,36 @@ function renderAppHtml() {
     </section>
   </main>
 
+  <nav class="mobile-nav" id="mobileNav" aria-label="Primary">
+    <button class="mobile-nav-item" type="button" data-mobile-nav="home">
+      <span class="mobile-nav-ico">🏠</span><span class="mobile-nav-label">Home</span>
+    </button>
+    <button class="mobile-nav-item" type="button" data-mobile-nav="roster">
+      <span class="mobile-nav-ico">🗂️</span><span class="mobile-nav-label">Roster</span>
+    </button>
+    <button class="mobile-nav-item" type="button" data-mobile-nav="battle">
+      <span class="mobile-nav-ico">⚔️</span><span class="mobile-nav-label">Battle</span>
+    </button>
+    <button class="mobile-nav-item" type="button" data-mobile-nav="buddies">
+      <span class="mobile-nav-ico">🟢</span><span class="mobile-nav-label">Buddies</span>
+    </button>
+    <button class="mobile-nav-item" type="button" id="mobileMoreButton">
+      <span class="mobile-nav-ico">☰</span><span class="mobile-nav-label">More</span>
+    </button>
+  </nav>
+
+  <div class="mobile-sheet" id="mobileSheet" hidden>
+    <div class="mobile-sheet-backdrop" data-mobile-sheet-close></div>
+    <div class="mobile-sheet-panel" role="menu" aria-label="More views">
+      <div class="mobile-sheet-handle" aria-hidden="true"></div>
+      <button class="mobile-sheet-item" type="button" data-mobile-nav="leaderboard" role="menuitem">🏆 Leaderboard</button>
+      <button class="mobile-sheet-item" type="button" data-mobile-nav="training" role="menuitem">📈 Training</button>
+      <button class="mobile-sheet-item" type="button" data-mobile-nav="tree" role="menuitem">🌳 Sprite Tree</button>
+      <button class="mobile-sheet-item" type="button" data-mobile-nav="recent" role="menuitem">✨ Recently Added</button>
+      <button class="mobile-sheet-item" type="button" data-mobile-nav="dev" role="menuitem">🛠️ Dev Lab</button>
+    </div>
+  </div>
+
   <script>
     const LAST_BATCH_STORAGE_KEY = "inatBattler:lastBatch";
     const ROSTER_PAGE_SIZE = 100;
@@ -10950,6 +11115,9 @@ function renderAppHtml() {
       buddiesPanel: document.getElementById("buddiesPanel"),
       buddiesMetaLabel: document.getElementById("buddiesMetaLabel"),
       buddiesRefreshButton: document.getElementById("buddiesRefreshButton"),
+      mobileNav: document.getElementById("mobileNav"),
+      mobileMoreButton: document.getElementById("mobileMoreButton"),
+      mobileSheet: document.getElementById("mobileSheet"),
       trainingTabButton: document.getElementById("trainingTabButton"),
       trainingView: document.getElementById("trainingView"),
       trainingTotalsLabel: document.getElementById("trainingTotalsLabel"),
@@ -10995,6 +11163,32 @@ function renderAppHtml() {
     els.trainingTabButton.addEventListener("click", () => switchView("training"));
     els.buddiesRefreshButton.addEventListener("click", () => startPresence(true));
     els.buddiesPanel.addEventListener("click", onBuddiesPanelClick);
+
+    function setMobileSheet(open) {
+      els.mobileSheet.hidden = !open;
+    }
+
+    els.mobileMoreButton.addEventListener("click", () => {
+      playSfx("click");
+      setMobileSheet(els.mobileSheet.hidden);
+    });
+
+    els.mobileNav.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-mobile-nav]");
+      if (!button) return;
+      switchView(button.getAttribute("data-mobile-nav"));
+    });
+
+    els.mobileSheet.addEventListener("click", (event) => {
+      if (event.target.closest("[data-mobile-sheet-close]")) {
+        setMobileSheet(false);
+        return;
+      }
+      const button = event.target.closest("[data-mobile-nav]");
+      if (!button) return;
+      setMobileSheet(false);
+      switchView(button.getAttribute("data-mobile-nav"));
+    });
     els.treeTabButton.addEventListener("click", () => switchView("tree"));
     els.recentTabButton.addEventListener("click", () => switchView("recent"));
     els.devTabButton.addEventListener("click", () => switchView("dev"));
@@ -12359,6 +12553,8 @@ function renderAppHtml() {
       els.publicLanding.hidden = !showLanding;
       els.appLayout.hidden = showLanding;
       els.form.hidden = showLanding;
+      document.body.classList.toggle("app-active", !showLanding);
+      if (showLanding) els.mobileSheet.hidden = true;
 
       if (!showLanding) return;
 
@@ -12543,6 +12739,15 @@ function renderAppHtml() {
       els.recentView.hidden = view !== "recent";
       els.devView.hidden = view !== "dev";
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
+
+      const primaryMobileViews = ["home", "roster", "battle", "buddies"];
+      for (const button of els.mobileNav.querySelectorAll("[data-mobile-nav]")) {
+        button.classList.toggle("active", button.getAttribute("data-mobile-nav") === view);
+      }
+      els.mobileMoreButton.classList.toggle("active", !primaryMobileViews.includes(view));
+      for (const button of els.mobileSheet.querySelectorAll("[data-mobile-nav]")) {
+        button.classList.toggle("active", button.getAttribute("data-mobile-nav") === view);
+      }
     }
 
     async function loadSpriteTree(showStatus) {
