@@ -10062,24 +10062,132 @@ function renderAppHtml() {
       background: #e4f2ef;
     }
 
-    button.bench-slot.switchable {
-      cursor: pointer;
-      opacity: 0.9;
-      font: inherit;
-      font-size: 0.72rem;
-      font-weight: 800;
-    }
-
-    button.bench-slot.switchable:hover {
-      border-color: var(--teal);
-      background: #e4f2ef;
-      opacity: 1;
-    }
-
     .bench-hp {
       display: block;
       color: var(--muted);
       font-size: 0.66rem;
+    }
+
+    .swap-button {
+      grid-column: 1 / -1;
+      min-height: 40px;
+      border-radius: 8px;
+      background: var(--teal);
+      color: #fff;
+      font-weight: 800;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .swap-button .swap-count {
+      display: inline-grid;
+      place-items: center;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.26);
+      font-size: 0.72rem;
+    }
+
+    .swap-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: rgba(18, 26, 22, 0.5);
+    }
+
+    .swap-sheet {
+      width: min(420px, 100%);
+      max-height: 82vh;
+      overflow-y: auto;
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 18px 50px rgba(18, 26, 22, 0.35);
+    }
+
+    .swap-sheet-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .swap-sheet-head strong {
+      font-size: 1.05rem;
+    }
+
+    .swap-sheet-head .secondary {
+      width: auto;
+      flex: 0 0 auto;
+    }
+
+    .swap-note {
+      margin: 6px 0 10px;
+    }
+
+    .swap-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .swap-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-align: left;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fbfcf9;
+      color: var(--ink);
+    }
+
+    .swap-row:hover {
+      border-color: var(--teal);
+      background: #f0f7f4;
+    }
+
+    .swap-row:disabled {
+      opacity: 0.5;
+    }
+
+    .swap-thumb {
+      width: 48px;
+      height: 48px;
+      flex: 0 0 auto;
+      border-radius: 8px;
+      background-color: #e7eee1;
+      background-repeat: no-repeat;
+      background-position: 0 0;
+      background-size: 400% 400%;
+      image-rendering: pixelated;
+    }
+
+    .swap-row-info {
+      flex: 1 1 auto;
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+    }
+
+    .swap-row-name {
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .swap-row-types {
+      font-size: 0.72rem;
     }
 
     .team-picker select {
@@ -10649,6 +10757,105 @@ function renderAppHtml() {
 
       .name {
         font-size: 0.9rem;
+      }
+    }
+
+    /* ===== Mobile battle: fit stage + HP + status + moves on one screen =====
+       The active battle becomes a fixed full-viewport surface so it escapes
+       the topbar/tools; the stage flexes and the moves pin just below it. */
+    @media (max-width: 760px) {
+      body.battle-active .mobile-nav {
+        display: none;
+      }
+
+      body.battle-active .battle:not([hidden]) {
+        position: fixed;
+        inset: 0;
+        z-index: 45;
+        margin: 0;
+        background: var(--bg);
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
+      }
+
+      body.battle-active .battle > .roster-head {
+        margin: 0;
+        align-items: center;
+      }
+
+      body.battle-active .battle > .roster-head h2 {
+        font-size: 1rem;
+        line-height: 1.15;
+      }
+
+      body.battle-active .battle .battle-head-tools {
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      body.battle-active .battle .battle-head-tools .secondary {
+        width: auto;
+        padding: 4px 8px;
+        min-height: 32px;
+        font-size: 0.78rem;
+      }
+
+      /* Keep both combatants side-by-side (override the 520px single column). */
+      body.battle-active .battle .battle-stage {
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        padding: 8px;
+        min-height: 0;
+      }
+
+      body.battle-active .battle .combatant-sprite {
+        min-height: 0;
+      }
+
+      /* Stack name above role so the name gets full width (no vertical wrap). */
+      body.battle-active .battle .combatant-head {
+        flex-direction: column;
+        gap: 3px;
+      }
+
+      body.battle-active .battle .combatant-role {
+        white-space: normal;
+        font-size: 0.74rem;
+      }
+
+      /* 2x2 moves (override the 520px single column) so they don't stack tall. */
+      body.battle-active .battle .moves {
+        grid-template-columns: 1fr 1fr;
+        margin-top: 0;
+      }
+
+      body.battle-active .battle .move-button {
+        min-height: 0;
+        padding: 6px 8px;
+      }
+
+      body.battle-active .battle .move-button .move-meta {
+        font-size: 0.66rem;
+      }
+
+      /* Stage flexes to fill; moves pin just below it; log sits below. */
+      body.battle-active .battle .battle-stage {
+        flex: 1 1 auto;
+        min-height: 38vh;
+      }
+
+      body.battle-active .battle .moves {
+        flex: 0 0 auto;
+      }
+
+      body.battle-active .battle .battle-log {
+        flex: 0 0 auto;
+        max-height: 4.6em;
+        overflow-y: auto;
       }
     }
   </style>
@@ -11629,10 +11836,34 @@ function renderAppHtml() {
         return;
       }
 
+      const openSwapButton = event.target.closest("[data-open-swap]");
+      if (openSwapButton) {
+        state.swapOpen = true;
+        playSfx("click");
+        renderBattle();
+        return;
+      }
+
+      const swapRow = event.target.closest("[data-swap-index]");
+      if (swapRow) {
+        if (state.battleBusy || state.battlePhase === "intro") return;
+        state.swapOpen = false;
+        await submitBattleMove(null, Number(swapRow.getAttribute("data-swap-index")));
+        return;
+      }
+
+      if (event.target.closest("[data-swap-close]") || event.target.classList.contains("swap-modal")) {
+        state.swapOpen = false;
+        renderBattle();
+        return;
+      }
+
       const exitButton = event.target.closest("[data-battle-exit]");
       if (exitButton) {
         state.battle = null;
         state.battlePhase = "idle";
+        state.swapOpen = false;
+        document.body.classList.remove("battle-active");
         renderBattle();
         switchView("roster");
         return;
@@ -11663,13 +11894,6 @@ function renderAppHtml() {
           shareBattleButton.textContent = "Brag on Bluesky 🦋";
           setStatus(error.message);
         }
-        return;
-      }
-
-      const benchButton = event.target.closest("[data-switch-index]");
-      if (benchButton) {
-        if (state.battleBusy || state.battlePhase === "intro") return;
-        await submitBattleMove(null, Number(benchButton.getAttribute("data-switch-index")));
         return;
       }
 
@@ -15609,8 +15833,12 @@ function renderAppHtml() {
       const battle = state.battle;
       els.battlePanel.hidden = !battle;
       if (els.battleEmptyState) els.battleEmptyState.hidden = !!battle;
+      document.body.classList.toggle("battle-active", !!battle);
       renderViewTabs();
-      if (!battle) return;
+      if (!battle) {
+        state.swapOpen = false;
+        return;
+      }
 
       const playerActive = getActiveCreature(battle.player);
       const opponentActive = getActiveCreature(battle.opponent);
@@ -15664,8 +15892,48 @@ function renderAppHtml() {
           overlay +
         '</div>' +
         '<div class="moves">' + moveButtons + '</div>' +
-        '<div class="battle-log" id="battleLogPanel">' + recentLog + '</div>';
+        '<div class="battle-log" id="battleLogPanel">' + recentLog + '</div>' +
+        renderSwapModal(battle, playerActive);
       keyBattleSprites();
+    }
+
+    function renderSwapModal(battle, playerActive) {
+      if (!state.swapOpen || battle.status !== "active") return "";
+      const team = battle.player;
+      const rows = team.creatures
+        .map((member, index) => ({ member, index }))
+        .filter(({ member, index }) => index !== team.activeIndex && !member.fainted);
+      if (!rows.length) return "";
+
+      const rowsHtml = rows.map(({ member, index }) => {
+        const pct = member.maxHp ? Math.max(0, Math.round((member.hp / member.maxHp) * 100)) : 0;
+        const thumb = member.spriteUrl
+          ? '<div class="swap-thumb" data-sprite-url="' + escapeAttr(member.spriteUrl) + '" style="background-image:url(&quot;' + escapeAttr(member.spriteUrl) + '&quot;)"></div>'
+          : '<div class="swap-thumb swap-thumb-blank"></div>';
+        const types = (member.types || []).join(" / ");
+        return '<button type="button" class="swap-row" data-swap-index="' + index + '"' + (state.battleBusy ? " disabled" : "") + '>' +
+          thumb +
+          '<div class="swap-row-info">' +
+            '<span class="swap-row-name">' + escapeHtml(member.name) +
+              (Number(member.trainingLevel) > 0 ? ' <span class="lv-chip">Lv ' + Number(member.trainingLevel) + '</span>' : '') +
+            '</span>' +
+            (types ? '<span class="subtle swap-row-types">' + escapeHtml(types) + '</span>' : '') +
+            '<div class="hp"><span class="' + (pct <= 25 ? "hp-low" : "") + '" style="--hp:' + pct + '%"></span></div>' +
+            '<span class="subtle">' + Number(member.hp || 0) + ' / ' + Number(member.maxHp || 0) + ' HP</span>' +
+          '</div>' +
+        '</button>';
+      }).join("");
+
+      return '<div class="swap-modal">' +
+        '<div class="swap-sheet" role="dialog" aria-label="Swap species" aria-modal="true">' +
+          '<div class="swap-sheet-head">' +
+            '<strong>Swap species</strong>' +
+            '<button type="button" class="secondary" data-swap-close>Close</button>' +
+          '</div>' +
+          '<p class="subtle swap-note">Pick a teammate to send in. The opponent still moves this turn.</p>' +
+          '<div class="swap-list">' + rowsHtml + '</div>' +
+        '</div>' +
+      '</div>';
     }
 
     function renderCombatant(team, creature, side) {
@@ -15675,22 +15943,24 @@ function renderAppHtml() {
         ? renderSheetSprite(creature.spriteUrl, animation + (creature.fainted ? " fainted" : ""))
         : '<div class="dummy-sprite' + (creature.fainted ? " fainted" : "") + '">Dummy</div>';
       const battleActive = state.battle && state.battle.status === "active";
-      const bench = team.creatures.map((member, index) => {
-        const isActive = index === team.activeIndex;
-        const memberHpPct = member.maxHp ? Math.max(0, Math.round((member.hp / member.maxHp) * 100)) : 0;
-        const canSwitch = side === "player" && battleActive && !member.fainted && !isActive;
-        if (canSwitch) {
-          return '<button type="button" class="bench-slot switchable" data-switch-index="' + index + '" ' +
-            (state.battleBusy ? "disabled " : "") + 'title="Switch in (the opponent still moves this turn)">' +
+      let benchHtml;
+      if (side === "player") {
+        const swappableCount = team.creatures.filter((member, index) => index !== team.activeIndex && !member.fainted).length;
+        benchHtml = (battleActive && swappableCount > 0)
+          ? '<button type="button" class="swap-button" data-open-swap' + (state.battleBusy ? " disabled" : "") + '>' +
+              'Swap! <span class="swap-count">' + swappableCount + '</span>' +
+            '</button>'
+          : "";
+      } else {
+        benchHtml = team.creatures.map((member, index) => {
+          const isActive = index === team.activeIndex;
+          const memberHpPct = member.maxHp ? Math.max(0, Math.round((member.hp / member.maxHp) * 100)) : 0;
+          return '<div class="bench-slot ' + (isActive ? "active" : "") + (member.fainted ? '" style="opacity:0.35' : "") + '">' +
             escapeHtml(member.name) +
-            '<span class="bench-hp">' + memberHpPct + '% HP</span>' +
-          '</button>';
-        }
-        return '<div class="bench-slot ' + (isActive ? "active" : "") + (member.fainted ? '" style="opacity:0.35' : "") + '">' +
-          escapeHtml(member.name) +
-          (isActive ? "" : '<span class="bench-hp">' + memberHpPct + '% HP</span>') +
-        '</div>';
-      }).join("");
+            (isActive ? "" : '<span class="bench-hp">' + memberHpPct + '% HP</span>') +
+          '</div>';
+        }).join("");
+      }
 
       const STATUS_SPRITE_KINDS = ["stunned", "marked", "poisoned", "shielded", "rallied"];
       const activeStatuses = (creature.statuses || []).slice();
@@ -15733,7 +16003,7 @@ function renderAppHtml() {
               ? '<div class="status-chips">' + statusChips + stageChips + '</div>'
               : "";
           })() +
-          '<div class="bench">' + bench + '</div>' +
+          '<div class="bench">' + benchHtml + '</div>' +
         '</div>' +
         '<div class="combatant-sprite" data-sprite-zone="' + side + '">' +
           '<div class="platform"></div>' + sprite +
@@ -15750,7 +16020,7 @@ function renderAppHtml() {
 
     function keyBattleSprites() {
       const sprites = els.battlePanel.querySelectorAll(
-        ".combatant-sprite .sheet-sprite[data-sprite-url], .combatant-sprite .status-sprite[data-sprite-url]"
+        ".combatant-sprite .sheet-sprite[data-sprite-url], .combatant-sprite .status-sprite[data-sprite-url], .swap-thumb[data-sprite-url]"
       );
       sprites.forEach((sprite) => {
         const url = sprite.getAttribute("data-sprite-url");
