@@ -10130,6 +10130,117 @@ function renderAppHtml() {
       color: #fff;
     }
 
+    .buddy-intro {
+      margin: 0 0 12px;
+      line-height: 1.5;
+    }
+
+    .buddy-dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15) inset;
+      vertical-align: middle;
+    }
+
+    .buddy-dot.online { background: #3fb950; box-shadow: 0 0 6px #3fb95088; }
+    .buddy-dot.idle { background: #e3b341; }
+    .buddy-dot.offline { background: #9aa3a3; }
+
+    .buddy-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .buddy-group {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #6b7a6b;
+      margin: 14px 0 4px;
+      padding-left: 2px;
+    }
+
+    .buddy-group:first-child {
+      margin-top: 0;
+    }
+
+    .buddy-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      min-height: 52px;
+    }
+
+    .buddy-row:hover {
+      background: rgba(0, 0, 0, 0.04);
+    }
+
+    .buddy-row.offline {
+      opacity: 0.66;
+    }
+
+    .buddy-avatar {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex: 0 0 auto;
+      background: #d8e2d2;
+    }
+
+    .buddy-avatar-blank {
+      display: inline-block;
+    }
+
+    .buddy-meta {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .buddy-name {
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .buddy-sub {
+      font-size: 12px;
+      color: #6b7a6b;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .buddy-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+
+    .buddy-profile {
+      font-size: 13px;
+      color: #1083fe;
+      text-decoration: none;
+    }
+
+    .buddy-challenge {
+      padding: 6px 12px;
+      min-height: 36px;
+    }
+
     @media (max-width: 880px) {
       .topbar,
       .layout {
@@ -10453,6 +10564,7 @@ function renderAppHtml() {
           <button class="view-tab" id="rosterTabButton" type="button" data-view-tab="roster">Roster</button>
           <button class="view-tab" id="battleTabButton" type="button" data-view-tab="battle">Battle</button>
           <button class="view-tab" id="leaderboardTabButton" type="button" data-view-tab="leaderboard">Leaderboard</button>
+          <button class="view-tab" id="buddiesTabButton" type="button" data-view-tab="buddies">Buddies</button>
           <button class="view-tab" id="trainingTabButton" type="button" data-view-tab="training">Training</button>
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
           <button class="view-tab" id="recentTabButton" type="button" data-view-tab="recent">Recently Added</button>
@@ -10513,6 +10625,17 @@ function renderAppHtml() {
             </div>
           </div>
           <div id="leaderboardPanel"></div>
+        </section>
+        <section class="view-panel" id="buddiesView" hidden>
+          <div class="roster-head">
+            <h2>Buddies</h2>
+            <div class="battle-head-tools">
+              <span class="subtle" id="buddiesMetaLabel"></span>
+              <button class="secondary" id="buddiesRefreshButton" type="button">Refresh mutuals</button>
+            </div>
+          </div>
+          <p class="subtle buddy-intro">Your Bluesky mutuals, live. Presence is read from the firehose: <span class="buddy-dot online"></span> active (posting), <span class="buddy-dot idle"></span> lurking (likes only), <span class="buddy-dot offline"></span> quiet. Challenge whoever is online now.</p>
+          <div id="buddiesPanel"><p class="subtle">Open this tab to connect to the Bluesky firehose and load your buddy list.</p></div>
         </section>
         <section class="view-panel" id="trainingView" hidden>
           <div class="roster-head">
@@ -10715,6 +10838,17 @@ function renderAppHtml() {
       lastResultBattle: null,
       polling: null,
       me: null,
+      presence: {
+        started: false,
+        status: "idle",
+        ws: null,
+        reconnectTimer: null,
+        decayTimer: null,
+        renderTimer: null,
+        settleAt: 0,
+        backfillStarted: false,
+        buddies: new Map()
+      },
       challenges: [],
       challengeInfo: null,
       inatLinkPending: null,
@@ -10811,6 +10945,11 @@ function renderAppHtml() {
       leaderboardPanel: document.getElementById("leaderboardPanel"),
       leaderboardMetaLabel: document.getElementById("leaderboardMetaLabel"),
       leaderboardRefreshButton: document.getElementById("leaderboardRefreshButton"),
+      buddiesTabButton: document.getElementById("buddiesTabButton"),
+      buddiesView: document.getElementById("buddiesView"),
+      buddiesPanel: document.getElementById("buddiesPanel"),
+      buddiesMetaLabel: document.getElementById("buddiesMetaLabel"),
+      buddiesRefreshButton: document.getElementById("buddiesRefreshButton"),
       trainingTabButton: document.getElementById("trainingTabButton"),
       trainingView: document.getElementById("trainingView"),
       trainingTotalsLabel: document.getElementById("trainingTotalsLabel"),
@@ -10852,7 +10991,10 @@ function renderAppHtml() {
     els.rosterTabButton.addEventListener("click", () => switchView("roster"));
     els.battleTabButton.addEventListener("click", () => switchView("battle"));
     els.leaderboardTabButton.addEventListener("click", () => switchView("leaderboard"));
+    els.buddiesTabButton.addEventListener("click", () => switchView("buddies"));
     els.trainingTabButton.addEventListener("click", () => switchView("training"));
+    els.buddiesRefreshButton.addEventListener("click", () => startPresence(true));
+    els.buddiesPanel.addEventListener("click", onBuddiesPanelClick);
     els.treeTabButton.addEventListener("click", () => switchView("tree"));
     els.recentTabButton.addEventListener("click", () => switchView("recent"));
     els.devTabButton.addEventListener("click", () => switchView("dev"));
@@ -11568,6 +11710,12 @@ function renderAppHtml() {
       await apiFetch("/api/auth/logout", { method: "POST" });
       state.me = { loggedIn: false };
       state.challenges = [];
+      stopPresence();
+      state.presence.buddies = new Map();
+      if (state.activeView === "buddies") {
+        els.buddiesPanel.innerHTML = '<p class="subtle">Sign in with Bluesky to see which of your mutuals are online.</p>';
+        els.buddiesMetaLabel.textContent = "";
+      }
       setStatus("Signed out of Bluesky.");
     }
 
@@ -12346,11 +12494,14 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "training", "dev"].includes(view) ? view : "home";
+      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "training", "dev"].includes(view) ? view : "home";
       renderViewTabs();
 
       if (state.activeView === "leaderboard") {
         await loadLeaderboard(!state.leaderboard);
+      }
+      if (state.activeView === "buddies") {
+        startPresence(false);
       }
       if (state.activeView === "tree" && !state.spriteTree) {
         await loadSpriteTree(false);
@@ -12377,6 +12528,7 @@ function renderAppHtml() {
       els.rosterTabButton.classList.toggle("active", view === "roster");
       els.battleTabButton.classList.toggle("active", view === "battle");
       els.leaderboardTabButton.classList.toggle("active", view === "leaderboard");
+      els.buddiesTabButton.classList.toggle("active", view === "buddies");
       els.trainingTabButton.classList.toggle("active", view === "training");
       els.treeTabButton.classList.toggle("active", view === "tree");
       els.recentTabButton.classList.toggle("active", view === "recent");
@@ -12385,6 +12537,7 @@ function renderAppHtml() {
       els.rosterView.hidden = view !== "roster";
       els.battleView.hidden = view !== "battle";
       els.leaderboardView.hidden = view !== "leaderboard";
+      els.buddiesView.hidden = view !== "buddies";
       els.trainingView.hidden = view !== "training";
       els.treeView.hidden = view !== "tree";
       els.recentView.hidden = view !== "recent";
@@ -14463,6 +14616,391 @@ function renderAppHtml() {
       panel.insertBefore(line, panel.firstChild);
     }
 
+    // -- Bluesky presence buddy list (AIM-style) ----------------------------
+    //
+    // Presence is inferred behaviorally from the Jetstream firehose filtered to
+    // only your mutuals' DIDs, never queried:
+    //   online  (green)  -> posted / replied / reposted within the window
+    //   idle    (yellow) -> only liked / followed within the window (lurking)
+    //   offline (gray)   -> quiet; "last seen" backfilled from getLatestCommit
+    //
+    // Everything here is client-side against the public, CORS-enabled AppView
+    // and Jetstream; no auth and no server round-trips.
+
+    const BSKY_APPVIEW = "https://public.api.bsky.app";
+    // Public Jetstream instances are region-scoped; the bare host does not
+    // resolve. Rotate across them so one instance being down self-heals.
+    const JETSTREAM_HOSTS = [
+      "jetstream2.us-east.bsky.network",
+      "jetstream1.us-east.bsky.network",
+      "jetstream2.us-west.bsky.network",
+      "jetstream1.us-west.bsky.network"
+    ];
+    let jetstreamHostIndex = 0;
+    const PRESENCE_ONLINE_MS = 10 * 60 * 1000;
+    const PRESENCE_IDLE_MS = 10 * 60 * 1000;
+    const PRESENCE_GRAPH_PAGE_CAP = 25; // up to ~2500 follows/followers each
+    const PRESENCE_BACKFILL_CAP = 40; // lazy "last seen" lookups per session
+    const TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz";
+
+    function presenceFetchJson(url) {
+      return fetch(url, { headers: { accept: "application/json" } }).then((res) => {
+        if (!res.ok) throw new Error("Bluesky request failed (" + res.status + ")");
+        return res.json();
+      });
+    }
+
+    async function fetchGraphDids(nsid, actor) {
+      const dids = new Map();
+      let cursor = "";
+      for (let page = 0; page < PRESENCE_GRAPH_PAGE_CAP; page += 1) {
+        const url = BSKY_APPVIEW + "/xrpc/" + nsid + "?actor=" + encodeURIComponent(actor) +
+          "&limit=100" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
+        const data = await presenceFetchJson(url);
+        const list = data[nsid.endsWith("getFollows") ? "follows" : "followers"] || [];
+        for (const actorObj of list) {
+          if (actorObj && actorObj.did) {
+            dids.set(actorObj.did, {
+              did: actorObj.did,
+              handle: actorObj.handle || actorObj.did,
+              displayName: actorObj.displayName || "",
+              avatar: actorObj.avatar || ""
+            });
+          }
+        }
+        cursor = data.cursor || "";
+        if (!cursor || list.length === 0) break;
+      }
+      return dids;
+    }
+
+    async function resolveMutuals(did) {
+      const [follows, followers] = await Promise.all([
+        fetchGraphDids("app.bsky.graph.getFollows", did),
+        fetchGraphDids("app.bsky.graph.getFollowers", did)
+      ]);
+      const mutuals = [];
+      for (const [otherDid, profile] of follows) {
+        if (followers.has(otherDid)) mutuals.push(profile);
+      }
+      return mutuals;
+    }
+
+    function tidToMs(tid) {
+      if (typeof tid !== "string" || tid.length < 10) return 0;
+      let n = 0n;
+      for (const char of tid) {
+        const index = TID_ALPHABET.indexOf(char);
+        if (index < 0) return 0;
+        n = n * 32n + BigInt(index);
+      }
+      return Number((n >> 10n) / 1000n);
+    }
+
+    function presenceStateFor(buddy, now) {
+      if (buddy.lastPostMs && now - buddy.lastPostMs <= PRESENCE_ONLINE_MS) return "online";
+      if (buddy.lastLurkMs && now - buddy.lastLurkMs <= PRESENCE_IDLE_MS) return "idle";
+      return "offline";
+    }
+
+    function presenceRank(stateName) {
+      if (stateName === "online") return 0;
+      if (stateName === "idle") return 1;
+      return 2;
+    }
+
+    function relativeTime(ms) {
+      if (!ms) return "";
+      const diff = Date.now() - ms;
+      if (diff < 60 * 1000) return "just now";
+      if (diff < 60 * 60 * 1000) return Math.floor(diff / 60000) + "m ago";
+      if (diff < 24 * 60 * 60 * 1000) return Math.floor(diff / 3600000) + "h ago";
+      return Math.floor(diff / 86400000) + "d ago";
+    }
+
+    function startPresence(force) {
+      const me = state.me;
+      if (!me || !me.loggedIn || !me.did) {
+        els.buddiesPanel.innerHTML = '<p class="subtle">Sign in with Bluesky to see which of your mutuals are online.</p>';
+        els.buddiesMetaLabel.textContent = "";
+        return;
+      }
+      if (state.presence.started && !force) {
+        renderBuddies();
+        return;
+      }
+      stopPresence();
+      state.presence.started = true;
+      state.presence.status = "connecting";
+      state.presence.buddies = new Map();
+      state.presence.settleAt = 0;
+      els.buddiesPanel.innerHTML = '<p class="subtle">Resolving your mutuals from the Bluesky AppView…</p>';
+      els.buddiesMetaLabel.textContent = "Connecting";
+
+      resolveMutuals(me.did).then((mutuals) => {
+        if (!state.presence.started) return;
+        for (const profile of mutuals) {
+          state.presence.buddies.set(profile.did, Object.assign({
+            lastPostMs: 0,
+            lastLurkMs: 0,
+            lastSeenMs: 0
+          }, profile));
+        }
+        if (mutuals.length === 0) {
+          els.buddiesPanel.innerHTML = '<p class="subtle">No mutuals found yet. Follow some folks back on Bluesky and refresh.</p>';
+          els.buddiesMetaLabel.textContent = "0 mutuals";
+          return;
+        }
+        // Suppress the online chime for the first few seconds while the
+        // backlog of recent events streams in and seeds initial state.
+        state.presence.settleAt = Date.now() + 6000;
+        openJetstream(mutuals.map((m) => m.did));
+        renderBuddies();
+        scheduleBackfill();
+      }).catch((error) => {
+        state.presence.status = "error";
+        els.buddiesPanel.innerHTML = '<p class="subtle">Could not load your mutuals: ' + escapeHtml(error.message) + '</p>';
+        els.buddiesMetaLabel.textContent = "Error";
+      });
+    }
+
+    function stopPresence() {
+      const p = state.presence;
+      if (p.ws) {
+        try { p.ws.onclose = null; p.ws.close(); } catch (error) { /* ignore */ }
+        p.ws = null;
+      }
+      if (p.reconnectTimer) { clearTimeout(p.reconnectTimer); p.reconnectTimer = null; }
+      if (p.decayTimer) { clearInterval(p.decayTimer); p.decayTimer = null; }
+      p.started = false;
+      p.status = "idle";
+    }
+
+    function openJetstream(dids) {
+      const p = state.presence;
+      const host = JETSTREAM_HOSTS[jetstreamHostIndex % JETSTREAM_HOSTS.length];
+      // Replay the last window so presence is seeded immediately instead of
+      // only filling in as mutuals happen to act while the tab is open.
+      const cursorUs = (Date.now() - PRESENCE_ONLINE_MS) * 1000;
+      const url = "wss://" + host + "/subscribe?requireHello=true&cursor=" + cursorUs;
+      let ws;
+      try {
+        ws = new WebSocket(url);
+      } catch (error) {
+        p.status = "error";
+        return;
+      }
+      p.ws = ws;
+
+      ws.onopen = () => {
+        p.status = "live";
+        // wantedDids MUST be sent as a hello message, not in the URL: hundreds
+        // of DIDs as query params blow past the WS handshake URL-length limit
+        // and the server refuses the connection.
+        ws.send(JSON.stringify({
+          type: "options_update",
+          payload: {
+            wantedCollections: [
+              "app.bsky.feed.post",
+              "app.bsky.feed.repost",
+              "app.bsky.feed.like",
+              "app.bsky.graph.follow"
+            ],
+            wantedDids: dids
+          }
+        }));
+        renderBuddies();
+      };
+
+      ws.onmessage = (event) => {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch (error) { return; }
+        handleJetstreamEvent(msg);
+      };
+
+      ws.onclose = () => {
+        if (!p.started || p.ws !== ws) return;
+        p.status = "reconnecting";
+        jetstreamHostIndex += 1;
+        renderBuddies();
+        p.reconnectTimer = setTimeout(() => {
+          if (p.started) openJetstream(dids);
+        }, 4000);
+      };
+
+      ws.onerror = () => {
+        try { ws.close(); } catch (error) { /* ignore */ }
+      };
+
+      if (!p.decayTimer) {
+        p.decayTimer = setInterval(() => renderBuddies(), 30000);
+      }
+    }
+
+    function handleJetstreamEvent(msg) {
+      if (!msg || msg.kind !== "commit" || !msg.commit) return;
+      const buddy = state.presence.buddies.get(msg.did);
+      if (!buddy) return;
+      const op = msg.commit.operation;
+      if (op !== "create") return;
+
+      const collection = msg.commit.collection;
+      const tsMs = msg.time_us ? Math.floor(msg.time_us / 1000) : Date.now();
+      const isPost = collection === "app.bsky.feed.post" || collection === "app.bsky.feed.repost";
+      const isLurk = collection === "app.bsky.feed.like" || collection === "app.bsky.graph.follow";
+      if (!isPost && !isLurk) return;
+
+      const wasOnline = presenceStateFor(buddy, Date.now()) === "online";
+      if (isPost && tsMs > buddy.lastPostMs) buddy.lastPostMs = tsMs;
+      if (tsMs > buddy.lastLurkMs) buddy.lastLurkMs = tsMs;
+      if (tsMs > buddy.lastSeenMs) buddy.lastSeenMs = tsMs;
+
+      const nowOnline = presenceStateFor(buddy, Date.now()) === "online";
+      if (isPost && nowOnline && !wasOnline && Date.now() > state.presence.settleAt) {
+        playSfx("buddy");
+      }
+      queueBuddiesRender();
+    }
+
+    function queueBuddiesRender() {
+      if (state.presence.renderTimer) return;
+      state.presence.renderTimer = setTimeout(() => {
+        state.presence.renderTimer = null;
+        renderBuddies();
+      }, 400);
+    }
+
+    function scheduleBackfill() {
+      const p = state.presence;
+      if (p.backfillStarted) return;
+      p.backfillStarted = true;
+      const offline = [...p.buddies.values()].filter((b) => !b.lastSeenMs).slice(0, PRESENCE_BACKFILL_CAP);
+      let index = 0;
+      const step = () => {
+        if (!p.started || index >= offline.length) return;
+        const buddy = offline[index];
+        index += 1;
+        backfillLastSeen(buddy).finally(() => setTimeout(step, 250));
+      };
+      step();
+    }
+
+    async function backfillLastSeen(buddy) {
+      try {
+        const doc = await presenceFetchJson("https://plc.directory/" + encodeURIComponent(buddy.did));
+        const services = Array.isArray(doc.service) ? doc.service : [];
+        const pds = services.find((s) => s && (s.type === "AtprotoPersonalDataServer" || String(s.id || "").endsWith("#atproto_pds")));
+        let endpoint = pds && pds.serviceEndpoint;
+        if (!endpoint) return;
+        if (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
+        const data = await presenceFetchJson(endpoint +
+          "/xrpc/com.atproto.sync.getLatestCommit?did=" + encodeURIComponent(buddy.did));
+        const ms = tidToMs(data.rev);
+        if (ms && ms > buddy.lastSeenMs) {
+          buddy.lastSeenMs = ms;
+          queueBuddiesRender();
+        }
+      } catch (error) {
+        // Best effort; offline buddies just show no "last seen".
+      }
+    }
+
+    function renderBuddies() {
+      if (!state.presence.started) return;
+      const now = Date.now();
+      const buddies = [...state.presence.buddies.values()].map((buddy) => {
+        return { buddy, stateName: presenceStateFor(buddy, now) };
+      });
+      buddies.sort((a, b) => {
+        const rank = presenceRank(a.stateName) - presenceRank(b.stateName);
+        if (rank !== 0) return rank;
+        const an = (a.buddy.displayName || a.buddy.handle).toLowerCase();
+        const bn = (b.buddy.displayName || b.buddy.handle).toLowerCase();
+        return an < bn ? -1 : an > bn ? 1 : 0;
+      });
+
+      const counts = { online: 0, idle: 0, offline: 0 };
+      for (const item of buddies) counts[item.stateName] += 1;
+
+      const statusLabel = state.presence.status === "live" ? "live"
+        : state.presence.status === "reconnecting" ? "reconnecting…"
+        : state.presence.status === "connecting" ? "connecting…"
+        : state.presence.status;
+      els.buddiesMetaLabel.textContent = counts.online + " online · " + counts.idle + " lurking · " +
+        buddies.length + " mutuals · firehose " + statusLabel;
+
+      if (buddies.length === 0) {
+        els.buddiesPanel.innerHTML = '<p class="subtle">No mutuals to show.</p>';
+        return;
+      }
+
+      let html = '<ul class="buddy-list">';
+      let lastGroup = "";
+      const groupTitles = { online: "Active", idle: "Lurking", offline: "Offline" };
+      for (const item of buddies) {
+        if (item.stateName !== lastGroup) {
+          lastGroup = item.stateName;
+          html += '<li class="buddy-group">' + groupTitles[lastGroup] + '</li>';
+        }
+        html += renderBuddyRow(item.buddy, item.stateName);
+      }
+      html += '</ul>';
+      els.buddiesPanel.innerHTML = html;
+    }
+
+    function renderBuddyRow(buddy, stateName) {
+      const name = buddy.displayName || buddy.handle;
+      const avatar = buddy.avatar
+        ? '<img class="buddy-avatar" src="' + escapeAttr(buddy.avatar) + '" alt="" loading="lazy">'
+        : '<span class="buddy-avatar buddy-avatar-blank"></span>';
+      let sub = "@" + buddy.handle;
+      if (stateName === "online") {
+        sub = "active · " + relativeTime(buddy.lastPostMs);
+      } else if (stateName === "idle") {
+        sub = "lurking · " + relativeTime(buddy.lastLurkMs);
+      } else if (buddy.lastSeenMs) {
+        sub = "last seen " + relativeTime(buddy.lastSeenMs);
+      }
+      const canChallenge = stateName !== "offline";
+      const profileUrl = "https://bsky.app/profile/" + encodeURIComponent(buddy.handle);
+      return '<li class="buddy-row ' + stateName + '">' +
+        '<span class="buddy-dot ' + stateName + '"></span>' +
+        avatar +
+        '<span class="buddy-meta">' +
+          '<span class="buddy-name">' + escapeHtml(name) + '</span>' +
+          '<span class="buddy-sub">' + escapeHtml(sub) + '</span>' +
+        '</span>' +
+        '<span class="buddy-actions">' +
+          (canChallenge
+            ? '<button class="secondary buddy-challenge" type="button" data-buddy-challenge="' + escapeAttr(buddy.handle) + '" data-buddy-did="' + escapeAttr(buddy.did) + '">Challenge</button>'
+            : '') +
+          '<a class="buddy-profile" href="' + escapeAttr(profileUrl) + '" target="_blank" rel="noopener">Profile</a>' +
+        '</span>' +
+      '</li>';
+    }
+
+    function onBuddiesPanelClick(event) {
+      const button = event.target.closest("[data-buddy-challenge]");
+      if (!button) return;
+      const handle = button.getAttribute("data-buddy-challenge");
+      if (!handle) return;
+      playSfx("click");
+      challengeBuddyByHandle(handle);
+    }
+
+    async function challengeBuddyByHandle(handle) {
+      // Hand off to the existing Battle-tab challenge flow with the opponent
+      // handle prefilled, so the rest of the challenge machinery is reused.
+      await switchView("battle");
+      const handleInput = document.getElementById("challengeHandleInput");
+      if (handleInput) {
+        handleInput.value = handle;
+        handleInput.focus();
+        handleInput.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      setStatus("Pick 5 ready sprites, then send your challenge to @" + handle + ".");
+    }
+
     // -- Retro sound effects (WebAudio, fully synthesized, no assets) -------
 
     let audioCtx = null;
@@ -14550,6 +15088,10 @@ function renderAppHtml() {
           sfxTone(ctx, out, { type: "triangle", from: 350, dur: 0.1, gain: 0.09 });
         } else if (name === "faint") {
           sfxTone(ctx, out, { type: "square", from: 280, to: 42, dur: 0.45, gain: 0.16 });
+        } else if (name === "buddy") {
+          // AIM-style "door open" two-note rising chime.
+          sfxTone(ctx, out, { type: "sine", from: 660, dur: 0.1, gain: 0.12 });
+          sfxTone(ctx, out, { type: "sine", from: 988, dur: 0.16, gain: 0.12, delay: 0.09 });
         } else if (name === "start") {
           sfxTone(ctx, out, { type: "square", from: 392, dur: 0.11, gain: 0.12 });
           sfxTone(ctx, out, { type: "square", from: 523, dur: 0.16, gain: 0.12, delay: 0.11 });
