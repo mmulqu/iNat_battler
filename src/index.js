@@ -9292,6 +9292,45 @@ function renderAppHtml() {
       text-shadow: 2px 2px 0 #2f7d42, -1px -1px 0 #2f7d42, 1px -1px 0 #2f7d42, -1px 1px 0 #2f7d42;
     }
 
+    .dmg-float.big {
+      font-size: 2.1rem;
+    }
+
+    .dmg-float.word {
+      font-size: 1rem;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+
+    .dmg-float.buff {
+      text-shadow: 2px 2px 0 #2f7d42, -1px -1px 0 #2f7d42, 1px -1px 0 #2f7d42, -1px 1px 0 #2f7d42;
+    }
+
+    .dmg-float.debuff {
+      text-shadow: 2px 2px 0 #9a4a14, -1px -1px 0 #9a4a14, 1px -1px 0 #9a4a14, -1px 1px 0 #9a4a14;
+    }
+
+    .dmg-float.status-fx {
+      text-shadow: 2px 2px 0 #6a3a8a, -1px -1px 0 #6a3a8a, 1px -1px 0 #6a3a8a, -1px 1px 0 #6a3a8a;
+    }
+
+    .dmg-float.miss {
+      color: #f0f0f0;
+      text-shadow: 2px 2px 0 #5a6068, -1px -1px 0 #5a6068, 1px -1px 0 #5a6068, -1px 1px 0 #5a6068;
+    }
+
+    .dmg-float.eff-strong {
+      color: #eaffe9;
+      font-size: 1.15rem;
+      text-shadow: 2px 2px 0 #2e9e4f, -1px -1px 0 #2e9e4f, 1px -1px 0 #2e9e4f, -1px 1px 0 #2e9e4f;
+    }
+
+    .dmg-float.eff-weak {
+      color: #e9e9e9;
+      font-size: 0.92rem;
+      text-shadow: 2px 2px 0 #6b7178, -1px -1px 0 #6b7178, 1px -1px 0 #6b7178, -1px 1px 0 #6b7178;
+    }
+
     .dmg-float.crit {
       font-size: 2.1rem;
       color: #ffe066;
@@ -9853,6 +9892,39 @@ function renderAppHtml() {
 
     .move-button .eff-tag {
       font-weight: 900;
+    }
+
+    .move-button .move-meta {
+      display: block;
+      margin-top: 3px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .move-button .meta-dmg {
+      color: #b3541e;
+      font-weight: 900;
+    }
+
+    .stage-chip {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.66rem;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+    }
+
+    .stage-chip.up {
+      background: #1f4d2c;
+      color: #9ff0b0;
+    }
+
+    .stage-chip.down {
+      background: #5a2520;
+      color: #f6b0a4;
     }
 
     .move-button.eff-strong .eff-tag {
@@ -10540,6 +10612,59 @@ function renderAppHtml() {
         (multiplier, defenderType) => multiplier * (TYPE_CHART[moveType]?.[defenderType] ?? 1),
         1
       );
+    }
+
+    function stagedStatValue(base, stage) {
+      const clamped = Math.max(-4, Math.min(4, Number(stage) || 0));
+      if (clamped >= 0) return base * (1 + clamped * 0.25);
+      return base / (1 + Math.abs(clamped) * 0.25);
+    }
+
+    // Mirrors the server damage formula (game.js estimateDamage) at mid
+    // variance so move buttons can show an honest "~N dmg" against the
+    // current opponent, including stat stages, STAB, and fatigue.
+    function estimateMoveDamage(battle, attacker, defender, move) {
+      if (!move || move.category === "status" || !move.power) return null;
+      const attackKey = move.category === "physical" ? "strike" : "sense";
+      const atk = stagedStatValue(attacker.stats[attackKey], attacker.statStages && attacker.statStages[attackKey]);
+      const guard = stagedStatValue(defender.stats.guard, defender.statStages && defender.statStages.guard);
+      const def = move.category === "physical"
+        ? guard
+        : (guard + stagedStatValue(defender.stats.sense, defender.statStages && defender.statStages.sense)) / 2;
+      const stab = (attacker.types || []).includes(move.type) ? 1.15 : 1;
+      const typeMult = typeMultiplierFor(move.type, defender.types || []);
+      const bond = 1 + Math.min(0.08, (attacker.bondLevel || 0) * 0.002);
+      const fatigue = 1 + Math.max(0, (battle.turn || 0) - 20) * 0.06;
+      const base = move.power * (atk / Math.max(1, def)) * stab * typeMult * bond * 0.6 * 0.975 * fatigue;
+      return Math.max(1, Math.floor(base));
+    }
+
+    function describeMoveEffect(move) {
+      const parts = [];
+      if ((move.priority || 0) > 0) parts.push("strikes first");
+      const effect = move.effect;
+      if (!effect) return parts;
+      const statLabel = { vigor: "Vigor", strike: "Strike", guard: "Guard", tempo: "Tempo", sense: "Sense" };
+
+      if (effect.kind === "buff") {
+        parts.push("+" + (effect.amount || 1) + " " + (statLabel[effect.stat] || effect.stat) + " self");
+      } else if (effect.kind === "debuff") {
+        parts.push("-" + (effect.amount || 1) + " " + (statLabel[effect.stat] || effect.stat) + " foe");
+      } else if (effect.kind === "heal") {
+        parts.push("heal " + (effect.amountPct || 0) + "% HP");
+      } else if (effect.kind === "status") {
+        const verb = { stunned: "stun", marked: "mark", poisoned: "poison", shielded: "shield" }[effect.status] || effect.status;
+        const target = effect.status === "shielded" ? "self" : "foe";
+        const chance = effect.chance && effect.chance < 100 ? effect.chance + "% " : "";
+        parts.push(chance + verb + " " + target);
+      } else if (effect.kind === "drain") {
+        parts.push("drain " + (effect.pct || 30) + "% of dmg");
+      } else if (effect.kind === "recoil") {
+        parts.push((effect.pct || 25) + "% recoil");
+      } else if (effect.kind === "multihit") {
+        parts.push("hits " + (effect.min || 2) + "-" + (effect.max || 3) + "x");
+      }
+      return parts;
     }
     const BATCH_POLL_MS = 60000;
     const DEV_QUEUE_MORE_LIMIT = 100;
@@ -13987,6 +14112,7 @@ function renderAppHtml() {
         player: { hp: getActiveCreature(prev.player).hp, max: getActiveCreature(prev.player).maxHp },
         opponent: { hp: getActiveCreature(prev.opponent).hp, max: getActiveCreature(prev.opponent).maxHp }
       };
+      let lastTargetSide = "opponent";
 
       for (const entry of events) {
         appendBattleLogLine(entry);
@@ -14001,6 +14127,7 @@ function renderAppHtml() {
           const moveId = entry.data && entry.data.moveId;
           const isCrit = Boolean(entry.data && entry.data.crit);
           const category = moveCategoryFor(prev, actorSide, moveId);
+          lastTargetSide = targetSide;
           triggerAttackVisual(actorSide, moveAnimClassFor(actorCreature, moveId));
           if (category === "special") playSfx("special");
           await delay(280);
@@ -14016,6 +14143,18 @@ function renderAppHtml() {
         if (text === "A critical hit!") {
           // The crit burst already played alongside the damage line.
           await delay(140);
+          continue;
+        }
+
+        if (/^It's super effective!$/.test(text)) {
+          spawnFloat(lastTargetSide, "SUPER EFFECTIVE!", "word eff-strong");
+          await delay(340);
+          continue;
+        }
+
+        if (/not very effective/.test(text)) {
+          spawnFloat(lastTargetSide, "RESISTED", "word eff-weak");
+          await delay(300);
           continue;
         }
 
@@ -14064,7 +14203,7 @@ function renderAppHtml() {
         const stunMatch = text.match(/^(.+) is stunned and cannot move\.$/);
         if (stunMatch) {
           playSfx("debuff");
-          spawnFloat(sideForName(stunMatch[1], prev), "stunned", "dmg");
+          spawnFloat(sideForName(stunMatch[1], prev), "STUNNED!", "word status-fx");
           await delay(520);
           continue;
         }
@@ -14108,27 +14247,43 @@ function renderAppHtml() {
           continue;
         }
 
-        if (/shield softened the blow\.$/.test(text) || / raised a shield\.$/.test(text)) {
+        const blockedMatch = text.match(/^(.+)'s shield softened the blow\.$/);
+        if (blockedMatch) {
           playSfx("buff");
+          spawnFloat(sideForName(blockedMatch[1], prev), "BLOCKED", "word buff");
           await delay(380);
           continue;
         }
-        if (/ was poisoned\.$/.test(text) || / is marked for the hunt\.$/.test(text) || / is stunned\.$/.test(text)) {
-          playSfx("status");
-          await delay(380);
+
+        const appliedMatch =
+          text.match(/^(.+) was (poisoned)\.$/) ||
+          text.match(/^(.+) is (marked) for the hunt\.$/) ||
+          text.match(/^(.+) is (stunned)\.$/) ||
+          text.match(/^(.+) (raised a shield)\.$/);
+        if (appliedMatch) {
+          const side = sideForName(appliedMatch[1], prev);
+          const label = appliedMatch[2] === "raised a shield" ? "SHIELDED" : appliedMatch[2].toUpperCase();
+          playSfx(appliedMatch[2] === "raised a shield" ? "buff" : "status");
+          spawnFloat(side, label, "word status-fx");
+          await delay(420);
           continue;
         }
+
         if (/ shook off the poison\.$/.test(text)) {
+          const curedMatch = text.match(/^(.+) shook off the poison\.$/);
           playSfx("heal");
-          await delay(320);
+          if (curedMatch) spawnFloat(sideForName(curedMatch[1], prev), "CURED", "word heal");
+          await delay(360);
           continue;
         }
 
         const missMatch = text.match(/^(.+) used (.+), but it missed\.$/);
         if (missMatch) {
-          triggerAttackVisual(sideForName(missMatch[1], prev), "anim-attack");
+          const actorSide = sideForName(missMatch[1], prev);
+          triggerAttackVisual(actorSide, "anim-attack");
           await delay(240);
           playSfx("miss");
+          spawnFloat(actorSide === "player" ? "opponent" : "player", "MISS", "word miss");
           await delay(420);
           continue;
         }
@@ -14155,6 +14310,20 @@ function renderAppHtml() {
           continue;
         }
 
+        const roseMatch = text.match(/^(.+)'s (vigor|strike|guard|tempo|sense) rose\.$/);
+        if (roseMatch) {
+          playSfx("buff");
+          spawnFloat(sideForName(roseMatch[1], prev), roseMatch[2].toUpperCase() + " ▲", "word buff");
+          await delay(420);
+          continue;
+        }
+        const fellMatch = text.match(/^(.+)'s (vigor|strike|guard|tempo|sense) fell\.$/);
+        if (fellMatch) {
+          playSfx("debuff");
+          spawnFloat(sideForName(fellMatch[1], prev), fellMatch[2].toUpperCase() + " ▼", "word debuff");
+          await delay(420);
+          continue;
+        }
         if (/ rose\.$/.test(text)) {
           playSfx("buff");
           await delay(380);
@@ -14251,8 +14420,8 @@ function renderAppHtml() {
         }
       }
 
-      spawnFloat(targetSide, "-" + damage, "dmg");
       const target = hpState[targetSide];
+      spawnFloat(targetSide, "-" + damage, damage >= target.max * 0.22 ? "big" : "");
       target.hp = Math.max(0, target.hp - damage);
       setHpBar(targetSide, target.hp, target.max);
     }
@@ -14272,10 +14441,13 @@ function renderAppHtml() {
       const zone = els.battlePanel.querySelector('[data-sprite-zone="' + side + '"]');
       if (!zone) return;
       const el = document.createElement("div");
-      el.className = "dmg-float" + (kind === "heal" ? " heal" : kind === "crit" ? " crit" : "");
+      el.className = "dmg-float" + (kind ? " " + kind : "");
       el.textContent = text;
+      // Stack concurrent floats upward so simultaneous events stay readable.
+      const live = zone.querySelectorAll(".dmg-float").length;
+      if (live > 0) el.style.top = "calc(26% - " + Math.min(3, live) * 24 + "px)";
       zone.appendChild(el);
-      setTimeout(() => el.remove(), kind === "crit" ? 1000 : 900);
+      setTimeout(() => el.remove(), kind === "crit" ? 1000 : 950);
     }
 
     function faintEffect(side) {
@@ -14573,13 +14745,23 @@ function renderAppHtml() {
         ? playerActive.moves.map((move) => {
             const eff = move.category === "status" ? 1 : typeMultiplierFor(move.type, opponentActive.types);
             const effClass = eff >= 1.2 ? " eff-strong" : eff <= 0.85 ? " eff-weak" : "";
-            const effTag = eff >= 1.2 || eff <= 0.85
-              ? ' <span class="eff-tag">x' + eff.toFixed(2).replace(/0+$/, "").replace(/\.$/, "") + '</span>'
-              : "";
+            const effLabel = "x" + eff.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+            const estimate = estimateMoveDamage(battle, playerActive, opponentActive, move);
+            const metaBits = [];
+            if (estimate !== null) {
+              const multihit = move.effect && move.effect.kind === "multihit";
+              metaBits.push(
+                '<strong class="meta-dmg">~' + estimate + (multihit ? " x" + (move.effect.min || 2) + "-" + (move.effect.max || 3) : "") + " dmg</strong>" +
+                (eff !== 1 ? ' <span class="eff-tag">' + effLabel + "</span>" : "")
+              );
+            }
+            metaBits.push(...describeMoveEffect(move).map(escapeHtml));
+            if (Number(move.accuracy) < 100) metaBits.push(Number(move.accuracy) + "% acc");
             return '<button class="move-button' + (move.signature ? " signature" : "") + effClass + '" type="button" data-move-id="' + escapeAttr(move.id) + '" ' +
               (move.flavor ? 'title="' + escapeAttr(move.flavor) + '" ' : "") + (state.battleBusy ? "disabled" : "") + '>' +
               escapeHtml(move.name) + (move.signature ? ' <span class="sig-star">★</span>' : "") +
-              '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + effTag + '</span>' +
+              '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + '</span>' +
+              (metaBits.length ? '<span class="move-meta">' + metaBits.join(" · ") + '</span>' : "") +
             '</button>';
           }).join("")
         : '<button class="move-button" type="button" disabled>Battle ' + escapeHtml(battle.status) + '</button>';
@@ -14661,11 +14843,23 @@ function renderAppHtml() {
           '</div>' +
           '<div class="hp" aria-label="HP"><span data-hp-bar="' + side + '" class="' + (hpPct <= 25 ? "hp-low" : "") + '" style="--hp:' + hpPct + '%"></span></div>' +
           '<div class="subtle" data-hp-text="' + side + '">' + Number(creature.hp || 0) + ' / ' + Number(creature.maxHp || 0) + ' HP</div>' +
-          ((creature.statuses || []).length
-            ? '<div class="status-chips">' + creature.statuses.map((status) => (
-                '<span class="status-chip status-' + escapeAttr(status) + '">' + escapeHtml(status) + '</span>'
-              )).join("") + '</div>'
-            : "") +
+          (function () {
+            const statusChips = (creature.statuses || []).map((status) => (
+              '<span class="status-chip status-' + escapeAttr(status) + '">' + escapeHtml(status) + '</span>'
+            )).join("");
+            const stageAbbrev = { vigor: "VIG", strike: "STR", guard: "GRD", tempo: "TMP", sense: "SNS" };
+            const stageChips = Object.entries(creature.statStages || {})
+              .filter(([, value]) => Number(value))
+              .map(([stat, value]) => {
+                const stage = Number(value);
+                return '<span class="stage-chip ' + (stage > 0 ? "up" : "down") + '">' +
+                  (stageAbbrev[stat] || stat.slice(0, 3).toUpperCase()) + " " + (stage > 0 ? "+" : "") + stage +
+                '</span>';
+              }).join("");
+            return statusChips || stageChips
+              ? '<div class="status-chips">' + statusChips + stageChips + '</div>'
+              : "";
+          })() +
           '<div class="bench">' + bench + '</div>' +
         '</div>' +
         '<div class="combatant-sprite" data-sprite-zone="' + side + '">' +
