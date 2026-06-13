@@ -54,6 +54,10 @@ import statusMarkedImage from "./assets/status-marked.png";
 import statusPoisonedImage from "./assets/status-poisoned.png";
 import statusShieldedImage from "./assets/status-shielded.png";
 import statusRalliedImage from "./assets/status-rallied.png";
+import iconImage192 from "./assets/icon-192.png";
+import iconImage512 from "./assets/icon-512.png";
+import iconImage512Maskable from "./assets/icon-512-maskable.png";
+import appleTouchIcon180 from "./assets/apple-touch-icon-180.png";
 
 // 4x4 sprite sheets (16 frames, left-to-right then top-to-bottom) rendered as
 // small looping overlays above creatures with the matching status in battle.
@@ -219,6 +223,30 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "GET" && url.pathname === "/assets/landing-hero-battle.png") {
     return bundledImageResponse(landingHeroBattleImage, "image/png");
+  }
+
+  if (request.method === "GET" && url.pathname === "/assets/icon-192.png") {
+    return bundledImageResponse(iconImage192, "image/png");
+  }
+
+  if (request.method === "GET" && url.pathname === "/assets/icon-512.png") {
+    return bundledImageResponse(iconImage512, "image/png");
+  }
+
+  if (request.method === "GET" && url.pathname === "/assets/icon-512-maskable.png") {
+    return bundledImageResponse(iconImage512Maskable, "image/png");
+  }
+
+  if (request.method === "GET" && url.pathname === "/assets/apple-touch-icon-180.png") {
+    return bundledImageResponse(appleTouchIcon180, "image/png");
+  }
+
+  if (request.method === "GET" && url.pathname === "/manifest.webmanifest") {
+    return manifestResponse();
+  }
+
+  if (request.method === "GET" && url.pathname === "/sw.js") {
+    return serviceWorkerResponse();
   }
 
   const statusImageMatch = url.pathname.match(/^\/assets\/status-([a-z]+)\.png$/);
@@ -7270,6 +7298,83 @@ function bundledImageResponse(bytes, contentType) {
   });
 }
 
+function manifestResponse() {
+  const manifest = {
+    name: "iNat Battler",
+    short_name: "iNat Battler",
+    description: "Turn your iNaturalist observations into a creature-battler roster.",
+    start_url: "/",
+    scope: "/",
+    display: "standalone",
+    orientation: "portrait",
+    background_color: "#f5f2ea",
+    theme_color: "#047c78",
+    icons: [
+      { src: "/assets/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+      { src: "/assets/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+      { src: "/assets/icon-512-maskable.png", sizes: "512x512", type: "image/png", purpose: "maskable" }
+    ]
+  };
+  return new Response(JSON.stringify(manifest), {
+    headers: {
+      "content-type": "application/manifest+json; charset=utf-8",
+      "cache-control": "public, max-age=3600"
+    }
+  });
+}
+
+// Minimal install-enabling service worker. Network-first for navigations
+// (so the app never serves a stale shell while online), cache-first for the
+// immutable bundled assets, with a precached "/" fallback for offline.
+function serviceWorkerResponse() {
+  const sw = `
+const CACHE = "inat-battler-v1";
+const PRECACHE = ["/", "/assets/icon-192.png", "/assets/icon-512.png"];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(PRECACHE)).then(() => self.skipWaiting()));
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener("fetch", (event) => {
+  const request = event.request;
+  if (request.method !== "GET") return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+
+  if (request.mode === "navigate") {
+    event.respondWith(
+      fetch(request).catch(() => caches.match("/").then((hit) => hit || Response.error()))
+    );
+    return;
+  }
+
+  if (url.pathname.startsWith("/assets/")) {
+    event.respondWith(
+      caches.match(request).then((hit) => hit || fetch(request).then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE).then((cache) => cache.put(request, copy));
+        return res;
+      }))
+    );
+  }
+});
+`;
+  return new Response(sw, {
+    headers: {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-cache"
+    }
+  });
+}
+
 function corsHeaders() {
   return {
     "access-control-allow-origin": "*",
@@ -7288,7 +7393,17 @@ function renderAppHtml() {
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="iNat Battler">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon-180.png">
   <title>iNat Battler</title>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("/sw.js").catch(function () {});
+      });
+    }
+  </script>
   <style>
     :root {
       color-scheme: light;
