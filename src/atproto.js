@@ -385,6 +385,30 @@ export function buildChallengePostRecord({ opponentHandle, opponentDid, challeng
   };
 }
 
+// Generic share post: plain text that ends with (or contains) a URL that
+// should be tappable. Used for win-brags and leaderboard-rank posts.
+export function buildShareTextPostRecord({ text, linkUrl }) {
+  const record = {
+    $type: "app.bsky.feed.post",
+    text,
+    createdAt: new Date().toISOString()
+  };
+
+  if (linkUrl && text.includes(linkUrl)) {
+    const before = text.slice(0, text.indexOf(linkUrl));
+    const linkStart = textEncoder.encode(before).length;
+    const linkEnd = linkStart + textEncoder.encode(linkUrl).length;
+    record.facets = [
+      {
+        index: { byteStart: linkStart, byteEnd: linkEnd },
+        features: [{ $type: "app.bsky.richtext.facet#link", uri: linkUrl }]
+      }
+    ];
+  }
+
+  return record;
+}
+
 // ---------------------------------------------------------------------------
 // Client metadata
 // ---------------------------------------------------------------------------

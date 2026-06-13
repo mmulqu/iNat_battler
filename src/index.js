@@ -32,6 +32,7 @@ import {
 
 import {
   buildChallengePostRecord,
+  buildShareTextPostRecord,
   clientMetadataDocument,
   exchangeAuthorizationCode,
   fetchPublicProfile,
@@ -48,6 +49,21 @@ import {
 } from "./atproto.js";
 
 import landingHeroBattleImage from "./assets/landing-hero-battle.png";
+import statusStunnedImage from "./assets/status-stunned.png";
+import statusMarkedImage from "./assets/status-marked.png";
+import statusPoisonedImage from "./assets/status-poisoned.png";
+import statusShieldedImage from "./assets/status-shielded.png";
+import statusRalliedImage from "./assets/status-rallied.png";
+
+// 4x4 sprite sheets (16 frames, left-to-right then top-to-bottom) rendered as
+// small looping overlays above creatures with the matching status in battle.
+const STATUS_EFFECT_IMAGES = {
+  stunned: statusStunnedImage,
+  marked: statusMarkedImage,
+  poisoned: statusPoisonedImage,
+  shielded: statusShieldedImage,
+  rallied: statusRalliedImage
+};
 
 const ASSET_VERSION = 1;
 const DEFAULT_ASSET_KIND = "sprite_sheet";
@@ -203,6 +219,11 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "GET" && url.pathname === "/assets/landing-hero-battle.png") {
     return bundledImageResponse(landingHeroBattleImage, "image/png");
+  }
+
+  const statusImageMatch = url.pathname.match(/^\/assets\/status-([a-z]+)\.png$/);
+  if (request.method === "GET" && statusImageMatch && STATUS_EFFECT_IMAGES[statusImageMatch[1]]) {
+    return bundledImageResponse(STATUS_EFFECT_IMAGES[statusImageMatch[1]], "image/png");
   }
 
   if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/health")) {
@@ -554,6 +575,23 @@ async function routeRequest(request, env, ctx) {
     const name = String(payload.name ?? "Field Team");
     const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
     return jsonResponse(await saveTeam(env, userId, name, taxonIds));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/leaderboard") {
+    const session = await getSession(request, env);
+    const viewerUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
+    return jsonResponse(await getLeaderboard(env, viewerUserId));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/share/battle") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await shareBattleToBluesky(env, session, String(payload.battleId ?? ""), url.origin));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/share/rank") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await shareRankToBluesky(env, session, url.origin));
   }
 
   if (request.method === "POST" && url.pathname === "/api/battles/npc/start") {
@@ -4493,6 +4531,12 @@ async function submitBattleMove(env, battleId, moveId, switchIndex = null) {
   const next = resolveTurn(state, playerAction, npcAction, rng);
   const now = new Date().toISOString();
 
+  if (next.status !== "active") {
+    // Attach the rating change to the final state so the result overlay can
+    // show "+12 · 3-win streak" and a refresh doesn't lose it.
+    next.ratingUpdate = await applyBattleResultToRatings(env, next, now);
+  }
+
   await env.DB.prepare(`
     UPDATE battle_instances
     SET state_json = ?, turn = ?, status = ?, updated_at = ?
@@ -4550,6 +4594,231 @@ async function assertUserOwnsReadyTaxa(env, userId, taxonIds) {
   if ((rows.results ?? []).length !== taxonIds.length) {
     throw new Error("Team must use 5 ready sprites from this user's roster");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard: Elo-style Field Score, streaks, rank titles, Bluesky sharing
+// ---------------------------------------------------------------------------
+
+const RATING_BASE = 1000;
+const RATING_K = 32;
+const NPC_DIFFICULTY_RATING = { easy: 850, normal: 1000, hard: 1150 };
+const RANK_TITLES = [
+  { min: 1350, title: "Apex Predator", emoji: "🦅" },
+  { min: 1250, title: "Canopy Ranger", emoji: "🦉" },
+  { min: 1150, title: "Trailblazer", emoji: "🐾" },
+  { min: 1050, title: "Field Naturalist", emoji: "🌿" },
+  { min: 950, title: "Fledgling", emoji: "🐣" },
+  { min: -Infinity, title: "Sprout", emoji: "🌱" }
+];
+
+function rankTitleFor(rating) {
+  return RANK_TITLES.find((band) => rating >= band.min);
+}
+
+// Updates the player's rating row when an NPC battle finishes. Returns the
+// summary attached to the final battle state (null for demo/unrated battles).
+async function applyBattleResultToRatings(env, state, now) {
+  const userId = state.player?.userId;
+  if (!userId || state.demo || state.mode !== "npc") return null;
+  if (userId.startsWith("demo:")) return null;
+  if (!["won", "lost", "draw"].includes(state.status)) return null;
+
+  const row = await env.DB.prepare(`
+    SELECT * FROM player_ratings WHERE user_id = ?
+  `).bind(userId).first();
+
+  const rating = Number(row?.rating ?? RATING_BASE);
+  const difficulty = ["easy", "normal", "hard"].includes(state.difficulty) ? state.difficulty : "normal";
+  const opponentRating = NPC_DIFFICULTY_RATING[difficulty];
+  const score = state.status === "won" ? 1 : state.status === "draw" ? 0.5 : 0;
+  const expected = 1 / (1 + Math.pow(10, (opponentRating - rating) / 400));
+  const newRating = Math.max(100, rating + RATING_K * (score - expected));
+  const delta = newRating - rating;
+
+  const winStreak = state.status === "won" ? Number(row?.win_streak ?? 0) + 1 : 0;
+  const bestStreak = Math.max(Number(row?.best_streak ?? 0), winStreak);
+  const turns = Math.max(1, Number(state.turn ?? 1) - 1);
+  const fastestWin = state.status === "won"
+    ? Math.min(Number(row?.fastest_win_turns ?? Infinity), turns)
+    : Number(row?.fastest_win_turns ?? Infinity);
+
+  await env.DB.prepare(`
+    INSERT INTO player_ratings (
+      user_id, rating, wins, losses, draws, battles, win_streak, best_streak,
+      fastest_win_turns, last_result, last_battle_at, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      rating = excluded.rating,
+      wins = player_ratings.wins + excluded.wins,
+      losses = player_ratings.losses + excluded.losses,
+      draws = player_ratings.draws + excluded.draws,
+      battles = player_ratings.battles + 1,
+      win_streak = excluded.win_streak,
+      best_streak = excluded.best_streak,
+      fastest_win_turns = excluded.fastest_win_turns,
+      last_result = excluded.last_result,
+      last_battle_at = excluded.last_battle_at,
+      updated_at = excluded.updated_at
+  `).bind(
+    userId,
+    newRating,
+    state.status === "won" ? 1 : 0,
+    state.status === "lost" ? 1 : 0,
+    state.status === "draw" ? 1 : 0,
+    winStreak,
+    bestStreak,
+    Number.isFinite(fastestWin) ? fastestWin : null,
+    state.status,
+    now,
+    now,
+    now
+  ).run();
+
+  const rank = await getPlayerRank(env, newRating, userId);
+  const band = rankTitleFor(newRating);
+
+  return {
+    rating: Math.round(newRating),
+    delta: Math.round(delta),
+    winStreak,
+    bestStreak,
+    rank,
+    title: band.title,
+    titleEmoji: band.emoji,
+    difficulty
+  };
+}
+
+async function getPlayerRank(env, rating, userId) {
+  const row = await env.DB.prepare(`
+    SELECT COUNT(*) AS better
+    FROM player_ratings
+    WHERE rating > ? OR (rating = ? AND user_id < ?)
+  `).bind(rating, rating, userId).first();
+  return Number(row?.better ?? 0) + 1;
+}
+
+function leaderboardEntry(row, rank) {
+  const rating = Math.round(Number(row.rating ?? RATING_BASE));
+  const band = rankTitleFor(rating);
+  return {
+    rank,
+    userId: row.user_id,
+    name: row.bsky_display_name || row.user_display_name || row.bsky_handle || row.inat_login || row.user_id,
+    handle: row.bsky_handle || null,
+    inatLogin: row.inat_login || null,
+    avatarUrl: row.avatar_url || null,
+    rating,
+    title: band.title,
+    titleEmoji: band.emoji,
+    wins: Number(row.wins ?? 0),
+    losses: Number(row.losses ?? 0),
+    draws: Number(row.draws ?? 0),
+    battles: Number(row.battles ?? 0),
+    winStreak: Number(row.win_streak ?? 0),
+    bestStreak: Number(row.best_streak ?? 0),
+    fastestWinTurns: row.fastest_win_turns === null || row.fastest_win_turns === undefined
+      ? null
+      : Number(row.fastest_win_turns),
+    lastBattleAt: row.last_battle_at || null
+  };
+}
+
+const LEADERBOARD_SELECT = `
+  SELECT
+    pr.*,
+    u.display_name AS user_display_name,
+    u.inat_login,
+    a.handle AS bsky_handle,
+    a.display_name AS bsky_display_name,
+    a.avatar_url
+  FROM player_ratings pr
+  LEFT JOIN users u ON u.id = pr.user_id
+  LEFT JOIN accounts a ON a.did = (
+    SELECT did FROM accounts
+    WHERE inat_login = u.inat_login
+    ORDER BY updated_at DESC
+    LIMIT 1
+  )
+`;
+
+async function getLeaderboard(env, viewerUserId = null, limit = 50) {
+  const rows = await env.DB.prepare(`
+    ${LEADERBOARD_SELECT}
+    ORDER BY pr.rating DESC, pr.wins DESC, pr.user_id ASC
+    LIMIT ?
+  `).bind(limit).all();
+
+  const entries = (rows.results ?? []).map((row, index) => leaderboardEntry(row, index + 1));
+  const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS total FROM player_ratings`).first();
+  const total = Number(totalRow?.total ?? entries.length);
+
+  let you = viewerUserId ? entries.find((entry) => entry.userId === viewerUserId) ?? null : null;
+  if (!you && viewerUserId) {
+    const row = await env.DB.prepare(`
+      ${LEADERBOARD_SELECT}
+      WHERE pr.user_id = ?
+    `).bind(viewerUserId).first();
+    if (row) {
+      you = leaderboardEntry(row, await getPlayerRank(env, Number(row.rating), viewerUserId));
+    }
+  }
+
+  return { entries, totalPlayers: total, you };
+}
+
+function bskyPostWebUrl(session, postUri) {
+  const rkey = String(postUri ?? "").split("/").pop();
+  if (!rkey) return null;
+  return `https://bsky.app/profile/${encodeURIComponent(session.handle || session.did)}/post/${rkey}`;
+}
+
+async function shareBattleToBluesky(env, session, battleId, origin) {
+  const userId = requireLinkedUserId(session);
+  const battle = await getBattle(env, battleId);
+  if (!battle) throw httpError("Battle not found", 404);
+  if (battle.player?.userId !== userId) throw httpError("This is not your battle", 403);
+  if (battle.status !== "won") throw httpError("Only victories can be shared (win one first!)", 400);
+
+  const turns = Math.max(1, Number(battle.turn ?? 1) - 1);
+  const mvp = [...(battle.player.creatures ?? [])]
+    .sort((a, b) => Number(b.damageDealt ?? 0) - Number(a.damageDealt ?? 0))[0];
+  const update = battle.ratingUpdate;
+
+  const ratingPart = update
+    ? ` Now ${update.titleEmoji} ${update.title} · ${update.rating} Field Score` +
+      (update.winStreak >= 2 ? ` · ${update.winStreak}-win streak 🔥` : "")
+    : "";
+  const mvpPart = mvp ? `My ${mvp.speciesName || mvp.name} led the team — ` : "";
+  const text = `⚔️ Victory in iNat Battler! ${mvpPart}beat the ${battle.opponent?.name || "wild team"} in ${turns} turns.${ratingPart}\n\nBattle your own iNaturalist sightings: ${origin}`;
+
+  const record = buildShareTextPostRecord({ text, linkUrl: origin });
+  const result = await createSessionPost(env, session, record);
+  return { ok: true, uri: result?.uri ?? null, webUrl: bskyPostWebUrl(session, result?.uri) };
+}
+
+async function shareRankToBluesky(env, session, origin) {
+  const userId = requireLinkedUserId(session);
+  const row = await env.DB.prepare(`
+    ${LEADERBOARD_SELECT}
+    WHERE pr.user_id = ?
+  `).bind(userId).first();
+  if (!row) throw httpError("Win a battle first to earn a leaderboard rank", 400);
+
+  const rank = await getPlayerRank(env, Number(row.rating), userId);
+  const entry = leaderboardEntry(row, rank);
+  const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS total FROM player_ratings`).first();
+  const total = Number(totalRow?.total ?? 1);
+
+  const streakPart = entry.winStreak >= 2 ? ` and I'm on a ${entry.winStreak}-win streak 🔥` : "";
+  const fastPart = entry.fastestWinTurns ? ` Fastest win: ${entry.fastestWinTurns} turns.` : "";
+  const text = `🏆 Ranked #${rank} of ${total} on the iNat Battler leaderboard — ${entry.titleEmoji} ${entry.title} with a ${entry.rating} Field Score (${entry.wins}W/${entry.losses}L)${streakPart}.${fastPart}\n\nBuild a team from your own iNaturalist sightings and come take my spot: ${origin}`;
+
+  const record = buildShareTextPostRecord({ text, linkUrl: origin });
+  const result = await createSessionPost(env, session, record);
+  return { ok: true, uri: result?.uri ?? null, webUrl: bskyPostWebUrl(session, result?.uri) };
 }
 
 // ---------------------------------------------------------------------------
@@ -8964,6 +9233,46 @@ function renderAppHtml() {
       }
     }
 
+    .status-sprites {
+      position: absolute;
+      top: -14px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 4px;
+      z-index: 7;
+      pointer-events: none;
+    }
+
+    .status-sprite {
+      width: 38px;
+      height: 38px;
+      background-size: 400% 400%;
+      background-repeat: no-repeat;
+      image-rendering: pixelated;
+      animation: statusSheet16 1.28s step-end infinite;
+      filter: drop-shadow(0 2px 2px rgba(13, 18, 15, 0.35));
+    }
+
+    @keyframes statusSheet16 {
+      0% { background-position: 0% 0%; }
+      6.25% { background-position: 33.34% 0%; }
+      12.5% { background-position: 66.67% 0%; }
+      18.75% { background-position: 100% 0%; }
+      25% { background-position: 0% 33.34%; }
+      31.25% { background-position: 33.34% 33.34%; }
+      37.5% { background-position: 66.67% 33.34%; }
+      43.75% { background-position: 100% 33.34%; }
+      50% { background-position: 0% 66.67%; }
+      56.25% { background-position: 33.34% 66.67%; }
+      62.5% { background-position: 66.67% 66.67%; }
+      68.75% { background-position: 100% 66.67%; }
+      75% { background-position: 0% 100%; }
+      81.25% { background-position: 33.34% 100%; }
+      87.5% { background-position: 66.67% 100%; }
+      93.75% { background-position: 100% 100%; }
+    }
+
     .dmg-float {
       position: absolute;
       left: 50%;
@@ -8981,6 +9290,20 @@ function renderAppHtml() {
 
     .dmg-float.heal {
       text-shadow: 2px 2px 0 #2f7d42, -1px -1px 0 #2f7d42, 1px -1px 0 #2f7d42, -1px 1px 0 #2f7d42;
+    }
+
+    .dmg-float.crit {
+      font-size: 2.1rem;
+      color: #ffe066;
+      text-shadow: 2px 2px 0 #8a2be2, -2px -2px 0 #8a2be2, 2px -2px 0 #8a2be2, -2px 2px 0 #8a2be2;
+      animation: critFloat 950ms ease-out forwards;
+    }
+
+    @keyframes critFloat {
+      0% { opacity: 0; transform: translate(-50%, 14px) scale(0.5) rotate(-8deg); }
+      14% { opacity: 1; transform: translate(-50%, 0) scale(1.35) rotate(3deg); }
+      30% { transform: translate(-50%, -6px) scale(1.05) rotate(-2deg); }
+      100% { opacity: 0; transform: translate(-50%, -56px) scale(1); }
     }
 
     @keyframes dmgFloat {
@@ -9562,9 +9885,186 @@ function renderAppHtml() {
       font-size: 0.84rem;
     }
 
+    .overlay-rating {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: #1d2a22;
+      color: #edf4ef;
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+
+    .rating-delta {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1.15rem;
+      font-weight: 900;
+    }
+
+    .rating-delta.up { color: #6fe08a; }
+    .rating-delta.down { color: #f08a76; }
+
+    .overlay-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .lb-podium {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .lb-podium-card {
+      position: relative;
+      display: grid;
+      gap: 6px;
+      justify-items: center;
+      text-align: center;
+      padding: 16px 10px 12px;
+      border: 2px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .lb-podium-card.first {
+      border-color: #d8a93a;
+      box-shadow: 0 0 0 3px rgba(216, 169, 58, 0.25), 0 6px 18px rgba(216, 169, 58, 0.18);
+      background: linear-gradient(180deg, rgba(216, 169, 58, 0.12), transparent 60%), var(--panel);
+    }
+
+    .lb-podium-card.second { border-color: #9aa7b4; }
+    .lb-podium-card.third { border-color: #c08a5a; }
+
+    .lb-medal { font-size: 1.7rem; line-height: 1; }
+
+    .lb-podium-card .lb-name {
+      font-weight: 800;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .lb-avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 2px solid var(--line);
+      object-fit: cover;
+      background: #d7e2d4;
+    }
+
+    .lb-rating {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1.25rem;
+      font-weight: 900;
+    }
+
+    .lb-title-chip {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #e7efe3;
+      border: 1px solid var(--line);
+      font-size: 0.74rem;
+      font-weight: 700;
+    }
+
+    .lb-streak {
+      color: #b3541e;
+      font-weight: 800;
+      font-size: 0.8rem;
+    }
+
+    .lb-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+    }
+
+    .lb-table th,
+    .lb-table td {
+      padding: 8px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+
+    .lb-table th {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+
+    .lb-table tr.lb-you {
+      background: rgba(110, 160, 110, 0.16);
+      outline: 2px solid #6ea06e;
+      outline-offset: -2px;
+    }
+
+    .lb-row-name {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 260px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .lb-row-name .lb-avatar {
+      width: 26px;
+      height: 26px;
+    }
+
+    .lb-you-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+      padding: 12px 14px;
+      border: 2px solid #6ea06e;
+      border-radius: 12px;
+      background: var(--panel);
+    }
+
+    .lb-you-card .lb-you-stats {
+      display: flex;
+      gap: 14px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+
+    .lb-you-rank {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1.4rem;
+      font-weight: 900;
+    }
+
+    .bsky-share-button {
+      background: #1083fe;
+      border-color: #0a6ad0;
+      color: #fff;
+    }
+
     @media (max-width: 880px) {
       .topbar,
       .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .lb-podium {
         grid-template-columns: 1fr;
       }
 
@@ -9880,6 +10380,7 @@ function renderAppHtml() {
           <button class="view-tab active" id="homeTabButton" type="button" data-view-tab="home">Home</button>
           <button class="view-tab" id="rosterTabButton" type="button" data-view-tab="roster">Roster</button>
           <button class="view-tab" id="battleTabButton" type="button" data-view-tab="battle">Battle</button>
+          <button class="view-tab" id="leaderboardTabButton" type="button" data-view-tab="leaderboard">Leaderboard</button>
           <button class="view-tab" id="trainingTabButton" type="button" data-view-tab="training">Training</button>
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
           <button class="view-tab" id="recentTabButton" type="button" data-view-tab="recent">Recently Added</button>
@@ -9930,6 +10431,16 @@ function renderAppHtml() {
             </div>
           </div>
           <section class="battle" id="battlePanel" hidden></section>
+        </section>
+        <section class="view-panel" id="leaderboardView" hidden>
+          <div class="roster-head">
+            <h2>Leaderboard</h2>
+            <div class="battle-head-tools">
+              <span class="subtle" id="leaderboardMetaLabel"></span>
+              <button class="secondary" id="leaderboardRefreshButton" type="button">Refresh</button>
+            </div>
+          </div>
+          <div id="leaderboardPanel"></div>
         </section>
         <section class="view-panel" id="trainingView" hidden>
           <div class="roster-head">
@@ -10170,6 +10681,11 @@ function renderAppHtml() {
       battleView: document.getElementById("battleView"),
       battleEmptyState: document.getElementById("battleEmptyState"),
       demoBattleButton: document.getElementById("demoBattleButton"),
+      leaderboardTabButton: document.getElementById("leaderboardTabButton"),
+      leaderboardView: document.getElementById("leaderboardView"),
+      leaderboardPanel: document.getElementById("leaderboardPanel"),
+      leaderboardMetaLabel: document.getElementById("leaderboardMetaLabel"),
+      leaderboardRefreshButton: document.getElementById("leaderboardRefreshButton"),
       trainingTabButton: document.getElementById("trainingTabButton"),
       trainingView: document.getElementById("trainingView"),
       trainingTotalsLabel: document.getElementById("trainingTotalsLabel"),
@@ -10210,6 +10726,7 @@ function renderAppHtml() {
     els.homeTabButton.addEventListener("click", () => switchView("home"));
     els.rosterTabButton.addEventListener("click", () => switchView("roster"));
     els.battleTabButton.addEventListener("click", () => switchView("battle"));
+    els.leaderboardTabButton.addEventListener("click", () => switchView("leaderboard"));
     els.trainingTabButton.addEventListener("click", () => switchView("training"));
     els.treeTabButton.addEventListener("click", () => switchView("tree"));
     els.recentTabButton.addEventListener("click", () => switchView("recent"));
@@ -10447,6 +10964,26 @@ function renderAppHtml() {
     els.startBattleButton.addEventListener("click", startNpcBattle);
     els.demoBattleButton.addEventListener("click", startDemoBattle);
 
+    els.leaderboardRefreshButton.addEventListener("click", () => loadLeaderboard(true));
+
+    els.leaderboardPanel.addEventListener("click", async (event) => {
+      const shareButton = event.target.closest("[data-share-rank]");
+      if (!shareButton || shareButton.disabled) return;
+
+      shareButton.disabled = true;
+      shareButton.textContent = "Posting…";
+      try {
+        const res = await apiFetch("/api/share/rank", { method: "POST" });
+        shareButton.textContent = "Posted ✓";
+        setStatus("Rank posted to Bluesky");
+        if (res.webUrl) window.open(res.webUrl, "_blank", "noopener");
+      } catch (error) {
+        shareButton.disabled = false;
+        shareButton.textContent = "Post my rank to Bluesky 🦋";
+        setStatus(error.message);
+      }
+    });
+
     els.homeDashboard.addEventListener("click", async (event) => {
       const addButton = event.target.closest("[data-home-add-taxon]");
       if (addButton) {
@@ -10511,6 +11048,34 @@ function renderAppHtml() {
         state.battlePhase = "idle";
         renderBattle();
         switchView("roster");
+        return;
+      }
+
+      const leaderboardButton = event.target.closest("[data-open-leaderboard]");
+      if (leaderboardButton) {
+        await switchView("leaderboard");
+        return;
+      }
+
+      const shareBattleButton = event.target.closest("[data-share-battle]");
+      if (shareBattleButton) {
+        if (shareBattleButton.disabled || !state.battle) return;
+        shareBattleButton.disabled = true;
+        shareBattleButton.textContent = "Posting…";
+        try {
+          const res = await apiFetch("/api/share/battle", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ battleId: state.battle.battleId })
+          });
+          shareBattleButton.textContent = "Posted ✓";
+          setStatus("Victory posted to Bluesky");
+          if (res.webUrl) window.open(res.webUrl, "_blank", "noopener");
+        } catch (error) {
+          shareBattleButton.disabled = false;
+          shareBattleButton.textContent = "Brag on Bluesky 🦋";
+          setStatus(error.message);
+        }
         return;
       }
 
@@ -11656,9 +12221,12 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = ["home", "roster", "tree", "recent", "battle", "training", "dev"].includes(view) ? view : "home";
+      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "training", "dev"].includes(view) ? view : "home";
       renderViewTabs();
 
+      if (state.activeView === "leaderboard") {
+        await loadLeaderboard(!state.leaderboard);
+      }
       if (state.activeView === "tree" && !state.spriteTree) {
         await loadSpriteTree(false);
       }
@@ -11683,6 +12251,7 @@ function renderAppHtml() {
       els.homeTabButton.classList.toggle("active", view === "home");
       els.rosterTabButton.classList.toggle("active", view === "roster");
       els.battleTabButton.classList.toggle("active", view === "battle");
+      els.leaderboardTabButton.classList.toggle("active", view === "leaderboard");
       els.trainingTabButton.classList.toggle("active", view === "training");
       els.treeTabButton.classList.toggle("active", view === "tree");
       els.recentTabButton.classList.toggle("active", view === "recent");
@@ -11690,6 +12259,7 @@ function renderAppHtml() {
       els.homeView.hidden = view !== "home";
       els.rosterView.hidden = view !== "roster";
       els.battleView.hidden = view !== "battle";
+      els.leaderboardView.hidden = view !== "leaderboard";
       els.trainingView.hidden = view !== "training";
       els.treeView.hidden = view !== "tree";
       els.recentView.hidden = view !== "recent";
@@ -11725,6 +12295,111 @@ function renderAppHtml() {
       } catch (error) {
         setStatus(error.message);
       }
+    }
+
+    async function loadLeaderboard(showStatus) {
+      if (showStatus) setStatus("Loading leaderboard");
+
+      try {
+        state.leaderboard = await apiFetch("/api/leaderboard");
+        renderLeaderboard();
+        if (showStatus) setStatus("Leaderboard updated");
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
+    function streakHtml(entry) {
+      if (Number(entry.winStreak) >= 2) {
+        return '<span class="lb-streak">' + Number(entry.winStreak) + 'W streak 🔥</span>';
+      }
+      return "";
+    }
+
+    function lbAvatar(entry) {
+      return entry.avatarUrl
+        ? '<img class="lb-avatar" src="' + escapeAttr(entry.avatarUrl) + '" alt="" loading="lazy">'
+        : '<span class="lb-avatar" aria-hidden="true"></span>';
+    }
+
+    function lbDisplayName(entry) {
+      const name = escapeHtml(entry.name || entry.userId);
+      const handle = entry.handle ? ' <span class="subtle">@' + escapeHtml(entry.handle) + '</span>' : "";
+      return name + handle;
+    }
+
+    function renderLeaderboard() {
+      const board = state.leaderboard;
+      if (!board) {
+        els.leaderboardPanel.innerHTML = "";
+        return;
+      }
+
+      const entries = board.entries || [];
+      els.leaderboardMetaLabel.textContent = entries.length
+        ? board.totalPlayers + " ranked naturalist" + (board.totalPlayers === 1 ? "" : "s")
+        : "";
+
+      if (!entries.length) {
+        els.leaderboardPanel.innerHTML =
+          '<div class="empty"><div><strong>The leaderboard is unclaimed.</strong><br>' +
+          'Win a rated NPC battle and the #1 spot is yours — someone has to found the food chain.</div></div>';
+        return;
+      }
+
+      const medals = ["🥇", "🥈", "🥉"];
+      const podiumClasses = ["first", "second", "third"];
+      const podium = entries.slice(0, 3).map((entry, index) =>
+        '<div class="lb-podium-card ' + podiumClasses[index] + '">' +
+          '<div class="lb-medal">' + medals[index] + '</div>' +
+          lbAvatar(entry) +
+          '<div class="lb-name">' + lbDisplayName(entry) + '</div>' +
+          '<div class="lb-rating">' + entry.rating + '</div>' +
+          '<span class="lb-title-chip">' + escapeHtml(entry.titleEmoji + " " + entry.title) + '</span>' +
+          '<div class="subtle">' + entry.wins + 'W / ' + entry.losses + 'L</div>' +
+          streakHtml(entry) +
+        '</div>'
+      ).join("");
+
+      const youId = board.you ? board.you.userId : null;
+      const tableRows = entries.slice(3).map((entry) =>
+        '<tr' + (entry.userId === youId ? ' class="lb-you"' : "") + '>' +
+          '<td>#' + entry.rank + '</td>' +
+          '<td><span class="lb-row-name">' + lbAvatar(entry) + lbDisplayName(entry) + '</span></td>' +
+          '<td><span class="lb-title-chip">' + escapeHtml(entry.titleEmoji + " " + entry.title) + '</span></td>' +
+          '<td><strong>' + entry.rating + '</strong></td>' +
+          '<td>' + entry.wins + 'W / ' + entry.losses + 'L</td>' +
+          '<td>' + (Number(entry.winStreak) >= 2 ? streakHtml(entry) : "&mdash;") + '</td>' +
+          '<td>' + (entry.fastestWinTurns ? entry.fastestWinTurns + " turns" : "&mdash;") + '</td>' +
+        '</tr>'
+      ).join("");
+      const table = entries.length > 3
+        ? '<table class="lb-table"><thead><tr>' +
+            '<th>Rank</th><th>Naturalist</th><th>Title</th><th>Score</th><th>Record</th><th>Streak</th><th>Fastest win</th>' +
+          '</tr></thead><tbody>' + tableRows + '</tbody></table>'
+        : "";
+
+      let youCard = "";
+      if (board.you) {
+        const you = board.you;
+        youCard =
+          '<div class="lb-you-card">' +
+            '<div class="lb-you-stats">' +
+              '<span class="lb-you-rank">#' + you.rank + '</span>' +
+              '<span class="lb-title-chip">' + escapeHtml(you.titleEmoji + " " + you.title) + '</span>' +
+              '<strong>' + you.rating + '</strong>' +
+              '<span class="subtle">' + you.wins + 'W / ' + you.losses + 'L &middot; best streak ' + you.bestStreak + '</span>' +
+              streakHtml(you) +
+            '</div>' +
+            '<button class="secondary bsky-share-button" type="button" data-share-rank>Post my rank to Bluesky 🦋</button>' +
+          '</div>';
+      } else if (state.me && state.me.loggedIn && state.me.inatLogin) {
+        youCard = '<div class="lb-you-card"><span class="subtle">Win a rated NPC battle to enter the rankings.</span></div>';
+      } else {
+        youCard = '<div class="lb-you-card"><span class="subtle">Sign in with Bluesky and link your iNaturalist account to get ranked.</span></div>';
+      }
+
+      els.leaderboardPanel.innerHTML = '<div class="lb-podium">' + podium + '</div>' + table + youCard;
     }
 
     function currentDevTaxonId() {
@@ -13324,12 +13999,58 @@ function renderAppHtml() {
           const damage = Number(damageMatch[3]);
           const actorCreature = getActiveCreature(actorSide === "player" ? prev.player : prev.opponent);
           const moveId = entry.data && entry.data.moveId;
+          const isCrit = Boolean(entry.data && entry.data.crit);
           const category = moveCategoryFor(prev, actorSide, moveId);
           triggerAttackVisual(actorSide, moveAnimClassFor(actorCreature, moveId));
           if (category === "special") playSfx("special");
           await delay(280);
           hitEffect(targetSide, damage, hpState);
-          await delay(640);
+          if (isCrit) {
+            playSfx("crit");
+            spawnFloat(targetSide, "CRIT!", "crit");
+          }
+          await delay(isCrit ? 780 : 640);
+          continue;
+        }
+
+        if (text === "A critical hit!") {
+          // The crit burst already played alongside the damage line.
+          await delay(140);
+          continue;
+        }
+
+        const rallyMatch = text.match(/^(.+) is cornered and rallies with wild resolve!$/);
+        if (rallyMatch) {
+          const side = sideForName(rallyMatch[1], prev);
+          playSfx("buff");
+          spawnFloat(side, "RALLY!", "heal");
+          await delay(560);
+          continue;
+        }
+
+        const vigorHealMatch = text.match(/^(.+)'s vigor restores (\d+) HP\.$/);
+        if (vigorHealMatch) {
+          const side = sideForName(vigorHealMatch[1], prev);
+          const healed = Number(vigorHealMatch[2]);
+          playSfx("heal");
+          const target = hpState[side];
+          target.hp = Math.min(target.max, target.hp + healed);
+          setHpBar(side, target.hp, target.max);
+          spawnFloat(side, "+" + healed, "heal");
+          await delay(460);
+          continue;
+        }
+
+        const vigorDrainMatch = text.match(/^(.+)'s sapped vigor drains (\d+) HP\.$/);
+        if (vigorDrainMatch) {
+          const side = sideForName(vigorDrainMatch[1], prev);
+          const damage = Number(vigorDrainMatch[2]);
+          playSfx("status");
+          const target = hpState[side];
+          target.hp = Math.max(0, target.hp - damage);
+          setHpBar(side, target.hp, target.max);
+          spawnFloat(side, "-" + damage, "dmg");
+          await delay(460);
           continue;
         }
 
@@ -13551,10 +14272,10 @@ function renderAppHtml() {
       const zone = els.battlePanel.querySelector('[data-sprite-zone="' + side + '"]');
       if (!zone) return;
       const el = document.createElement("div");
-      el.className = "dmg-float" + (kind === "heal" ? " heal" : "");
+      el.className = "dmg-float" + (kind === "heal" ? " heal" : kind === "crit" ? " crit" : "");
       el.textContent = text;
       zone.appendChild(el);
-      setTimeout(() => el.remove(), 900);
+      setTimeout(() => el.remove(), kind === "crit" ? 1000 : 900);
     }
 
     function faintEffect(side) {
@@ -13640,6 +14361,10 @@ function renderAppHtml() {
           sfxTone(ctx, out, { type: "sawtooth", from: 330, dur: 0.09, gain: 0.1 });
           sfxTone(ctx, out, { type: "sawtooth", from: 440, dur: 0.09, gain: 0.1, delay: 0.07 });
           sfxTone(ctx, out, { type: "sawtooth", from: 587, dur: 0.12, gain: 0.1, delay: 0.14 });
+        } else if (name === "crit") {
+          sfxNoise(ctx, out, { freq: 950, dur: 0.12, gain: 0.3 });
+          sfxTone(ctx, out, { type: "square", from: 260, to: 48, dur: 0.2, gain: 0.24 });
+          sfxTone(ctx, out, { type: "square", from: 880, to: 1320, dur: 0.09, gain: 0.12, delay: 0.02 });
         } else if (name === "miss") {
           sfxTone(ctx, out, { type: "triangle", from: 520, to: 170, dur: 0.18, gain: 0.08 });
         } else if (name === "heal") {
@@ -13802,13 +14527,35 @@ function renderAppHtml() {
             '<div><strong>' + escapeHtml(row.name) + '</strong> &mdash; ' + row.dealt + ' dmg dealt / ' + row.taken + ' taken</div>'
           ).join("") + '</div>'
         : "";
+
+      const update = battle.ratingUpdate;
+      const ratingHtml = update
+        ? '<div class="overlay-rating">' +
+            '<span class="rating-delta ' + (update.delta >= 0 ? "up" : "down") + '">' +
+              (update.delta >= 0 ? "+" : "") + update.delta + '</span>' +
+            '<span>' + update.rating + ' Field Score</span>' +
+            '<span class="lb-title-chip">' + escapeHtml((update.titleEmoji || "") + " " + (update.title || "")) + '</span>' +
+            '<span>Rank #' + update.rank + '</span>' +
+            (update.winStreak >= 2 ? '<span class="lb-streak">' + update.winStreak + '-win streak 🔥</span>' : "") +
+          '</div>'
+        : "";
+
+      const canShare = battle.status === "won" && !battle.demo &&
+        state.me && state.me.loggedIn && state.me.inatLogin;
+      const actionsHtml = '<div class="overlay-actions">' +
+        (canShare ? '<button class="secondary bsky-share-button" type="button" data-share-battle>Brag on Bluesky 🦋</button>' : "") +
+        (update ? '<button class="secondary" type="button" data-open-leaderboard>Leaderboard</button>' : "") +
+        '<button class="primary" type="button" data-battle-exit>Back to Roster</button>' +
+      '</div>';
+
       return '<div class="battle-overlay">' +
         '<div class="overlay-card">' +
           '<div class="overlay-title ' + cls + '">' + title + '</div>' +
           '<div class="overlay-sub">' + escapeHtml(battle.player.name || "Your Team") + " vs " + escapeHtml(battle.opponent.name || "Opponent") +
             " &middot; " + Math.max(1, Number(battle.turn || 1) - 1) + " turns</div>" +
+          ratingHtml +
           contribHtml +
-          '<button class="primary" type="button" data-battle-exit>Back to Roster</button>' +
+          actionsHtml +
         '</div>' +
       '</div>';
     }
@@ -13890,6 +14637,19 @@ function renderAppHtml() {
         '</div>';
       }).join("");
 
+      const STATUS_SPRITE_KINDS = ["stunned", "marked", "poisoned", "shielded", "rallied"];
+      const activeStatuses = (creature.statuses || []).slice();
+      if (creature.rallied) activeStatuses.push("rallied");
+      const statusSprites = !creature.fainted
+        ? activeStatuses
+            .filter((status, index) => STATUS_SPRITE_KINDS.includes(status) && activeStatuses.indexOf(status) === index)
+            .map((status) => {
+              const url = "/assets/status-" + status + ".png";
+              return '<div class="status-sprite" data-sprite-url="' + escapeAttr(url) + '" title="' + escapeAttr(status) + '" ' +
+                'style="background-image:url(&quot;' + escapeAttr(url) + '&quot;)"></div>';
+            }).join("")
+        : "";
+
       return '<article class="combatant ' + side + '">' +
         '<div class="plate">' +
           '<div class="combatant-head">' +
@@ -13910,6 +14670,7 @@ function renderAppHtml() {
         '</div>' +
         '<div class="combatant-sprite" data-sprite-zone="' + side + '">' +
           '<div class="platform"></div>' + sprite +
+          (statusSprites ? '<div class="status-sprites">' + statusSprites + '</div>' : "") +
         '</div>' +
       '</article>';
     }
@@ -13921,7 +14682,9 @@ function renderAppHtml() {
     const keyedSpriteCache = new Map();
 
     function keyBattleSprites() {
-      const sprites = els.battlePanel.querySelectorAll(".combatant-sprite .sheet-sprite[data-sprite-url]");
+      const sprites = els.battlePanel.querySelectorAll(
+        ".combatant-sprite .sheet-sprite[data-sprite-url], .combatant-sprite .status-sprite[data-sprite-url]"
+      );
       sprites.forEach((sprite) => {
         const url = sprite.getAttribute("data-sprite-url");
         if (!url) return;

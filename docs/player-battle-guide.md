@@ -14,7 +14,9 @@ Only species with ready global sprites or approved/pending personal sprites can 
 
 ## Battle Formats
 
-### NPC Battle
+### NPC Battle (rated)
+
+NPC battles played while signed in (Bluesky + linked iNaturalist) are rated. Each win or loss adjusts your **Field Score** (Elo-style, everyone starts at 1000; harder difficulties are worth more). The Leaderboard tab shows global rankings, rank titles (Sprout 🌱 up to Apex Predator 🦅), win streaks, and fastest wins — and you can post your victories and rank straight to Bluesky.
 
 You pick five ready species and fight a computer team. The NPC has difficulty settings:
 
@@ -43,10 +45,10 @@ Switching is tactical but risky: the incoming species takes the opponent's move 
 
 | Stat | What It Does |
 |---|---|
-| Vigor | Raises max HP. Training Vigor makes a species much harder to knock out. |
+| Vigor | Raises max HP. In battle, Vigor buffs regenerate 3% max HP per stage each turn (debuffs drain it). |
 | Strike | Used for physical move damage. |
 | Guard | Defends against physical moves and contributes to special defense. |
-| Tempo | Determines move order after priority. Faster species move first. |
+| Tempo | Determines move order after priority. Faster species move first. Tempo buffs/debuffs change turn order. |
 | Sense | Used for special move damage and contributes to special defense. |
 
 Max HP is based on Vigor plus a small bonus from observation count.
@@ -82,6 +84,10 @@ Damage depends on:
 Same-type bonus: if the attacker has the same type as the move, damage is multiplied by 1.15.
 
 Fatigue: after turn 20, damage ramps upward by 6% per turn so healing and tank stalls eventually end.
+
+Critical hits: every damaging move has an 8% chance to crit for 1.5x damage. Marked targets are easier to crit (20%).
+
+Rally: the first time a species drops below 30% HP and survives, it rallies — +1 Strike and +1 Sense stage. One rally per species per battle, so a cornered creature always has one sharp counterpunch left.
 
 ## Move Categories
 

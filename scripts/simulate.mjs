@@ -80,6 +80,8 @@ function runDuel(taxonA, taxonB, seed, metrics) {
     metrics.logTurns += 0; // keep shape obvious
     if (text.includes("is stunned and cannot move")) metrics.stunSkips += 1;
     if (text.includes("but it missed")) metrics.misses += 1;
+    if (text.includes("A critical hit!")) metrics.crits += 1;
+    if (text.includes("rallies with wild resolve")) metrics.rallies += 1;
     if (entry.data?.moveId) {
       metrics.actions += 1;
       const m = metrics.moveDamage.get(entry.data.moveId) ?? { uses: 0, damage: 0 };
@@ -99,7 +101,7 @@ function runDuel(taxonA, taxonB, seed, metrics) {
 const plans = REPRESENTATIVE_TAXA;
 const winCounts = new Map(plans.map((p) => [p.plan, { wins: 0, losses: 0, draws: 0 }]));
 const matrix = new Map(); // "a|b" -> { aWins, bWins, draws, games }
-const metrics = { stunSkips: 0, misses: 0, actions: 0, creatureTurns: 0, logTurns: 0, moveDamage: new Map() };
+const metrics = { stunSkips: 0, misses: 0, crits: 0, rallies: 0, actions: 0, creatureTurns: 0, logTurns: 0, moveDamage: new Map() };
 let totalTurns = 0;
 let totalDuels = 0;
 let totalDraws = 0;
@@ -175,6 +177,7 @@ console.log(`${totalDuels} duels (${SEEDS_PER_PAIRING} seeds x ${matrix.size} pa
 console.log(`avg battle length: ${(totalTurns / totalDuels).toFixed(1)} turns, draws (turn cap): ${totalDraws}`);
 console.log(`stun-skipped turns: ${pct(metrics.stunSkips, metrics.creatureTurns)}% of creature-turns`);
 console.log(`missed attacks:     ${pct(metrics.misses, metrics.misses + metrics.actions)}% of attempted moves`);
+console.log(`critical hits:      ${pct(metrics.crits, metrics.actions)}% of landed attacks, rallies: ${metrics.rallies} (${(metrics.rallies / totalDuels).toFixed(2)}/duel)`);
 
 console.log(`\n--- aggregate win rate by body plan (decisive games) ---`);
 const standings = [...winCounts.entries()]

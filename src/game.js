@@ -1,22 +1,22 @@
 const DEFAULT_STATS = {
   passerine_bird: { vigor: 42, strike: 42, guard: 34, tempo: 68, sense: 52 },
-  raptor_bird: { vigor: 54, strike: 66, guard: 44, tempo: 56, sense: 54 },
+  raptor_bird: { vigor: 52, strike: 55, guard: 42, tempo: 56, sense: 50 },
   waterbird: { vigor: 58, strike: 48, guard: 52, tempo: 44, sense: 48 },
   insect: { vigor: 34, strike: 46, guard: 32, tempo: 66, sense: 48 },
   moth_butterfly: { vigor: 32, strike: 34, guard: 28, tempo: 60, sense: 66 },
   dragonfly: { vigor: 38, strike: 64, guard: 34, tempo: 82, sense: 56 },
   bee_wasp_ant: { vigor: 36, strike: 58, guard: 38, tempo: 62, sense: 52 },
   plant_herb: { vigor: 60, strike: 42, guard: 52, tempo: 24, sense: 64 },
-  tree_shrub: { vigor: 72, strike: 42, guard: 62, tempo: 16, sense: 52 },
-  grass_sedge: { vigor: 56, strike: 40, guard: 50, tempo: 32, sense: 54 },
-  fern: { vigor: 58, strike: 40, guard: 50, tempo: 28, sense: 62 },
-  fungus: { vigor: 54, strike: 38, guard: 54, tempo: 18, sense: 64 },
+  tree_shrub: { vigor: 68, strike: 42, guard: 58, tempo: 16, sense: 52 },
+  grass_sedge: { vigor: 60, strike: 44, guard: 52, tempo: 32, sense: 58 },
+  fern: { vigor: 60, strike: 42, guard: 52, tempo: 28, sense: 64 },
+  fungus: { vigor: 50, strike: 38, guard: 46, tempo: 18, sense: 53 },
   mammal: { vigor: 58, strike: 52, guard: 46, tempo: 58, sense: 50 },
-  amphibian: { vigor: 46, strike: 42, guard: 38, tempo: 48, sense: 62 },
-  reptile: { vigor: 58, strike: 52, guard: 62, tempo: 38, sense: 48 },
+  amphibian: { vigor: 50, strike: 46, guard: 40, tempo: 48, sense: 62 },
+  reptile: { vigor: 56, strike: 48, guard: 54, tempo: 38, sense: 46 },
   fish: { vigor: 48, strike: 46, guard: 40, tempo: 58, sense: 48 },
   mollusk: { vigor: 54, strike: 34, guard: 72, tempo: 18, sense: 44 },
-  unknown: { vigor: 45, strike: 45, guard: 45, tempo: 45, sense: 45 }
+  unknown: { vigor: 56, strike: 56, guard: 50, tempo: 58, sense: 56 }
 };
 
 const MOVE_LIBRARY = {
@@ -343,7 +343,11 @@ export function resolveTurn(state, playerAction, npcAction, rng) {
     const moveRight = right.actor.moves.find((move) => move.id === right.action.moveId);
     const priorityDiff = (moveRight?.priority ?? 0) - (moveLeft?.priority ?? 0);
     if (priorityDiff !== 0) return priorityDiff;
-    return right.actor.stats.tempo - left.actor.stats.tempo;
+    // Staged tempo, not raw: tempo buffs/debuffs must actually change turn order.
+    const tempoLeft = stagedStat(left.actor.stats.tempo, left.actor.statStages.tempo ?? 0);
+    const tempoRight = stagedStat(right.actor.stats.tempo, right.actor.statStages.tempo ?? 0);
+    if (tempoLeft !== tempoRight) return tempoRight - tempoLeft;
+    return rng() < 0.5 ? -1 : 1;
   });
 
   for (const item of actions) {
@@ -372,6 +376,7 @@ export function resolveTurn(state, playerAction, npcAction, rng) {
   }
 
   applyPoisonTicks(next, [playerCreature, npcCreature]);
+  applyVigorTicks(next, [playerCreature, npcCreature]);
 
   autoSwitch(next.player);
   autoSwitch(next.opponent);
@@ -388,6 +393,50 @@ function removeStatus(creature, status) {
   if (!Array.isArray(creature.statuses)) return;
   const index = creature.statuses.indexOf(status);
   if (index >= 0) creature.statuses.splice(index, 1);
+}
+
+// Comeback mechanic: the first time a creature is knocked below 30% HP and
+// survives, it rallies — +1 Strike and +1 Sense stage. One shot per creature
+// per battle, so being behind always leaves one sharp counterpunch.
+function applyRally(state, creature) {
+  if (creature.rallied || creature.fainted || creature.hp <= 0) return;
+  if (creature.hp > creature.maxHp * 0.3) return;
+
+  creature.rallied = true;
+  creature.statStages.strike = Math.min(4, (creature.statStages.strike ?? 0) + 1);
+  creature.statStages.sense = Math.min(4, (creature.statStages.sense ?? 0) + 1);
+  state.log.push({
+    turn: state.turn,
+    text: `${creature.name} is cornered and rallies with wild resolve!`,
+    data: { rally: true }
+  });
+}
+
+// Vigor stages were previously inert (vigor is only read at creature
+// creation). Now they tick at end of turn: +3% max HP regen per positive
+// stage, -3% drain per negative stage.
+function applyVigorTicks(state, creatures) {
+  for (const creature of creatures) {
+    if (creature.fainted) continue;
+    const stage = creature.statStages?.vigor ?? 0;
+    if (!stage) continue;
+
+    const amount = Math.max(1, Math.floor(creature.maxHp * 0.03 * Math.abs(stage)));
+    if (stage > 0) {
+      const healed = Math.min(amount, creature.maxHp - creature.hp);
+      if (healed <= 0) continue;
+      creature.hp += healed;
+      state.log.push({ turn: state.turn, text: `${creature.name}'s vigor restores ${healed} HP.` });
+    } else {
+      creature.hp -= amount;
+      state.log.push({ turn: state.turn, text: `${creature.name}'s sapped vigor drains ${amount} HP.` });
+      if (creature.hp <= 0) {
+        creature.hp = 0;
+        creature.fainted = true;
+        state.log.push({ turn: state.turn, text: `${creature.name} fainted.` });
+      }
+    }
+  }
 }
 
 function applyPoisonTicks(state, creatures) {
@@ -581,7 +630,10 @@ function applyMove(state, attacker, defender, move, rng) {
     // turn 20 escalate 6% per turn).
     const variance = 0.9 + rng() * 0.15;
     const fatigue = 1 + Math.max(0, (state.turn ?? 0) - 20) * 0.06;
-    let damage = Math.max(1, Math.floor(estimateDamage(attacker, defender, move) * variance * fatigue));
+    // Critical hits: rare spike moments. Marked prey is easier to crit.
+    const critChance = hasStatus(defender, "marked") ? 0.2 : 0.08;
+    const crit = rng() < critChance;
+    let damage = Math.max(1, Math.floor(estimateDamage(attacker, defender, move) * variance * fatigue * (crit ? 1.5 : 1)));
     let hits = 1;
 
     if (move.effect?.kind === "multihit") {
@@ -609,8 +661,11 @@ function applyMove(state, attacker, defender, move, rng) {
     state.log.push({
       turn: state.turn,
       text: `${attacker.name} used ${move.name} and dealt ${damage} damage.`,
-      data: { damage, moveId: move.id, effectiveness }
+      data: { damage, moveId: move.id, effectiveness, crit }
     });
+    if (crit) {
+      state.log.push({ turn: state.turn, text: "A critical hit!", data: { crit: true } });
+    }
     if (effectiveness >= 1.2) {
       state.log.push({ turn: state.turn, text: "It's super effective!" });
     } else if (effectiveness <= 0.85) {
@@ -619,6 +674,7 @@ function applyMove(state, attacker, defender, move, rng) {
     if (hits > 1) {
       state.log.push({ turn: state.turn, text: `It struck ${hits} times.` });
     }
+    applyRally(state, defender);
 
     if (move.effect?.kind === "drain") {
       const pct = Math.max(10, Math.min(60, Math.floor(move.effect.pct ?? 30)));
