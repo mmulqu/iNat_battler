@@ -48,7 +48,7 @@ import {
   searchActorsTypeahead
 } from "./atproto.js";
 
-import landingHeroBattleImage from "./assets/landing-hero-battle.png";
+import landingHeroBattleImage from "./assets/landing-hero-battle.webp";
 import statusStunnedImage from "./assets/status-stunned.png";
 import statusMarkedImage from "./assets/status-marked.png";
 import statusPoisonedImage from "./assets/status-poisoned.png";
@@ -221,8 +221,8 @@ async function routeRequest(request, env, ctx) {
     return htmlResponse(renderAppHtml());
   }
 
-  if (request.method === "GET" && url.pathname === "/assets/landing-hero-battle.png") {
-    return bundledImageResponse(landingHeroBattleImage, "image/png");
+  if (request.method === "GET" && url.pathname === "/assets/landing-hero-battle.webp") {
+    return bundledImageResponse(landingHeroBattleImage, "image/webp");
   }
 
   if (request.method === "GET" && url.pathname === "/assets/icon-192.png") {
@@ -7424,6 +7424,12 @@ function renderAppHtml() {
       box-sizing: border-box;
     }
 
+    /* The [hidden] attribute must always win, even over .layout/.login/etc.
+       display rules (class selectors otherwise outrank the UA [hidden] rule). */
+    [hidden] {
+      display: none !important;
+    }
+
     html {
       -webkit-text-size-adjust: 100%;
       text-size-adjust: 100%;
@@ -7545,7 +7551,7 @@ function renderAppHtml() {
       background:
         linear-gradient(90deg, rgba(12, 21, 16, 0.78) 0%, rgba(12, 21, 16, 0.54) 36%, rgba(12, 21, 16, 0.16) 72%),
         linear-gradient(180deg, rgba(12, 21, 16, 0.08), rgba(12, 21, 16, 0.36)),
-        url("/assets/landing-hero-battle.png") center / cover no-repeat;
+        url("/assets/landing-hero-battle.webp") center / cover no-repeat;
       box-shadow: 0 24px 70px rgba(22, 32, 27, 0.18);
       isolation: isolate;
     }
@@ -7870,6 +7876,11 @@ function renderAppHtml() {
     .home-team-slot.empty {
       grid-template-columns: 44px minmax(0, 1fr);
       color: var(--muted);
+      /* Override the global .empty placeholder height (360px) for slots. */
+      min-height: 54px;
+      place-items: stretch;
+      padding: 7px;
+      text-align: left;
     }
 
     .home-slot-index,
