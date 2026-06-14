@@ -681,6 +681,12 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await getLeaderboard(env, viewerUserId));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/leaderboard/territory") {
+    const session = await getSession(request, env);
+    const viewerUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
+    return jsonResponse(await getTerritoryLeaderboard(env, viewerUserId));
+  }
+
   if (request.method === "POST" && url.pathname === "/api/share/battle") {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
@@ -5901,6 +5907,67 @@ async function getTerritoryClaims(env, session, url) {
     });
   }
   return { claims };
+}
+
+// Territory leaderboard: rank holders by tiles controlled (then biome variety).
+const TERRITORY_LEADERBOARD_SELECT = `
+  WITH holdings AS (
+    SELECT
+      owner_id,
+      count(*) AS tiles,
+      count(DISTINCT biome_type) AS biomes,
+      (SELECT biome_type FROM tiles t2 WHERE t2.owner_id = t.owner_id
+       GROUP BY biome_type ORDER BY count(*) DESC, biome_type ASC LIMIT 1) AS top_biome
+    FROM tiles t
+    WHERE owner_id IS NOT NULL
+    GROUP BY owner_id
+  )
+  SELECT
+    h.owner_id, h.tiles, h.biomes, h.top_biome,
+    u.display_name AS user_display_name, u.inat_login,
+    a.handle AS bsky_handle, a.display_name AS bsky_display_name, a.avatar_url
+  FROM holdings h
+  LEFT JOIN users u ON u.id = h.owner_id
+  LEFT JOIN accounts a ON a.did = (
+    SELECT did FROM accounts WHERE inat_login = u.inat_login ORDER BY updated_at DESC LIMIT 1
+  )
+`;
+
+function territoryLeaderboardEntry(row, rank) {
+  return {
+    rank,
+    userId: row.owner_id,
+    name: row.bsky_display_name || row.user_display_name || row.bsky_handle || row.inat_login || ownerDisplayName(row.owner_id),
+    handle: row.bsky_handle || null,
+    avatarUrl: row.avatar_url || null,
+    tiles: Number(row.tiles ?? 0),
+    biomes: Number(row.biomes ?? 0),
+    topBiome: row.top_biome || null
+  };
+}
+
+async function getTerritoryLeaderboard(env, viewerUserId = null, limit = 50) {
+  const rows = await env.DB.prepare(
+    TERRITORY_LEADERBOARD_SELECT + " ORDER BY h.tiles DESC, h.biomes DESC, h.owner_id ASC LIMIT ?"
+  ).bind(limit).all();
+  const entries = (rows.results ?? []).map((row, index) => territoryLeaderboardEntry(row, index + 1));
+
+  const totalRow = await env.DB.prepare(
+    "SELECT count(DISTINCT owner_id) AS total FROM tiles WHERE owner_id IS NOT NULL"
+  ).first();
+  const total = Number(totalRow?.total ?? entries.length);
+
+  let you = viewerUserId ? entries.find((entry) => entry.userId === viewerUserId) ?? null : null;
+  if (!you && viewerUserId) {
+    const row = await env.DB.prepare(TERRITORY_LEADERBOARD_SELECT + " WHERE h.owner_id = ?").bind(viewerUserId).first();
+    if (row) {
+      const rankRow = await env.DB.prepare(
+        "SELECT count(*) + 1 AS rank FROM (SELECT owner_id, count(*) AS tiles FROM tiles WHERE owner_id IS NOT NULL GROUP BY owner_id) WHERE tiles > ?"
+      ).bind(Number(row.tiles)).first();
+      you = territoryLeaderboardEntry(row, Number(rankRow?.rank ?? 0));
+    }
+  }
+  return { entries, totalPlayers: total, you };
 }
 
 // Same-origin proxy for Bluesky avatars so the client can read their pixels on a
@@ -12022,6 +12089,10 @@ function renderAppHtml() {
           <div class="roster-head">
             <h2>Leaderboard</h2>
             <div class="battle-head-tools">
+              <div class="map-mode-toggle" id="leaderboardModeToggle" role="group" aria-label="Leaderboard type">
+                <button class="map-mode-btn active" type="button" data-lb-mode="battle">Battle</button>
+                <button class="map-mode-btn" type="button" data-lb-mode="territory">Territory</button>
+              </div>
               <span class="subtle" id="leaderboardMetaLabel"></span>
               <button class="secondary" id="leaderboardRefreshButton" type="button">Refresh</button>
             </div>
@@ -12415,6 +12486,7 @@ function renderAppHtml() {
       leaderboardView: document.getElementById("leaderboardView"),
       leaderboardPanel: document.getElementById("leaderboardPanel"),
       leaderboardMetaLabel: document.getElementById("leaderboardMetaLabel"),
+      leaderboardModeToggle: document.getElementById("leaderboardModeToggle"),
       leaderboardRefreshButton: document.getElementById("leaderboardRefreshButton"),
       buddiesTabButton: document.getElementById("buddiesTabButton"),
       buddiesView: document.getElementById("buddiesView"),
@@ -12753,6 +12825,10 @@ function renderAppHtml() {
     els.demoBattleButton.addEventListener("click", startDemoBattle);
 
     els.leaderboardRefreshButton.addEventListener("click", () => loadLeaderboard(true));
+    els.leaderboardModeToggle.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-lb-mode]");
+      if (button) setLeaderboardMode(button.getAttribute("data-lb-mode"));
+    });
 
     els.leaderboardPanel.addEventListener("click", async (event) => {
       const shareButton = event.target.closest("[data-share-rank]");
@@ -14593,14 +14669,26 @@ function renderAppHtml() {
 
     async function loadLeaderboard(showStatus) {
       if (showStatus) setStatus("Loading leaderboard");
-
+      const territory = state.leaderboardMode === "territory";
       try {
-        state.leaderboard = await apiFetch("/api/leaderboard");
+        const board = await apiFetch(territory ? "/api/leaderboard/territory" : "/api/leaderboard");
+        if (territory) state.territoryLeaderboard = board;
+        else state.leaderboard = board;
         renderLeaderboard();
         if (showStatus) setStatus("Leaderboard updated");
       } catch (error) {
         setStatus(error.message);
       }
+    }
+
+    function setLeaderboardMode(mode) {
+      state.leaderboardMode = mode === "territory" ? "territory" : "battle";
+      for (const button of els.leaderboardModeToggle.querySelectorAll("[data-lb-mode]")) {
+        button.classList.toggle("active", button.getAttribute("data-lb-mode") === state.leaderboardMode);
+      }
+      const cached = state.leaderboardMode === "territory" ? state.territoryLeaderboard : state.leaderboard;
+      if (cached) renderLeaderboard();
+      else loadLeaderboard(true);
     }
 
     function streakHtml(entry) {
@@ -14623,6 +14711,10 @@ function renderAppHtml() {
     }
 
     function renderLeaderboard() {
+      if (state.leaderboardMode === "territory") {
+        renderTerritoryLeaderboard();
+        return;
+      }
       const board = state.leaderboard;
       if (!board) {
         els.leaderboardPanel.innerHTML = "";
@@ -14691,6 +14783,76 @@ function renderAppHtml() {
         youCard = '<div class="lb-you-card"><span class="subtle">Win a rated NPC battle to enter the rankings.</span></div>';
       } else {
         youCard = '<div class="lb-you-card"><span class="subtle">Sign in with Bluesky and link your iNaturalist account to get ranked.</span></div>';
+      }
+
+      els.leaderboardPanel.innerHTML = '<div class="lb-podium">' + podium + '</div>' + table + youCard;
+    }
+
+    function renderTerritoryLeaderboard() {
+      const board = state.territoryLeaderboard;
+      if (!board) {
+        els.leaderboardPanel.innerHTML = "";
+        return;
+      }
+      const entries = board.entries || [];
+      els.leaderboardMetaLabel.textContent = entries.length
+        ? board.totalPlayers + " landholder" + (board.totalPlayers === 1 ? "" : "s")
+        : "";
+
+      if (!entries.length) {
+        els.leaderboardPanel.innerHTML =
+          '<div class="empty"><div><strong>No territory claimed yet.</strong><br>' +
+          'Open the Map, sync your observations, and claim a tile to top this board.</div></div>';
+        return;
+      }
+
+      const biomeChip = (b) => b
+        ? '<span class="lb-title-chip">' + escapeHtml(b.charAt(0).toUpperCase() + b.slice(1)) + '</span>'
+        : "&mdash;";
+      const medals = ["🥇", "🥈", "🥉"];
+      const podiumClasses = ["first", "second", "third"];
+      const podium = entries.slice(0, 3).map((entry, index) =>
+        '<div class="lb-podium-card ' + podiumClasses[index] + '">' +
+          '<div class="lb-medal">' + medals[index] + '</div>' +
+          lbAvatar(entry) +
+          '<div class="lb-name">' + lbDisplayName(entry) + '</div>' +
+          '<div class="lb-rating">' + entry.tiles + '</div>' +
+          '<div class="subtle">tiles</div>' +
+          biomeChip(entry.topBiome) +
+          '<div class="subtle">' + entry.biomes + ' biome' + (entry.biomes === 1 ? "" : "s") + '</div>' +
+        '</div>'
+      ).join("");
+
+      const youId = board.you ? board.you.userId : null;
+      const tableRows = entries.slice(3).map((entry) =>
+        '<tr' + (entry.userId === youId ? ' class="lb-you"' : "") + '>' +
+          '<td>#' + entry.rank + '</td>' +
+          '<td><span class="lb-row-name">' + lbAvatar(entry) + lbDisplayName(entry) + '</span></td>' +
+          '<td><strong>' + entry.tiles + '</strong></td>' +
+          '<td>' + entry.biomes + '</td>' +
+          '<td>' + biomeChip(entry.topBiome) + '</td>' +
+        '</tr>'
+      ).join("");
+      const table = entries.length > 3
+        ? '<table class="lb-table"><thead><tr>' +
+            '<th>Rank</th><th>Holder</th><th>Tiles</th><th>Biomes</th><th>Top biome</th>' +
+          '</tr></thead><tbody>' + tableRows + '</tbody></table>'
+        : "";
+
+      let youCard;
+      if (board.you) {
+        const you = board.you;
+        youCard =
+          '<div class="lb-you-card"><div class="lb-you-stats">' +
+            '<span class="lb-you-rank">#' + you.rank + '</span>' +
+            '<strong>' + you.tiles + ' tiles</strong>' +
+            '<span class="subtle">' + you.biomes + ' biome' + (you.biomes === 1 ? "" : "s") +
+              (you.topBiome ? " &middot; mostly " + escapeHtml(you.topBiome) : "") + '</span>' +
+          '</div></div>';
+      } else if (state.me && state.me.loggedIn && state.me.inatLogin) {
+        youCard = '<div class="lb-you-card"><span class="subtle">Claim a tile on the Map to enter the territory rankings.</span></div>';
+      } else {
+        youCard = '<div class="lb-you-card"><span class="subtle">Sign in and link iNaturalist, then claim tiles to get ranked.</span></div>';
       }
 
       els.leaderboardPanel.innerHTML = '<div class="lb-podium">' + podium + '</div>' + table + youCard;

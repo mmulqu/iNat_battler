@@ -98,6 +98,11 @@
 - ✅ **Surfaced:** the tile panel shows "You hold N {biome} tiles → +X% to your {biome}-native
   species"; buffed creatures wear a 🏞️ **+X% home** chip in battle.
 
+**Territory leaderboard:** the Leaderboard tab has a **Battle / Territory** toggle
+(`GET /api/leaderboard/territory`) ranking holders by tiles controlled (then biome variety),
+with each holder's avatar, biome count, and top biome — the social pull for the map layer,
+mirroring the battle ELO board.
+
 **The flywheel is closed:** observe → sync → claim/contest tiles on the map → **holding a
 biome buffs your species native to it** → you win more territory → you covet richer biomes →
 back out to observe. Remaining (future): the **ecological economy** (tile value →
