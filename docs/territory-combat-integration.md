@@ -1,6 +1,6 @@
 # Territory × Combat — Merging Biome into iNat Battler
 
-**Status:** In progress — **Bridges 1, 2 & 3 done** (see Progress below).
+**Status:** All four bridges done — the flywheel is closed (see Progress below).
 **Decided to pursue:** 2026-06-14.
 **Tile scale:** res5 (~250 km² hexes) for the MVP; res7 hyperlocal later.
 **Source repos:** `iNat_battler` (this repo — the combat layer) and
@@ -83,10 +83,26 @@
   left) with **Claim** / **Contest** buttons (uses your selected 5-team); contest drops you
   into the normal battle flow, and winning flips the tile (rendered brighter as `mine`).
 
-**The loop now exists:** observe → sync → the tile shows on your map → **claim** it (or
-**contest** someone for it via a battle on its real biome) → hold territory. Still open:
-**Bridge 4** (held biomes buff your native species via `trainingBuffPct`) and the
-**ecological economy** (tile value → yield/AP) to make holding land *pay*.
+**Bridge 4 — held territory buffs your roster: done.** Holding land now makes you stronger.
+
+- ✅ **Roster power.** `territoryBuffPctForBiomeCount(count)` turns your held-tile count per
+  biome into a buff; `createBattleCreature` applies it (stacked with genus/family mastery,
+  same all-stat multiplier) to any creature **native** to a biome you hold — i.e. whose type
+  is favored there (`TERRAIN_MOVE_BONUS`). `loadUserBattleCreatures` feeds it the owner's
+  holdings, so it applies in every battle (NPC, challenge, contest) for that owner's team.
+- ✅ **Curve (gentle, tunable):** 1–2 tiles +3%, 3–5 +4%, 6–9 +5%, 10+ +6%. Capped low on
+  purpose — it's an all-stat multiplier, so it's potent per point.
+- ✅ **Balance-checked** (`scripts/simulate.mjs` baseline unchanged — buff defaults off):
+  A/B shows +6% home-territory ≈ **+9.8 pt** win edge, +10% ≈ +15.6 (which is why the curve
+  caps at 6%). A real reward for holding land without warping PvP.
+- ✅ **Surfaced:** the tile panel shows "You hold N {biome} tiles → +X% to your {biome}-native
+  species"; buffed creatures wear a 🏞️ **+X% home** chip in battle.
+
+**The flywheel is closed:** observe → sync → claim/contest tiles on the map → **holding a
+biome buffs your species native to it** → you win more territory → you covet richer biomes →
+back out to observe. Remaining (future): the **ecological economy** (tile value →
+yield/AP/collection) to make holding land *pay* beyond combat power, and a normalized ranked
+mode so the collection edge doesn't decide competitive play.
 
 ### Cloudflare cost & scale (Workers Paid, $5/mo)
 

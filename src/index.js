@@ -6,6 +6,7 @@ import {
   createSeededRng,
   resolveTurn,
   terrainForTeam,
+  territoryBuffPctForBiomeCount,
   TERRAIN_MOVE_BONUS,
   TYPE_CHART
 } from "./game.js";
@@ -4351,6 +4352,7 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
   ).all();
 
   const buffMap = await loadUserBuffMap(env, userId);
+  const territoryBuffByBiome = await loadTerritoryBuffMap(env, userId);
   const movesMap = await loadSpeciesMovesMap(env, cleanTaxonIds);
   const variantMap = await loadReadySpriteVariantMap(env, cleanTaxonIds);
   const preferenceMap = await loadUserSpritePreferenceMap(env, userId, cleanTaxonIds);
@@ -4370,9 +4372,23 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
       taxonSummaryFromRow(row, spriteUrl),
       `${idPrefix}-${index}`,
       trainingFromRow(row, buffMap),
-      movesMap.get(taxonId)?.moves ?? null
+      movesMap.get(taxonId)?.moves ?? null,
+      territoryBuffByBiome
     );
   });
+}
+
+// Per-biome roster-power buff from the user's held tiles (Bridge 4).
+async function loadTerritoryBuffMap(env, userId) {
+  const rows = (await env.DB.prepare(
+    "SELECT biome_type, count(*) AS n FROM tiles WHERE owner_id = ? GROUP BY biome_type"
+  ).bind(userId).all()).results ?? [];
+  const map = {};
+  for (const row of rows) {
+    const pct = territoryBuffPctForBiomeCount(Number(row.n));
+    if (pct > 0) map[row.biome_type] = pct;
+  }
+  return map;
 }
 
 async function startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty = "normal") {
@@ -5977,6 +5993,17 @@ async function getTerritoryTileDetail(env, session, h3) {
   const observedHere = myUserId ? await userObservedTile(env, myUserId, h3) : false;
   const cap = intEnv(env, "TERRITORY_DAILY_ACTION_CAP", TERRITORY_DAILY_ACTION_CAP_DEFAULT);
   const actionsToday = myUserId ? await territoryActionsToday(env, myUserId) : 0;
+
+  // Roster power: how many tiles of this biome the viewer holds, and the buff
+  // their biome-native species get from it (Bridge 4).
+  let biomeHoldings = 0;
+  if (myUserId) {
+    const hc = await env.DB.prepare(
+      "SELECT count(*) AS n FROM tiles WHERE owner_id = ? AND biome_type = ?"
+    ).bind(myUserId, biome).first();
+    biomeHoldings = Number(hc?.n ?? 0);
+  }
+
   return {
     h3,
     biome,
@@ -5989,7 +6016,9 @@ async function getTerritoryTileDetail(env, session, h3) {
     canClaim: Boolean(myUserId && observedHere && !ownerId),
     canContest: Boolean(myUserId && observedHere && ownerId && !mine),
     actionsLeftToday: Math.max(0, cap - actionsToday),
-    favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? []
+    favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
+    biomeHoldings,
+    biomeBuffPct: territoryBuffPctForBiomeCount(biomeHoldings)
   };
 }
 
@@ -10599,6 +10628,10 @@ function renderAppHtml() {
       background: #2c3a30;
       color: #f2ce72;
     }
+    .lv-chip.terr-chip {
+      background: #1f3a28;
+      color: #8ef0a6;
+    }
 
     .sig-star {
       color: #b48a12;
@@ -11719,6 +11752,18 @@ function renderAppHtml() {
       margin: 10px 0 0;
       font-size: 0.85rem;
       color: #c7d0d5;
+    }
+    .tile-power {
+      margin: 8px 0 0;
+      padding: 7px 9px;
+      border-radius: 9px;
+      font-size: 0.82rem;
+      background: rgba(59, 191, 87, 0.16);
+      border: 1px solid rgba(59, 191, 87, 0.3);
+      color: #d7f0dd;
+    }
+    .tile-power strong {
+      color: #8ef0a6;
     }
     .tile-actions-left {
       margin: 10px 0 0;
@@ -14445,6 +14490,15 @@ function renderAppHtml() {
         ? '<p class="subtle">Favors ' + escapeHtml(d.favoredTypes.join(" · ")) + ' moves (+15%)</p>'
         : "";
 
+      // Roster power: holdings of this biome buff your biome-native species.
+      const holdings = (Number(d.biomeBuffPct) > 0)
+        ? '<p class="tile-power">🏞️ You hold ' + Number(d.biomeHoldings) + ' ' + escapeHtml(d.biome) +
+          ' tiles → <strong>+' + Math.round(Number(d.biomeBuffPct) * 100) + '%</strong> to your ' +
+          escapeHtml(d.biome) + '-native species in battle.</p>'
+        : (Number(d.biomeHoldings) === 0
+          ? '<p class="subtle">Hold ' + escapeHtml(d.biome) + ' tiles to buff your ' + escapeHtml(d.biome) + '-native species.</p>'
+          : "");
+
       let action;
       if (!d.observedHere) {
         action = '<p class="tile-hint">Observe something here on iNaturalist to claim or contest this tile.</p>';
@@ -14468,6 +14522,7 @@ function renderAppHtml() {
           '<h3>' + escapeHtml(name) + ' tile</h3></div>' +
           ownerLine +
           favored +
+          holdings +
           action +
           '<p class="subtle tile-actions-left">' + Number(d.actionsLeftToday) + ' actions left today</p>' +
         '</div>';
@@ -17457,6 +17512,7 @@ function renderAppHtml() {
             '<div class="combatant-name">' + escapeHtml(creature.name) +
               (Number(creature.trainingLevel) > 0 ? ' <span class="lv-chip">Lv ' + Number(creature.trainingLevel) + '</span>' : '') +
               (Number(creature.trainingBuffPct) > 0 ? ' <span class="lv-chip">+' + Math.round(Number(creature.trainingBuffPct) * 100) + '% mastery</span>' : '') +
+              (Number(creature.territoryBuffPct) > 0 ? ' <span class="lv-chip terr-chip">🏞️ +' + Math.round(Number(creature.territoryBuffPct) * 100) + '% home</span>' : '') +
             '</div>' +
             '<div class="combatant-role">' + escapeHtml((creature.types || []).join(" / ")) + '</div>' +
           '</div>' +

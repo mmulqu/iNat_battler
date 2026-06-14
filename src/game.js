@@ -195,7 +195,7 @@ export function createGenome(taxon) {
 export const MOVE_TYPES = Object.keys(TYPE_CHART);
 export { TYPE_CHART, TERRAIN_MOVE_BONUS };
 
-export function createBattleCreature(taxon, instanceSuffix = "a", training = null, speciesMoves = null) {
+export function createBattleCreature(taxon, instanceSuffix = "a", training = null, speciesMoves = null, territoryBuffByBiome = null) {
   const genome = createGenome(taxon);
   const bondLevel = taxon.bondLevel ?? 0;
   const obsCount = taxon.obsCount ?? 0;
@@ -212,12 +212,15 @@ export function createBattleCreature(taxon, instanceSuffix = "a", training = nul
   // genus/family mastery buffs multiply the result.
   const allocations = training?.allocations ?? null;
   const buffPct = Number(training?.buffPct ?? 0);
+  // Held-territory roster power stacks additively with genus/family mastery.
+  const territoryBuffPct = territoryBuffForTypes(genome.types, territoryBuffByBiome);
+  const totalBuffPct = buffPct + territoryBuffPct;
   for (const stat of Object.keys(stats)) {
     if (allocations && Number.isFinite(allocations[stat])) {
       stats[stat] += Math.max(0, Math.floor(allocations[stat]));
     }
-    if (buffPct > 0) {
-      stats[stat] = Math.round(stats[stat] * (1 + buffPct));
+    if (totalBuffPct > 0) {
+      stats[stat] = Math.round(stats[stat] * (1 + totalBuffPct));
     }
   }
 
@@ -233,6 +236,7 @@ export function createBattleCreature(taxon, instanceSuffix = "a", training = nul
     nickname,
     trainingLevel: Math.max(0, Math.floor(Number(training?.level ?? 0))),
     trainingBuffPct: buffPct,
+    territoryBuffPct,
     scientificName: taxon.scientificName,
     bodyPlan: genome.bodyPlan,
     types: genome.types,
@@ -666,6 +670,34 @@ function terrainMultiplier(move, terrain) {
   if (!move || !terrain || terrain === "neutral") return 1;
   const boosted = TERRAIN_MOVE_BONUS[terrain];
   return boosted && boosted.includes(move.type) ? TERRAIN_DAMAGE_BONUS : 1;
+}
+
+// Held-territory roster power (Bridge 4): holding tiles of a biome strengthens
+// your species native to that biome (their type appears in the biome's favored
+// list). The per-biome buff scales with how many of that biome you hold.
+export function territoryBuffPctForBiomeCount(count) {
+  // Multiplies ALL stats of biome-native species, so it's potent per point;
+  // capped gently (~+6%) to reward holding land without warping PvP. Tunable.
+  if (count >= 10) return 0.06;
+  if (count >= 6) return 0.05;
+  if (count >= 3) return 0.04;
+  if (count >= 1) return 0.03;
+  return 0;
+}
+
+// Best territory buff a creature qualifies for, given the owner's per-biome buff
+// map ({ biome: pct }). A creature is "native" to a biome if one of its types is
+// favored there. Takes the strongest qualifying biome (no stacking).
+function territoryBuffForTypes(types, buffByBiome) {
+  if (!buffByBiome || !Array.isArray(types)) return 0;
+  let best = 0;
+  for (const biome of Object.keys(buffByBiome)) {
+    const favored = TERRAIN_MOVE_BONUS[biome];
+    if (favored && types.some((type) => favored.includes(type)) && buffByBiome[biome] > best) {
+      best = buffByBiome[biome];
+    }
+  }
+  return best;
 }
 
 // Which terrain best favors a team — its "home biome". Used to set the arena
