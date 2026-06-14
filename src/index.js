@@ -9,8 +9,9 @@ import {
 } from "./game.js";
 
 // H3 geospatial indexing for the territory layer (pure-JS asm.js build, runs in
-// workerd). Maps an observation's lat/lng to the tile it falls in.
-import { latLngToCell } from "h3-js";
+// workerd). Maps an observation's lat/lng to the tile it falls in, and powers the
+// map view (cells in a viewport + their hex boundaries).
+import { latLngToCell, cellToBoundary, polygonToCells } from "h3-js";
 
 import {
   GENOME_VERSION_MOVES,
@@ -128,6 +129,9 @@ const INAT_TAXON_WIKIPEDIA_FIELDS = [
 ].join(",");
 // Territory layer (Biome merge). res5 (~250 km2 hexes) for the MVP; res7 later.
 const TERRITORY_H3_RESOLUTION = 5;
+// Cap on hexes returned for a single map viewport (keeps payload + polygonToCells
+// bounded; the client only requests tiles when zoomed in past TERRITORY_MIN_ZOOM).
+const TERRITORY_MAX_TILES = 1500;
 const INAT_OBSERVATION_GEO_FIELDS = [
   "id",
   "observed_on",
@@ -353,6 +357,16 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "POST" && url.pathname === "/api/territory/sync") {
     const session = await requireSession(request, env);
     return jsonResponse(await syncTerritoryObservations(env, session));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/territory/tiles") {
+    const session = await getSession(request, env);
+    return jsonResponse(await getTerritoryTiles(env, session, url));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/territory/observations") {
+    const session = await getSession(request, env);
+    return jsonResponse(await getTerritoryObservations(env, session, url));
   }
 
   if (request.method === "POST" && url.pathname === "/api/training/allocate") {
@@ -5690,6 +5704,98 @@ async function syncTerritoryObservations(env, session) {
   return summary;
 }
 
+function parseBbox(url) {
+  const n = Number(url.searchParams.get("n"));
+  const s = Number(url.searchParams.get("s"));
+  const e = Number(url.searchParams.get("e"));
+  const w = Number(url.searchParams.get("w"));
+  if (![n, s, e, w].every(Number.isFinite)) return null;
+  return { n, s, e, w };
+}
+
+async function getTerritoryTiles(env, session, url) {
+  const bbox = parseBbox(url);
+  if (!bbox) return { tiles: [], error: "bbox required" };
+
+  // Guard before polygonToCells: a huge viewport would enumerate too many cells.
+  const midLat = (bbox.n + bbox.s) / 2;
+  const areaKm2 =
+    Math.abs(bbox.n - bbox.s) * 111 *
+    Math.abs(bbox.e - bbox.w) * 111 * Math.max(0.05, Math.cos((midLat * Math.PI) / 180));
+  if (areaKm2 / 252 > TERRITORY_MAX_TILES * 1.5) {
+    return { tiles: [], tooMany: true, resolution: TERRITORY_H3_RESOLUTION };
+  }
+
+  // polygonToCells loop is [lat, lng] (isGeoJson=false). Clamp to valid lat range.
+  const n = Math.min(89.9, bbox.n);
+  const s = Math.max(-89.9, bbox.s);
+  const loop = [[n, bbox.w], [n, bbox.e], [s, bbox.e], [s, bbox.w], [n, bbox.w]];
+  let cells = [];
+  try {
+    cells = polygonToCells([loop], TERRITORY_H3_RESOLUTION);
+  } catch {
+    cells = [];
+  }
+  if (cells.length === 0) return { tiles: [], resolution: TERRITORY_H3_RESOLUTION };
+  if (cells.length > TERRITORY_MAX_TILES) {
+    return { tiles: [], tooMany: true, count: cells.length, resolution: TERRITORY_H3_RESOLUTION };
+  }
+
+  const biomeByCell = new Map();
+  for (const chunk of chunkArray(cells, 90)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const res = await env.DB.prepare(
+      "SELECT h3_index, biome_type FROM tile_biomes WHERE h3_index IN (" + placeholders + ")"
+    ).bind(...chunk).all();
+    for (const row of res.results ?? []) biomeByCell.set(row.h3_index, row.biome_type);
+  }
+
+  const ownerByCell = new Map();
+  for (const chunk of chunkArray(cells, 90)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    const res = await env.DB.prepare(
+      "SELECT h3_index, owner_id, state FROM tiles WHERE h3_index IN (" + placeholders + ")"
+    ).bind(...chunk).all();
+    for (const row of res.results ?? []) ownerByCell.set(row.h3_index, row);
+  }
+
+  const myUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
+  const tiles = [];
+  for (const cell of cells) {
+    const biome = biomeByCell.get(cell) || "unknown";
+    if (biome === "ocean" || biome === "unknown") continue; // basemap already shows water
+    const owned = ownerByCell.get(cell) || null;
+    tiles.push({
+      h3: cell,
+      biome,
+      boundary: cellToBoundary(cell), // [[lat, lng], ...]
+      owner: owned?.owner_id ?? null,
+      mine: Boolean(myUserId && owned?.owner_id === myUserId),
+      state: owned?.state ?? "neutral"
+    });
+  }
+  return { tiles, resolution: TERRITORY_H3_RESOLUTION };
+}
+
+async function getTerritoryObservations(env, session, url) {
+  if (!session?.inat_login) return { observations: [] };
+  const userId = inatUserIdFor(session.inat_login);
+  const bbox = parseBbox(url);
+
+  let query =
+    "SELECT inat_observation_id AS id, latitude, longitude, taxon_id, taxon_name, " +
+    "iconic_taxon_name, h3_index, observed_at FROM tile_observations WHERE user_id = ?";
+  const binds = [userId];
+  if (bbox) {
+    query += " AND latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ?";
+    binds.push(bbox.n, bbox.s, bbox.e, bbox.w);
+  }
+  query += " LIMIT 2000";
+
+  const res = await env.DB.prepare(query).bind(...binds).all();
+  return { observations: res.results ?? [] };
+}
+
 function chunkArray(items, size) {
   const chunks = [];
   for (let index = 0; index < items.length; index += size) {
@@ -7593,6 +7699,8 @@ function renderAppHtml() {
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon-180.png">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
   <title>iNat Battler</title>
   <script>
     if ("serviceWorker" in navigator) {
@@ -11067,6 +11175,96 @@ function renderAppHtml() {
         max-height: 4.6em;
         overflow-y: auto;
       }
+
+      .map-stage {
+        min-height: calc(100dvh - 196px);
+      }
+      .map-head {
+        gap: 8px;
+      }
+      .map-head h2 {
+        font-size: 1.1rem;
+      }
+      .map-head #mapSyncButton {
+        width: auto;
+      }
+      .map-legend {
+        font-size: 10px;
+        padding: 6px 8px;
+      }
+    }
+
+    /* -- Territory map (Leaflet) -- */
+    .map-view {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .map-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .map-head-text {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    .map-head-text h2 {
+      margin: 0;
+    }
+    .map-stage {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 62vh;
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+    #mapCanvas {
+      position: absolute;
+      inset: 0;
+      background: #0c1116;
+    }
+    .leaflet-container {
+      background: #0c1116;
+      font: inherit;
+    }
+    .leaflet-container a {
+      color: var(--teal);
+    }
+    .map-legend {
+      position: absolute;
+      left: 10px;
+      bottom: 10px;
+      z-index: 500;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      background: rgba(12, 17, 22, 0.82);
+      color: #e8eef0;
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-size: 11px;
+      max-height: 46%;
+      overflow: auto;
+      pointer-events: none;
+    }
+    .map-legend-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      text-transform: capitalize;
+    }
+    .map-legend-sw {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
+      flex: 0 0 auto;
     }
   </style>
 </head>
@@ -11243,6 +11441,7 @@ function renderAppHtml() {
           <button class="view-tab" id="battleTabButton" type="button" data-view-tab="battle">Battle</button>
           <button class="view-tab" id="leaderboardTabButton" type="button" data-view-tab="leaderboard">Leaderboard</button>
           <button class="view-tab" id="buddiesTabButton" type="button" data-view-tab="buddies">Buddies</button>
+          <button class="view-tab" id="mapTabButton" type="button" data-view-tab="map">Map</button>
           <button class="view-tab" id="trainingTabButton" type="button" data-view-tab="training">Training</button>
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
           <button class="view-tab" id="recentTabButton" type="button" data-view-tab="recent">Recently Added</button>
@@ -11314,6 +11513,19 @@ function renderAppHtml() {
           </div>
           <p class="subtle buddy-intro">Your Bluesky mutuals, live. Presence is read from the firehose: <span class="buddy-dot online"></span> active (posting), <span class="buddy-dot idle"></span> lurking (likes only), <span class="buddy-dot offline"></span> quiet. Challenge whoever is online now.</p>
           <div id="buddiesPanel"><p class="subtle">Open this tab to connect to the Bluesky firehose and load your buddy list.</p></div>
+        </section>
+        <section class="view-panel map-view" id="mapView" hidden>
+          <div class="map-head">
+            <div class="map-head-text">
+              <h2>Territory</h2>
+              <span class="subtle" id="mapStatusLabel">Your observations on the living map. Each hex is a real biome.</span>
+            </div>
+            <button class="secondary" id="mapSyncButton" type="button">Sync my observations</button>
+          </div>
+          <div class="map-stage">
+            <div id="mapCanvas"></div>
+            <div class="map-legend" id="mapLegend" aria-hidden="true"></div>
+          </div>
         </section>
         <section class="view-panel" id="trainingView" hidden>
           <div class="roster-head">
@@ -11424,6 +11636,7 @@ function renderAppHtml() {
     <div class="mobile-sheet-backdrop" data-mobile-sheet-close></div>
     <div class="mobile-sheet-panel" role="menu" aria-label="More views">
       <div class="mobile-sheet-handle" aria-hidden="true"></div>
+      <button class="mobile-sheet-item" type="button" data-mobile-nav="map" role="menuitem">🗺️ Territory Map</button>
       <button class="mobile-sheet-item" type="button" data-mobile-nav="leaderboard" role="menuitem">🏆 Leaderboard</button>
       <button class="mobile-sheet-item" type="button" data-mobile-nav="training" role="menuitem">📈 Training</button>
       <button class="mobile-sheet-item" type="button" data-mobile-nav="tree" role="menuitem">🌳 Sprite Tree</button>
@@ -11668,6 +11881,12 @@ function renderAppHtml() {
       buddiesPanel: document.getElementById("buddiesPanel"),
       buddiesMetaLabel: document.getElementById("buddiesMetaLabel"),
       buddiesRefreshButton: document.getElementById("buddiesRefreshButton"),
+      mapTabButton: document.getElementById("mapTabButton"),
+      mapView: document.getElementById("mapView"),
+      mapCanvas: document.getElementById("mapCanvas"),
+      mapLegend: document.getElementById("mapLegend"),
+      mapStatusLabel: document.getElementById("mapStatusLabel"),
+      mapSyncButton: document.getElementById("mapSyncButton"),
       mobileNav: document.getElementById("mobileNav"),
       mobileMoreButton: document.getElementById("mobileMoreButton"),
       mobileSheet: document.getElementById("mobileSheet"),
@@ -11713,6 +11932,8 @@ function renderAppHtml() {
     els.battleTabButton.addEventListener("click", () => switchView("battle"));
     els.leaderboardTabButton.addEventListener("click", () => switchView("leaderboard"));
     els.buddiesTabButton.addEventListener("click", () => switchView("buddies"));
+    els.mapTabButton.addEventListener("click", () => switchView("map"));
+    els.mapSyncButton.addEventListener("click", syncTerritory);
     els.trainingTabButton.addEventListener("click", () => switchView("training"));
     els.buddiesRefreshButton.addEventListener("click", () => startPresence(true));
     els.buddiesPanel.addEventListener("click", onBuddiesPanelClick);
@@ -13260,8 +13481,12 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "training", "dev"].includes(view) ? view : "home";
+      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "map", "training", "dev"].includes(view) ? view : "home";
       renderViewTabs();
+
+      if (state.activeView === "map") {
+        initTerritoryMap();
+      }
 
       if (state.activeView === "leaderboard") {
         await loadLeaderboard(!state.leaderboard);
@@ -13295,6 +13520,7 @@ function renderAppHtml() {
       els.battleTabButton.classList.toggle("active", view === "battle");
       els.leaderboardTabButton.classList.toggle("active", view === "leaderboard");
       els.buddiesTabButton.classList.toggle("active", view === "buddies");
+      els.mapTabButton.classList.toggle("active", view === "map");
       els.trainingTabButton.classList.toggle("active", view === "training");
       els.treeTabButton.classList.toggle("active", view === "tree");
       els.recentTabButton.classList.toggle("active", view === "recent");
@@ -13304,6 +13530,7 @@ function renderAppHtml() {
       els.battleView.hidden = view !== "battle";
       els.leaderboardView.hidden = view !== "leaderboard";
       els.buddiesView.hidden = view !== "buddies";
+      els.mapView.hidden = view !== "map";
       els.trainingView.hidden = view !== "training";
       els.treeView.hidden = view !== "tree";
       els.recentView.hidden = view !== "recent";
@@ -13317,6 +13544,171 @@ function renderAppHtml() {
       els.mobileMoreButton.classList.toggle("active", !primaryMobileViews.includes(view));
       for (const button of els.mobileSheet.querySelectorAll("[data-mobile-nav]")) {
         button.classList.toggle("active", button.getAttribute("data-mobile-nav") === view);
+      }
+    }
+
+    // -- Territory map (Leaflet) --------------------------------------------
+
+    const BIOME_COLORS = {
+      shrubland: "#ccb35c", grassland: "#b8e05c", agricultural: "#e9d35f",
+      urban: "#e60000", desert: "#c4b79f", polar: "#f0f0f0", freshwater: "#3a86d6",
+      wetland: "#13b3b3", tundra: "#7dd67d", forest: "#3bbf57", woodland: "#7cc873",
+      ocean: "#1c2a55", unknown: "#808080"
+    };
+    const TAXA_COLORS = {
+      Aves: "#3b82f6", Plantae: "#22c55e", Insecta: "#f59e0b", Fungi: "#a855f7",
+      Mammalia: "#ef4444", Reptilia: "#84cc16", Amphibia: "#14b8a6", Arachnida: "#f97316",
+      Mollusca: "#ec4899", Actinopterygii: "#06b6d4", Animalia: "#eab308", unknown: "#9ca3af"
+    };
+    const MAP_TILE_MIN_ZOOM = 6;
+
+    function biomeColor(b) { return BIOME_COLORS[b] || BIOME_COLORS.unknown; }
+    function taxaColor(t) { return TAXA_COLORS[t] || TAXA_COLORS.unknown; }
+
+    function renderMapLegend() {
+      const order = ["forest", "woodland", "grassland", "shrubland", "wetland", "freshwater", "agricultural", "urban", "desert", "tundra", "polar"];
+      let html = "";
+      for (let i = 0; i < order.length; i += 1) {
+        html += '<span class="map-legend-row"><span class="map-legend-sw" style="background:' + biomeColor(order[i]) + '"></span>' + order[i] + "</span>";
+      }
+      els.mapLegend.innerHTML = html;
+    }
+
+    function initTerritoryMap() {
+      if (state.map) {
+        setTimeout(() => { state.map.invalidateSize(); }, 60);
+        return;
+      }
+      if (typeof L === "undefined") {
+        els.mapStatusLabel.textContent = "Map library still loading — reopen this tab in a moment.";
+        return;
+      }
+      const map = L.map(els.mapCanvas, { zoomControl: true, preferCanvas: false, worldCopyJump: true });
+      state.map = map;
+      state.mapTileLayer = L.layerGroup().addTo(map);
+      state.mapObsLayer = L.layerGroup().addTo(map);
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+        attribution: "&copy; OpenStreetMap &copy; CARTO",
+        subdomains: "abcd",
+        maxZoom: 19
+      }).addTo(map);
+      map.setView([20, 0], 2);
+      renderMapLegend();
+
+      let debounce = null;
+      map.on("moveend", () => {
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(loadMapData, 350);
+      });
+
+      setTimeout(() => {
+        map.invalidateSize();
+        centerMapOnObservations();
+      }, 90);
+    }
+
+    async function centerMapOnObservations() {
+      if (!state.map) return;
+      try {
+        const res = await apiFetch("/api/territory/observations");
+        const obs = (res && res.observations) || [];
+        if (obs.length > 0) {
+          const lats = obs.map((o) => o.latitude);
+          const lngs = obs.map((o) => o.longitude);
+          state.map.fitBounds(
+            [[Math.min.apply(null, lats), Math.min.apply(null, lngs)], [Math.max.apply(null, lats), Math.max.apply(null, lngs)]],
+            { padding: [30, 30], maxZoom: 9 }
+          );
+        } else {
+          els.mapStatusLabel.textContent = "No observations synced yet — tap “Sync my observations.”";
+        }
+      } catch (error) {
+        /* fall through to a normal load */
+      }
+      loadMapData();
+    }
+
+    let mapLoadToken = 0;
+    async function loadMapData() {
+      if (!state.map) return;
+      const token = (mapLoadToken += 1);
+      const b = state.map.getBounds();
+      const zoom = state.map.getZoom();
+      const qs = "n=" + b.getNorth() + "&s=" + b.getSouth() + "&e=" + b.getEast() + "&w=" + b.getWest();
+
+      try {
+        const ores = await apiFetch("/api/territory/observations?" + qs);
+        if (token !== mapLoadToken) return;
+        drawObservations((ores && ores.observations) || []);
+      } catch (error) { /* ignore */ }
+
+      if (zoom < MAP_TILE_MIN_ZOOM) {
+        state.mapTileLayer.clearLayers();
+        els.mapStatusLabel.textContent = "Zoom in to reveal biome hexes.";
+        return;
+      }
+      try {
+        const tres = await apiFetch("/api/territory/tiles?" + qs);
+        if (token !== mapLoadToken) return;
+        if (tres && tres.tooMany) {
+          state.mapTileLayer.clearLayers();
+          els.mapStatusLabel.textContent = "Zoom in to reveal biome hexes.";
+          return;
+        }
+        drawTiles((tres && tres.tiles) || []);
+      } catch (error) { /* ignore */ }
+    }
+
+    function drawTiles(tiles) {
+      state.mapTileLayer.clearLayers();
+      for (let i = 0; i < tiles.length; i += 1) {
+        const t = tiles[i];
+        if (!t.boundary || !t.boundary.length) continue;
+        const poly = L.polygon(t.boundary, {
+          fillColor: biomeColor(t.biome),
+          fillOpacity: t.mine ? 0.72 : 0.5,
+          color: t.mine ? "#ffffff" : "rgba(255,255,255,0.35)",
+          weight: t.mine ? 2.5 : 1
+        });
+        poly.bindTooltip(t.biome + (t.mine ? " — yours" : ""), { sticky: true });
+        state.mapTileLayer.addLayer(poly);
+      }
+      els.mapStatusLabel.textContent = tiles.length + " biome hexes in view.";
+    }
+
+    function drawObservations(obs) {
+      state.mapObsLayer.clearLayers();
+      for (let i = 0; i < obs.length; i += 1) {
+        const o = obs[i];
+        if (!Number.isFinite(o.latitude) || !Number.isFinite(o.longitude)) continue;
+        const marker = L.circleMarker([o.latitude, o.longitude], {
+          radius: 5,
+          fillColor: taxaColor(o.iconic_taxon_name),
+          fillOpacity: 0.92,
+          color: "#0c1116",
+          weight: 1
+        });
+        const name = o.taxon_name || "Observation";
+        marker.bindPopup('<strong>' + escapeHtml(name) + '</strong><br><span class="subtle">' + escapeHtml(o.iconic_taxon_name || '') + '</span>');
+        state.mapObsLayer.addLayer(marker);
+      }
+    }
+
+    async function syncTerritory() {
+      els.mapSyncButton.disabled = true;
+      els.mapStatusLabel.textContent = "Syncing observations from iNaturalist…";
+      try {
+        const res = await apiFetch("/api/territory/sync", { method: "POST" });
+        if (res && res.warning) {
+          els.mapStatusLabel.textContent = res.warning;
+        } else {
+          els.mapStatusLabel.textContent = "Synced " + Number(res.recorded || 0) + " observations across " + Number(res.distinctTiles || 0) + " tiles.";
+        }
+        await centerMapOnObservations();
+      } catch (error) {
+        els.mapStatusLabel.textContent = error.message || "Sync failed";
+      } finally {
+        els.mapSyncButton.disabled = false;
       }
     }
 
