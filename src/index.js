@@ -8,6 +8,10 @@ import {
   TYPE_CHART
 } from "./game.js";
 
+// H3 geospatial indexing for the territory layer (pure-JS asm.js build, runs in
+// workerd). Maps an observation's lat/lng to the tile it falls in.
+import { latLngToCell } from "h3-js";
+
 import {
   GENOME_VERSION_MOVES,
   assembleGenomeV2,
@@ -122,6 +126,24 @@ const INAT_TAXON_WIKIPEDIA_FIELDS = [
   "id",
   "wikipedia_summary"
 ].join(",");
+// Territory layer (Biome merge). res5 (~250 km2 hexes) for the MVP; res7 later.
+const TERRITORY_H3_RESOLUTION = 5;
+const INAT_OBSERVATION_GEO_FIELDS = [
+  "id",
+  "observed_on",
+  "time_observed_at",
+  "quality_grade",
+  "geoprivacy",
+  "taxon_geoprivacy",
+  "obscured",
+  "location",
+  "geojson",
+  "taxon.id",
+  "taxon.name",
+  "taxon.preferred_common_name",
+  "taxon.iconic_taxon_name"
+].join(",");
+
 const GLOBAL_SEED_KEY = "na_europe_plants_animals_v1";
 const GLOBAL_SEED_LIMIT_PER_GROUP = 1000;
 const GLOBAL_SEED_BATCH_SIZE = 200;
@@ -326,6 +348,11 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "POST" && url.pathname === "/api/training/sync") {
     const session = await requireSession(request, env);
     return jsonResponse(await syncTrainingData(env, session));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/territory/sync") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await syncTerritoryObservations(env, session));
   }
 
   if (request.method === "POST" && url.pathname === "/api/training/allocate") {
@@ -5491,6 +5518,176 @@ const TRAINING_MAX_ANCESTOR_BATCHES = 12;
 function requireLinkedUserId(session) {
   if (!session.inat_login) throw httpError("Link your iNaturalist account first", 400);
   return inatUserIdFor(session.inat_login);
+}
+
+// --- Territory layer: geo-aware observation ingestion (Biome merge, Bridge 1) ---
+
+function parseObsLatLng(obs) {
+  // v2 geojson is [lng, lat]; the `location` string is "lat,lng".
+  if (obs?.geojson && Array.isArray(obs.geojson.coordinates)) {
+    const [lng, lat] = obs.geojson.coordinates;
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  }
+  if (typeof obs?.location === "string" && obs.location.includes(",")) {
+    const [latStr, lngStr] = obs.location.split(",");
+    const lat = Number(latStr);
+    const lng = Number(lngStr);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  }
+  return null;
+}
+
+function obsIsObscured(obs) {
+  // Obscured/private coords are randomized by ~0.2deg, enough to land in the
+  // wrong res5 tile, so they can't be assigned precisely. Skip them.
+  if (obs?.obscured === true) return true;
+  const g = obs?.geoprivacy;
+  const tg = obs?.taxon_geoprivacy;
+  return g === "obscured" || g === "private" || tg === "obscured" || tg === "private";
+}
+
+async function fetchUserObservationsGeo(env, inatLogin) {
+  const cooldownKey = `inat:observations_geo:${inatLogin.toLowerCase()}:cooldown`;
+  if (await readInatCooldown(env, cooldownKey)) {
+    throw inatRateLimitError("iNaturalist rate limit reached");
+  }
+
+  const maxPages = intEnv(env, "MAX_TERRITORY_SYNC_PAGES", 10);
+  const rows = [];
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const url = new URL(`${INAT_API_BASE_URL}/observations`);
+    url.searchParams.set("user_login", inatLogin);
+    url.searchParams.set("quality_grade", "research");
+    url.searchParams.set("geo", "true");
+    url.searchParams.set("order_by", "observed_on");
+    url.searchParams.set("per_page", "200");
+    url.searchParams.set("page", String(page));
+    url.searchParams.set("fields", INAT_OBSERVATION_GEO_FIELDS);
+    url.searchParams.set("ttl", String(INAT_SPECIES_CACHE_TTL_SECONDS));
+
+    const res = await fetchInatWithRetry(url.toString());
+    if (!res.ok) {
+      if (res.status === 429) {
+        await writeInatCooldown(env, cooldownKey);
+        throw inatRateLimitError("iNaturalist rate limit reached");
+      }
+      const text = await res.text();
+      throw new Error(`iNaturalist observations failed: ${res.status} ${text}`);
+    }
+
+    const data = await res.json();
+    const pageRows = Array.isArray(data.results) ? data.results : [];
+    rows.push(...pageRows);
+
+    if (pageRows.length < 200) break;
+    if (page < maxPages) await sleep(1100);
+  }
+
+  return rows;
+}
+
+async function syncTerritoryObservations(env, session) {
+  const userId = requireLinkedUserId(session);
+  const now = new Date().toISOString();
+
+  // tile_observations references users(id); make sure the row exists even if the
+  // player hasn't run a roster import yet.
+  await env.DB.prepare(`
+    INSERT INTO users (id, inat_user_id, inat_login, display_name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO NOTHING
+  `).bind(
+    userId,
+    session.inat_user_id ?? null,
+    session.inat_login,
+    session.display_name ?? session.inat_login,
+    now,
+    now
+  ).run();
+
+  const summary = {
+    scanned: 0,
+    recorded: 0,
+    skippedNoGeo: 0,
+    skippedObscured: 0,
+    distinctTiles: 0,
+    resolution: TERRITORY_H3_RESOLUTION,
+    warning: null
+  };
+
+  let rows;
+  try {
+    rows = await fetchUserObservationsGeo(env, session.inat_login);
+  } catch (error) {
+    if (error?.code === "INAT_RATE_LIMITED") {
+      summary.warning = "iNaturalist is rate-limiting observation sync; try again shortly";
+    } else {
+      summary.warning = error instanceof Error ? error.message : "Observation fetch failed";
+    }
+    return summary;
+  }
+
+  const statements = [];
+  const tiles = new Set();
+
+  for (const obs of rows) {
+    summary.scanned += 1;
+    if (obsIsObscured(obs)) {
+      summary.skippedObscured += 1;
+      continue;
+    }
+    const coords = parseObsLatLng(obs);
+    if (!coords) {
+      summary.skippedNoGeo += 1;
+      continue;
+    }
+    let cell;
+    try {
+      cell = latLngToCell(coords.lat, coords.lng, TERRITORY_H3_RESOLUTION);
+    } catch {
+      summary.skippedNoGeo += 1;
+      continue;
+    }
+    tiles.add(cell);
+
+    const taxon = obs.taxon || {};
+    statements.push(env.DB.prepare(`
+      INSERT INTO tile_observations (
+        inat_observation_id, user_id, latitude, longitude, h3_index,
+        taxon_id, taxon_name, iconic_taxon_name, quality_grade, observed_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(inat_observation_id) DO UPDATE SET
+        latitude = excluded.latitude,
+        longitude = excluded.longitude,
+        h3_index = excluded.h3_index,
+        taxon_id = excluded.taxon_id,
+        taxon_name = excluded.taxon_name,
+        iconic_taxon_name = excluded.iconic_taxon_name,
+        quality_grade = excluded.quality_grade,
+        observed_at = excluded.observed_at
+    `).bind(
+      Number(obs.id),
+      userId,
+      coords.lat,
+      coords.lng,
+      cell,
+      taxon.id ?? null,
+      taxon.name ?? null,
+      taxon.iconic_taxon_name ?? null,
+      obs.quality_grade ?? null,
+      obs.observed_on ?? obs.time_observed_at ?? null,
+      now
+    ));
+    summary.recorded += 1;
+  }
+
+  for (const chunk of chunkArray(statements, 50)) {
+    if (chunk.length) await env.DB.batch(chunk);
+  }
+
+  summary.distinctTiles = tiles.size;
+  return summary;
 }
 
 function chunkArray(items, size) {
