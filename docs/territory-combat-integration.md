@@ -31,9 +31,18 @@
   `tile_biomes` join returns the correct biome (Amazon→forest, Sahara→desert, London→urban,
   Florida→wetland).
 
-**Remaining to fully close Bridge 1:** a client trigger + minimal Territory view that calls
-`/api/territory/sync`; the remote res5 load; and an authenticated end-to-end run against
-live iNat. Then Bridge 2 (mechanical terrain in `estimateDamage`).
+- ✅ **Territory map tab (Leaflet).** New **Map** tab (top tabs + mobile More sheet) renders
+  a CARTO dark basemap with biome-colored H3 hexes (`GET /api/territory/tiles` →
+  `polygonToCells` in the viewport + `cellToBoundary` + biome from `tile_biomes`, capped
+  with a `tooMany` guard, zoom-gated at z≥6) and the user's observation markers
+  (`GET /api/territory/observations`), plus a biome legend and a **Sync my observations**
+  button. Verified: real Bay Area tiles render as a biome honeycomb (urban=red core,
+  forest=green hills, agricultural=tan valley, freshwater=blue delta). `leaflet@1.9.4` via
+  CDN; no client build step.
+
+**Remaining to fully close Bridge 1:** the remote res5 load (so prod has tiles), and an
+authenticated end-to-end run against live iNat (sync → markers → owned-tile rendering).
+Then Bridge 2 (mechanical terrain in `estimateDamage`).
 
 ---
 
