@@ -23,7 +23,9 @@ resource decisions to battles. Decided 2026-06-13.
 
 ## Numbers (initial, all tunable)
 
-- `MAX_MANA = 10` (flat for MVP; may later scale lightly with a stat).
+- `MAX_MANA = 25` (flat for MVP; may later scale lightly with a stat). _(Bumped from 10
+  on 2026-06-14 — gives ~5–8 moves before draining; regen kept at 1/turn, costs unchanged,
+  so the bench-regen window is now a longer-tail comeback lever. Balance deferred.)_
 - `MANA_REGEN_PER_TURN = 1`.
 - Cost formula:
   - status-category move → flat `3`.

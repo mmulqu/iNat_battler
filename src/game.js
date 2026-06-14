@@ -22,7 +22,7 @@ const DEFAULT_STATS = {
 // Shared-pool mana: gates move usage. Full each battle (creatures are built
 // fresh), +1 to every non-fainted creature each turn (active and benched, so a
 // drained creature can swap out and regen). Costs derive from move power.
-const MAX_MANA = 10;
+const MAX_MANA = 25;
 const MANA_REGEN_PER_TURN = 1;
 
 const STRUGGLE_MOVE = {
