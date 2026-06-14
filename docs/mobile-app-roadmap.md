@@ -41,29 +41,63 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
 
 ---
 
+## Progress log (updated 2026-06-13)
+
+**Phase 1 — Mobile foundation: substantially shipped.**
+
+- ✅ **Bottom tab nav** (Home / Roster / Battle / Buddies / More sheet); top tabs hidden
+  on phones; only shows inside the app.
+- ✅ **Touch + viewport hygiene**: `viewport-fit=cover` + safe-area insets, 44–56px
+  targets, iOS text-auto-zoom off, `overflow-x` guard, tap-highlight/`touch-action`.
+- ✅ **PWA installability**: manifest, service worker (network-first nav, cache-first
+  assets), brand icons (192/512/maskable + apple-touch-icon), `theme-color`. Verified
+  installable via Playwright.
+- ✅ **Responsive bug fixes (Playwright QA at 360–390px)**: fixed a `[hidden]` leak that
+  showed the empty app + import form on the logged-out landing; fixed Home battle-team
+  slots rendering 360px tall each.
+- ✅ **Payload**: landing hero re-encoded PNG→WebP, **2.6MB → 168KB (−93.6%)** on the
+  critical path. _(Status sprite sheets ~7.5MB still pending — see below.)_
+- ✅ **Mobile battle layout**: active battle is a fixed one-screen surface (nav hidden) —
+  stage + both HP bars + status chips + 2×2 moves fit without scrolling; log below.
+- ✅ **Swap species dialog**: replaced unreadable bench boxes with a "Swap!" button →
+  picker dialog (sprite thumbnail + name + HP bar per teammate).
+- ◑ **Real-device QA**: done headless via Playwright (390px + desktop). Real iOS
+  Safari / Android Chrome pass (incl. the Bluesky OAuth redirect) still pending.
+
+**Add-on shipped early:** ✅ the AIM-style Bluesky presence **Buddy list** (see bottom).
+
+**Tooling:** ✅ project-scoped Playwright MCP added for browser-driven QA.
+
+### What's next (recommended order)
+
+1. **Finish Phase 1 payload** — optimize the 5 status sprite sheets (~7.5MB, battle-only);
+   needs a lossless/sprite-aware path + a live-battle visual check.
+2. **Real-device QA** — the OAuth round-trip on actual iOS/Android.
+3. **Phase 5 cost gating** (non-negotiable before opening up) — rate-limit your own API,
+   especially sprite generation; per-user + global ceilings with clear 429 UX.
+4. **Phase 2 onboarding** — the guided mobile setup flow + missing-sprite fallback state.
+5. **Phase 4 retention** — wire the Buddy list into challenges ("challenge who's online").
+
+---
+
 ## Itinerary
 
 ### Phase 1 — Mobile foundation (the "first and foremost")
 
-1. **Responsive overhaul.** Audit every view at 360/390/430px widths. Two breakpoints
-   isn't enough for 8 views; move to a consistent mobile-first system. Battle arena,
-   roster grid, training allocation, and dev panels are the likely breakers.
-2. **Bottom tab nav for mobile.** Replace the 8 top tabs on small screens with a 4–5
-   item bottom bar (Home, Roster, Battle, Train, More). Dev + tree + recent +
-   leaderboard go under "More." Thumb-reachable, native-feeling.
-3. **Touch targets & interactions.** 44px minimum hit areas; verify team-picking / card
-   selection works by tap (no hover-dependent affordances — there's currently no touch
-   handling at all).
-4. **PWA installability.** Web app manifest + icon set + `theme-color` +
-   apple-mobile-web-app tags + a minimal service worker (offline shell + cached static
-   assets). This is what makes it feel like "an app" people add to their home screen,
-   and it's the prerequisite for push notifications later.
-5. **Payload weight.** The HTML/CSS/JS is inlined in one large document. Measure what a
-   phone on cellular actually downloads; split/cache static CSS+JS and the hero image so
-   repeat loads are cheap.
-6. **Real-device QA.** Test the Bluesky OAuth redirect round-trip in iOS Safari and
-   Android Chrome specifically — third-party-redirect auth is where mobile browsers
-   misbehave.
+1. ~~**Responsive overhaul.** Audit every view at 360/390/430px widths.~~ ✅ Mostly done
+   — audited Home/Roster/Battle/Dev/Buddies at 360–390px via Playwright; fixed the
+   `[hidden]` leak + tall team slots. Battle fully reworked. _Remaining: deeper polish of
+   a couple dense panels (training allocation, some dev forms)._
+2. ~~**Bottom tab nav for mobile.**~~ ✅ Done — Home / Roster / Battle / Buddies / More
+   sheet; top tabs hidden on phones.
+3. ~~**Touch targets & interactions.** 44px minimum hit areas.~~ ✅ Done (base) — 44–56px
+   targets, tap-highlight/`touch-action`, no hover-only affordances.
+4. ~~**PWA installability.** Manifest + icons + `theme-color` + apple tags + service
+   worker.~~ ✅ Done — verified installable.
+5. ◑ **Payload weight.** ✅ Landing hero PNG→WebP (2.6MB → 168KB). _Pending: the 5 status
+   sprite sheets (~7.5MB, battle-only) — lossless/sprite-aware path needed._
+6. ◑ **Real-device QA.** ✅ Headless Playwright (390px + desktop). _Pending: real iOS
+   Safari / Android Chrome, especially the Bluesky OAuth redirect round-trip._
 
 ### Phase 2 — Onboarding & first-run (mobile-native)
 
@@ -85,8 +119,9 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
 
 12. Solid NPC/solo battles so the app is fun with zero opponents online (async-only
     would feel dead at alpha scale).
-13. Battle tab empty state + team-readiness checklist; challenge send/accept/decline
-    flows polished for mobile.
+13. ◑ Battle tab empty state + team-readiness checklist; challenge send/accept/decline
+    flows polished for mobile. ✅ Mobile battle is one-screen with a Swap dialog;
+    _remaining: the challenge send/accept/decline flows themselves on mobile._
 14. **Notifications** for "challenge received/accepted" — once the PWA exists, web push;
     interim, lean on Bluesky notifications or email. This is the main retention lever.
 
@@ -129,7 +164,13 @@ fallback** as the non-negotiables for a public mobile alpha.
 
 ---
 
-## Add-on feature: AIM-style "who's active" buddy list (Bluesky presence)
+## Add-on feature: AIM-style "who's active" buddy list (Bluesky presence) — ✅ SHIPPED
+
+**Status:** Built and live as the **Buddies** tab. Resolves mutuals via the public
+AppView, opens one filtered Jetstream socket (regional host + `requireHello` +
+`options_update` hello with `wantedDids` + replay cursor), classifies online/idle/offline
+from the firehose, chimes on come-online, and offers a Challenge hand-off. The brief below
+is kept for reference. _Next: wire it into the challenge loop (Phase 4) and on-device QA._
 
 The good news is the linked repo is the answer. **cee.wtf/aim** is a (at time of
 writing) 17-hour-old AIM-style buddy list that solves exactly this, and it's worth
