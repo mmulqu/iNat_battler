@@ -360,12 +360,12 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/territory/tiles") {
-    const session = await getSession(request, env);
+    const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryTiles(env, session, url));
   }
 
   if (request.method === "GET" && url.pathname === "/api/territory/observations") {
-    const session = await getSession(request, env);
+    const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryObservations(env, session, url));
   }
 
@@ -5630,6 +5630,14 @@ async function syncTerritoryObservations(env, session) {
     warning: null
   };
 
+  // Per-user sync cooldown: each sync can write up to ~2000 rows, so bound how
+  // often a user can trigger one (protects the D1 write budget from spam).
+  const syncCooldownKey = "territory:sync:" + userId + ":cooldown";
+  if (env.CACHE && (await env.CACHE.get(syncCooldownKey))) {
+    summary.warning = "Recently synced — your map is up to date. Try again in a few minutes.";
+    return summary;
+  }
+
   let rows;
   try {
     rows = await fetchUserObservationsGeo(env, session.inat_login);
@@ -5698,6 +5706,12 @@ async function syncTerritoryObservations(env, session) {
 
   for (const chunk of chunkArray(statements, 50)) {
     if (chunk.length) await env.DB.batch(chunk);
+  }
+
+  if (env.CACHE) {
+    await env.CACHE.put(syncCooldownKey, new Date().toISOString(), {
+      expirationTtl: intEnv(env, "TERRITORY_SYNC_COOLDOWN_SECONDS", 120)
+    });
   }
 
   summary.distinctTiles = tiles.size;

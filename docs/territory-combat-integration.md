@@ -40,9 +40,32 @@
   forest=green hills, agricultural=tan valley, freshwater=blue delta). `leaflet@1.9.4` via
   CDN; no client build step.
 
-**Remaining to fully close Bridge 1:** the remote res5 load (so prod has tiles), and an
-authenticated end-to-end run against live iNat (sync → markers → owned-tile rendering).
-Then Bridge 2 (mechanical terrain in `estimateDamage`).
+**Remaining to fully close Bridge 1:** an authenticated end-to-end run against live iNat
+(sync → markers → owned-tile rendering). Then Bridge 2 (mechanical terrain in
+`estimateDamage`).
+
+### Cloudflare cost & scale (Workers Paid, $5/mo)
+
+Designed to stay inside the included D1 allowances: **5 GB storage** (max 10 GB/db),
+**25 B rows read/mo**, **50 M rows written/mo**.
+
+- **`tile_biomes` — ocean + unknown dropped at import.** Of the 1.81 M global res5 tiles,
+  70.4 % are ocean (the basemap already draws water) and are never queried, so only the
+  **516,175 land tiles** are loaded (~3.5× smaller). Est. **~90 MB** with the PK + 2
+  indexes ≈ **1.8 % of storage**; one-time **516 k writes** ≈ 1 % of the monthly write
+  budget.
+- **`tile_observations` (per-user).** Capped at `MAX_TERRITORY_SYNC_PAGES`×200 = **2000
+  obs/user** (~500 KB/user incl. indexes) → ~**10,000 users** before storage matters.
+  Each sync writes ≤2000 rows; a **120 s per-user sync cooldown** (`TERRITORY_SYNC_COOLDOWN_SECONDS`)
+  + iNat's own rate limit bound write-spam → ~25 k full syncs/mo of headroom.
+- **Reads per map pan** ≤ ~3000 rows (`tile_biomes` IN + `tiles` IN), zoom-gated (z≥6) and
+  `tooMany`-capped → ~8 M pans/mo of headroom.
+- **Auth:** all three territory endpoints require a Bluesky session; sync additionally
+  requires a linked iNat account; observations are scoped to the caller's own `user_id`.
+
+**Why not res7 globally:** 88.8 M tiles (~26 M land) ≈ 4.7 GB + 26 M one-time writes would
+nearly fill the database. The res7 hyperlocal upgrade must be **lazy/regional** — load
+tiles only where players actually observe — not a global bulk load.
 
 ---
 

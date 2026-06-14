@@ -12,7 +12,11 @@
  * --local and --remote with the same code path (no deployed endpoint needed).
  *
  * Usage:
- *   node scripts/import_tile_biomes.mjs <jsonl> <resolution> [--local|--remote]
+ *   node scripts/import_tile_biomes.mjs <jsonl> <resolution> [--local|--remote] [--all]
+ *
+ * By default ocean + unknown tiles are SKIPPED (the map never shows them and
+ * they're ~71% of the globe — dropping them keeps D1 small and within the $5
+ * Cloudflare plan). Pass --all to load every tile including ocean.
  *
  * Examples:
  *   node scripts/import_tile_biomes.mjs ../Biome_cf/landcover_export/landcover_res3.jsonl 3 --local
@@ -31,8 +35,12 @@ const args = process.argv.slice(2);
 const inputFile = args[0];
 const resolution = Number.parseInt(args[1], 10);
 const target = args.includes("--remote") ? "--remote" : "--local";
+const includeAll = args.includes("--all");
+const SKIP_BIOMES = new Set(["ocean", "unknown"]);
 const DB_NAME = "inat_battler";
-const CHUNK_ROWS = 20000; // rows per wrangler invocation (one .sql file)
+// Rows per wrangler invocation (one .sql file). Smaller for remote to keep the
+// HTTP request body modest and well under D1's remote limits.
+const CHUNK_ROWS = args.includes("--remote") ? 10000 : 20000;
 const STMT_ROWS = 400;    // rows per INSERT statement (D1 caps statement length)
 
 if (!inputFile || Number.isNaN(resolution)) {
@@ -105,6 +113,7 @@ async function main() {
     let row;
     try { row = JSON.parse(line); } catch { continue; }
     if (!row.h3) continue;
+    if (!includeAll && SKIP_BIOMES.has(row.biome || "unknown")) continue;
     chunk.push(row);
 
     if (chunk.length >= CHUNK_ROWS) {
