@@ -5,6 +5,8 @@ import {
   createGenome,
   createSeededRng,
   resolveTurn,
+  terrainForTeam,
+  TERRAIN_MOVE_BONUS,
   TYPE_CHART
 } from "./game.js";
 
@@ -4361,6 +4363,7 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty = "
     difficulty,
     seed,
     turn: 1,
+    terrain: terrainForTeam(opponent),
     player: { userId, name: "Your Team", activeIndex: 0, creatures },
     opponent,
     log: [{ turn: 0, text: `${opponent.name} challenges your field team. (${difficulty})` }],
@@ -4535,6 +4538,7 @@ async function startDemoBattle(env) {
     mode: "npc",
     seed,
     turn: 1,
+    terrain: "neutral",
     player: { userId: DEMO_USER_ID, name: "Manual Sprite Team", activeIndex: 0, creatures },
     opponent: { name: "Gray Box Bench", activeIndex: 0, creatures: dummies },
     log: [{ turn: 0, text: "A 5v5 sprite animation test battle begins." }],
@@ -5477,6 +5481,7 @@ async function acceptChallenge(env, session, challengeId, rawTaxonIds) {
     challengeId,
     seed,
     turn: 1,
+    terrain: terrainForTeam({ creatures: playerCreatures }),
     player: { userId: accepterUserId, name: `@${session.handle}`, activeIndex: 0, creatures: playerCreatures },
     opponent: { userId: challengerUserId, name: `@${row.challenger_handle}`, activeIndex: 0, creatures: opponentCreatures },
     log: [{ turn: 0, text: `@${row.challenger_handle}'s team answers the field. Challenge accepted!` }],
@@ -10560,6 +10565,26 @@ function renderAppHtml() {
       box-shadow: inset 3px 0 0 #c0593a;
     }
 
+    /* Terrain-favored move: warm leaf glow on the bottom edge. */
+    .move-button.eff-terrain {
+      box-shadow: inset 0 -3px 0 #3bbf57;
+    }
+    .move-button.eff-strong.eff-terrain {
+      box-shadow: inset 3px 0 0 #2e9e4f, inset 0 -3px 0 #3bbf57;
+    }
+    .move-button .terrain-tag {
+      font-size: 0.85em;
+    }
+
+    .terrain-banner {
+      margin: 6px 0 0;
+      padding: 7px 12px;
+      border-radius: 10px;
+      background: linear-gradient(90deg, rgba(59,191,87,0.16), rgba(59,191,87,0.04));
+      border: 1px solid rgba(59,191,87,0.3);
+      font-size: 0.86rem;
+    }
+
     .move-button .eff-tag {
       font-weight: 900;
     }
@@ -11668,6 +11693,13 @@ function renderAppHtml() {
     const ROSTER_PAGE_SIZE = 100;
     ${placeholderFor.toString()}
     const TYPE_CHART = ${JSON.stringify(TYPE_CHART)};
+    const TERRAIN_MOVE_BONUS = ${JSON.stringify(TERRAIN_MOVE_BONUS)};
+
+    function terrainBoostsMove(moveType, terrain) {
+      if (!terrain || terrain === "neutral") return false;
+      const boosted = TERRAIN_MOVE_BONUS[terrain];
+      return Array.isArray(boosted) && boosted.indexOf(moveType) !== -1;
+    }
 
     function typeMultiplierFor(moveType, defenderTypes) {
       return (defenderTypes || []).reduce(
@@ -11705,9 +11737,10 @@ function renderAppHtml() {
         : (guard + stagedStatValue(defender.stats.sense, defender.statStages && defender.statStages.sense)) / 2;
       const stab = (attacker.types || []).includes(move.type) ? 1.15 : 1;
       const typeMult = typeMultiplierFor(move.type, defender.types || []);
+      const terrain = terrainBoostsMove(move.type, battle.terrain) ? 1.15 : 1;
       const bond = 1 + Math.min(0.08, (attacker.bondLevel || 0) * 0.002);
       const fatigue = 1 + Math.max(0, (battle.turn || 0) - 20) * 0.06;
-      const base = move.power * (atk / Math.max(1, def)) * stab * typeMult * bond * 0.6 * 0.975 * fatigue;
+      const base = move.power * (atk / Math.max(1, def)) * stab * typeMult * terrain * bond * 0.6 * 0.975 * fatigue;
       return Math.max(1, Math.floor(base));
     }
 
@@ -16351,7 +16384,24 @@ function renderAppHtml() {
       };
     }
 
+    // Maps a battle's terrain (tile biome) to one of the 5 backdrop palettes.
+    const TERRAIN_BACKDROP = {
+      forest: BATTLE_BIOMES.forest,
+      woodland: BATTLE_BIOMES.forest,
+      grassland: BATTLE_BIOMES.meadow,
+      agricultural: BATTLE_BIOMES.meadow,
+      shrubland: BATTLE_BIOMES.meadow,
+      desert: BATTLE_BIOMES.meadow,
+      urban: BATTLE_BIOMES.urban,
+      wetland: BATTLE_BIOMES.wetland,
+      freshwater: BATTLE_BIOMES.wetland,
+      polar: BATTLE_BIOMES.wetland,
+      tundra: BATTLE_BIOMES.wetland
+    };
+
     function pickBiome(battle) {
+      // Prefer the battle's actual terrain; fall back to the combatants' types.
+      if (battle.terrain && TERRAIN_BACKDROP[battle.terrain]) return TERRAIN_BACKDROP[battle.terrain];
       const types = []
         .concat(getActiveCreature(battle.opponent).types || [])
         .concat(getActiveCreature(battle.player).types || []);
@@ -16442,6 +16492,15 @@ function renderAppHtml() {
       return "NPC Battle";
     }
 
+    function terrainBannerHtml(battle) {
+      const terrain = battle.terrain;
+      if (!terrain || terrain === "neutral" || !TERRAIN_MOVE_BONUS[terrain]) return "";
+      const name = terrain.charAt(0).toUpperCase() + terrain.slice(1);
+      const boosts = TERRAIN_MOVE_BONUS[terrain].join(" · ");
+      return '<div class="terrain-banner">🌿 <strong>' + escapeHtml(name) + ' terrain</strong>' +
+        ' <span class="subtle">— favors ' + escapeHtml(boosts) + ' moves (+15%)</span></div>';
+    }
+
     function renderResultOverlay(battle) {
       const title = battle.status === "won" ? "Victory!" : battle.status === "lost" ? "Defeat" : "Draw";
       const cls = battle.status === "won" ? "win" : battle.status === "lost" ? "lose" : "";
@@ -16514,6 +16573,7 @@ function renderAppHtml() {
             if (affordable) anyAffordable = true;
             const eff = move.category === "status" ? 1 : typeMultiplierFor(move.type, opponentActive.types);
             const effClass = eff >= 1.2 ? " eff-strong" : eff <= 0.85 ? " eff-weak" : "";
+            const terrainBoost = move.category !== "status" && terrainBoostsMove(move.type, battle.terrain);
             const effLabel = "x" + eff.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
             const estimate = estimateMoveDamage(battle, playerActive, opponentActive, move);
             const metaBits = [];
@@ -16526,9 +16586,10 @@ function renderAppHtml() {
             }
             metaBits.push(...describeMoveEffect(move).map(escapeHtml));
             if (Number(move.accuracy) < 100) metaBits.push(Number(move.accuracy) + "% acc");
-            return '<button class="move-button' + (move.signature ? " signature" : "") + effClass + (affordable ? "" : " unaffordable") + '" type="button" data-move-id="' + escapeAttr(move.id) + '" ' +
+            return '<button class="move-button' + (move.signature ? " signature" : "") + effClass + (terrainBoost ? " eff-terrain" : "") + (affordable ? "" : " unaffordable") + '" type="button" data-move-id="' + escapeAttr(move.id) + '" ' +
               (move.flavor ? 'title="' + escapeAttr(move.flavor) + '" ' : "") + ((state.battleBusy || !affordable) ? "disabled" : "") + '>' +
               escapeHtml(move.name) + (move.signature ? ' <span class="sig-star">★</span>' : "") +
+              (terrainBoost ? ' <span class="terrain-tag" title="Favored by the terrain (+15%)">🌿</span>' : "") +
               ' <span class="move-cost">' + cost + ' MP</span>' +
               '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + '</span>' +
               (metaBits.length ? '<span class="move-meta">' + metaBits.join(" · ") + '</span>' : "") +
@@ -16563,6 +16624,7 @@ function renderAppHtml() {
             '<button class="secondary" type="button" data-battle-exit>Exit</button>' +
           '</div>' +
         '</div>' +
+        terrainBannerHtml(battle) +
         '<div class="battle-stage" id="battleStage" style="background-image:' + battleBackdrop(battle) + '">' +
           renderCombatant(battle.player, playerActive, "player") +
           renderCombatant(battle.opponent, opponentActive, "opponent") +

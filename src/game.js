@@ -193,7 +193,7 @@ export function createGenome(taxon) {
 }
 
 export const MOVE_TYPES = Object.keys(TYPE_CHART);
-export { TYPE_CHART };
+export { TYPE_CHART, TERRAIN_MOVE_BONUS };
 
 export function createBattleCreature(taxon, instanceSuffix = "a", training = null, speciesMoves = null) {
   const genome = createGenome(taxon);
@@ -290,7 +290,7 @@ export function chooseNpcMove(state, difficulty, rng) {
 
   const scored = legal.map((move) => ({
     move,
-    score: scoreNpcMove(npc, target, move, difficulty, rng)
+    score: scoreNpcMove(npc, target, move, difficulty, rng, state.terrain)
   }));
   scored.sort((left, right) => right.score - left.score);
 
@@ -642,7 +642,56 @@ function stagedStat(base, stage = 0) {
 // matter).
 const DAMAGE_SCALE = 0.6;
 
-function estimateDamage(attacker, defender, move) {
+// --- Terrain (Biome merge, Bridge 2) ------------------------------------
+// A battle is fought on a tile's biome. Moves whose type suits the terrain hit
+// harder (STAB-magnitude, so it adds texture without becoming a hard counter).
+// Keys match tile_biomes.biome_type; "neutral" (ocean/unknown/unset) buffs
+// nothing.
+const TERRAIN_MOVE_BONUS = {
+  forest: ["Wood", "Fungus", "Decay"],
+  woodland: ["Wood", "Bloom", "Meadow"],
+  grassland: ["Meadow", "Sun", "Swarm"],
+  agricultural: ["Meadow", "Sun", "Bloom"],
+  shrubland: ["Bloom", "Meadow", "Stone"],
+  urban: ["Urban", "Night", "Voice"],
+  desert: ["Stone", "Sun", "Burrow"],
+  polar: ["Frost", "Stone"],
+  freshwater: ["Wetland", "Frost", "Swarm"],
+  wetland: ["Wetland", "Swarm", "Bloom"],
+  tundra: ["Frost", "Fungus", "Burrow"]
+};
+const TERRAIN_DAMAGE_BONUS = 1.15;
+
+function terrainMultiplier(move, terrain) {
+  if (!move || !terrain || terrain === "neutral") return 1;
+  const boosted = TERRAIN_MOVE_BONUS[terrain];
+  return boosted && boosted.includes(move.type) ? TERRAIN_DAMAGE_BONUS : 1;
+}
+
+// Which terrain best favors a team — its "home biome". Used to set the arena
+// for NPC/challenge battles until tile-driven contests (Bridge 3) supply one.
+export function terrainForTeam(team) {
+  if (!team || !Array.isArray(team.creatures) || team.creatures.length === 0) return "neutral";
+  const typeCounts = {};
+  for (const creature of team.creatures) {
+    for (const type of creature.types || []) {
+      typeCounts[type] = (typeCounts[type] || 0) + 1;
+    }
+  }
+  let best = "neutral";
+  let bestScore = 0;
+  for (const [terrain, types] of Object.entries(TERRAIN_MOVE_BONUS)) {
+    let score = 0;
+    for (const type of types) score += typeCounts[type] || 0;
+    if (score > bestScore) {
+      bestScore = score;
+      best = terrain;
+    }
+  }
+  return best;
+}
+
+function estimateDamage(attacker, defender, move, terrain) {
   if (move.category === "status") return 0;
 
   const attackKey = move.category === "physical" ? "strike" : "sense";
@@ -655,8 +704,9 @@ function estimateDamage(attacker, defender, move) {
        stagedStat(defender.stats.sense, defender.statStages.sense ?? 0)) / 2;
   const sameTypeBonus = attacker.types.includes(move.type) ? 1.15 : 1;
   const typeMultiplier = getTypeMultiplier(move.type, defender.types);
+  const terrainBonus = terrainMultiplier(move, terrain);
   const bondNudge = 1 + Math.min(0.08, attacker.bondLevel * 0.002);
-  const base = move.power * (attackStat / Math.max(1, defenseStat)) * sameTypeBonus * typeMultiplier * bondNudge * DAMAGE_SCALE;
+  const base = move.power * (attackStat / Math.max(1, defenseStat)) * sameTypeBonus * typeMultiplier * terrainBonus * bondNudge * DAMAGE_SCALE;
 
   return Math.max(1, Math.floor(base));
 }
@@ -683,7 +733,7 @@ function applyMove(state, attacker, defender, move, rng) {
     // Critical hits: rare spike moments. Marked prey is easier to crit.
     const critChance = hasStatus(defender, "marked") ? 0.2 : 0.08;
     const crit = rng() < critChance;
-    let damage = Math.max(1, Math.floor(estimateDamage(attacker, defender, move) * variance * fatigue * (crit ? 1.5 : 1)));
+    let damage = Math.max(1, Math.floor(estimateDamage(attacker, defender, move, state.terrain) * variance * fatigue * (crit ? 1.5 : 1)));
     let hits = 1;
 
     if (move.effect?.kind === "multihit") {
@@ -788,13 +838,14 @@ function applyEffect(state, attacker, defender, move, rng) {
   }
 }
 
-function scoreNpcMove(attacker, defender, move, difficulty, rng) {
-  const damage = estimateDamage(attacker, defender, move);
+function scoreNpcMove(attacker, defender, move, difficulty, rng, terrain) {
+  const damage = estimateDamage(attacker, defender, move, terrain);
   const accuracy = move.accuracy / 100;
   let score = damage * accuracy;
 
   if (damage >= defender.hp) score += 40;
   if (attacker.types.includes(move.type)) score += 6;
+  if (terrainMultiplier(move, terrain) > 1) score += 8;
 
   const typeMultiplier = getTypeMultiplier(move.type, defender.types);
   if (typeMultiplier > 1) score += 10 * typeMultiplier;

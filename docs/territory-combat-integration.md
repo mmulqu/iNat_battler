@@ -1,6 +1,6 @@
 # Territory × Combat — Merging Biome into iNat Battler
 
-**Status:** In progress — **Bridge 1 backend complete** (see Progress below).
+**Status:** In progress — **Bridges 1 & 2 done** (see Progress below).
 **Decided to pursue:** 2026-06-14.
 **Tile scale:** res5 (~250 km² hexes) for the MVP; res7 hyperlocal later.
 **Source repos:** `iNat_battler` (this repo — the combat layer) and
@@ -41,8 +41,32 @@
   CDN; no client build step.
 
 **Remaining to fully close Bridge 1:** an authenticated end-to-end run against live iNat
-(sync → markers → owned-tile rendering). Then Bridge 2 (mechanical terrain in
-`estimateDamage`).
+(sync → markers → owned-tile rendering).
+
+**Bridge 2 — mechanical terrain: done & balance-checked.**
+
+- ✅ **Terrain now affects combat.** `game.js` gained `TERRAIN_MOVE_BONUS` (each biome
+  favors 2–3 of the 16 move types) and a `terrainMultiplier` (+15%, STAB-magnitude) folded
+  into `estimateDamage` alongside STAB/type/bond. The NPC scorer (`scoreNpcMove`) is
+  terrain-aware too, so the AI leans into favored moves. `terrain` rides in battle state
+  and survives `structuredClone` across turns.
+- ✅ **Terrain source (pre-Bridge-3).** `terrainForTeam()` picks the biome that best favors
+  a team's types — its "home". NPC battles are fought on the **opponent's** home biome;
+  challenge battles on the **defender's** (accepter's) home; the sprite-test battle is
+  `neutral`. This previews the Bridge-3 rule ("attacker fights on the defender's home
+  biome") before tiles drive it.
+- ✅ **Surfaced in the UI.** The backdrop palette is now chosen from `battle.terrain`
+  (not the combatants' types); a terrain banner names the biome and its favored types; and
+  terrain-favored move buttons get a 🌿 marker + leaf glow, with the `~dmg` preview
+  including the +15%.
+- ✅ **Balance-checked** via `scripts/simulate.mjs` (baseline unchanged — terrain is a pure
+  opt-in multiplier) plus an A/B: home terrain is a **+2.3 pt** win-rate edge and trims
+  battles ~7.4→6.8 turns. Meaningful home-field advantage, not a hard counter.
+
+**Next — Bridge 3:** make a tile **contest** resolve as a ghost battle on that tile's biome
+(reusing `chooseNpcAction`), with `tile.defense_strength` as a defender buff; win flips
+`capture_progress`. Then the `terrain` the engine already consumes comes from the real
+tile instead of `terrainForTeam`.
 
 ### Cloudflare cost & scale (Workers Paid, $5/mo)
 
