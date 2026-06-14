@@ -1,9 +1,39 @@
 # Territory × Combat — Merging Biome into iNat Battler
 
-**Status:** Design / implementation plan. Nothing here is built yet.
+**Status:** In progress — **Bridge 1 backend complete** (see Progress below).
 **Decided to pursue:** 2026-06-14.
+**Tile scale:** res5 (~250 km² hexes) for the MVP; res7 hyperlocal later.
 **Source repos:** `iNat_battler` (this repo — the combat layer) and
 [`mmulqu/Biome`](https://github.com/mmulqu/Biome) (the H3 territory/tiling layer).
+
+---
+
+## Progress (updated 2026-06-14)
+
+**Bridge 1 — identity + observation stream: backend done & verified.**
+
+- ✅ **Identity unified, not duplicated.** `migrations/0015_territory.sql` folds the
+  territory model into `inat_battler`. Biome's separate `players` table and its own iNat
+  verification flow are **dropped**; ownership references the battler's `users(id)` (TEXT).
+  Seeds `landcover_classes` (23) + `factions` (4). Tables: `tile_biomes`, `tiles`,
+  `tile_observations`, `territory_players`, `territory_actions`, `factions`,
+  `landcover_classes`.
+- ✅ **Tiles recovered.** `biome-db` on Cloudflare was deleted; the H3→biome data survives
+  as local JSONL. `scripts/import_tile_biomes.mjs` re-imports it (batched under D1's
+  statement-length cap, resumable). **1.81M global res5 tiles loaded into local D1.**
+  _Remote load held until the app reads tiles — run on deploy._
+- ✅ **Geo observation ingestion.** `POST /api/territory/sync` fetches the linked user's
+  research-grade observations from iNat `/observations` (with coords), computes the res5
+  H3 cell per observation (`h3-js`, the first runtime dep — pure-JS asm.js, verified to
+  load **and run inside workerd**), and upserts into `tile_observations` (dedupe by
+  `inat_observation_id`). Obscured/private + geo-less observations are skipped.
+- ✅ **Chain proven end-to-end in the real runtime:** observation lat/lng → res5 cell →
+  `tile_biomes` join returns the correct biome (Amazon→forest, Sahara→desert, London→urban,
+  Florida→wetland).
+
+**Remaining to fully close Bridge 1:** a client trigger + minimal Territory view that calls
+`/api/territory/sync`; the remote res5 load; and an authenticated end-to-end run against
+live iNat. Then Bridge 2 (mechanical terrain in `estimateDamage`).
 
 ---
 
