@@ -5798,17 +5798,63 @@ function parseBbox(url) {
   return { n, s, e, w };
 }
 
+// Level-of-detail: coarse hexes when zoomed out, fine (claimable) when zoomed in.
+// Keeps cell counts / D1 reads / payload bounded at every scale, so biomes can
+// render globally. Only res5 tiles carry ownership.
+const TERRITORY_AREA_PER_TILE_KM2 = { 2: 86745, 3: 12393, 5: 252 };
+// Per-resolution cell cap: coarse layers cover the whole globe in few hexes, so
+// they can afford a higher cap; res5 (claimable) stays tight.
+const TERRITORY_MAX_CELLS = { 2: 8000, 3: 4000, 5: 1800 };
+function resolutionForZoom(zoom) {
+  if (zoom >= 8) return 5;
+  if (zoom >= 4) return 3;
+  return 2;
+}
+
+// H3 hexes straddling the ±180 antimeridian have boundaries that span the whole
+// globe, which Leaflet draws as a stripe across the map. Skip them (a handful of
+// mostly-ocean cells near the date line).
+function boundaryCrossesAntimeridian(boundary) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const p of boundary) {
+    if (p[1] < min) min = p[1];
+    if (p[1] > max) max = p[1];
+  }
+  return max - min > 180;
+}
+
+function biomeTileObject(h3, biome) {
+  const boundary = cellToBoundary(h3);
+  if (boundaryCrossesAntimeridian(boundary)) return null;
+  return { h3, biome, boundary, owner: null, mine: false, state: "neutral" };
+}
+
 async function getTerritoryTiles(env, session, url) {
   const bbox = parseBbox(url);
   if (!bbox) return { tiles: [], error: "bbox required" };
+  const zoom = Number(url.searchParams.get("zoom")) || 9;
+  const resolution = resolutionForZoom(zoom);
 
-  // Guard before polygonToCells: a huge viewport would enumerate too many cells.
+  // World layer (res2): polygonToCells mis-winds near-global spans, so just
+  // return the whole (small) land set — it IS the world.
+  if (resolution === 2) {
+    const rows = (await env.DB.prepare(
+      "SELECT h3_index, biome_type FROM tile_biomes WHERE resolution = 2 AND biome_type NOT IN ('ocean','unknown')"
+    ).all()).results ?? [];
+    return { tiles: rows.map((r) => biomeTileObject(r.h3_index, r.biome_type)).filter(Boolean), resolution: 2 };
+  }
+
+  const perTile = TERRITORY_AREA_PER_TILE_KM2[resolution];
+  const maxCells = TERRITORY_MAX_CELLS[resolution];
+
+  // Guard before polygonToCells: bound how many cells a viewport can enumerate.
   const midLat = (bbox.n + bbox.s) / 2;
   const areaKm2 =
     Math.abs(bbox.n - bbox.s) * 111 *
     Math.abs(bbox.e - bbox.w) * 111 * Math.max(0.05, Math.cos((midLat * Math.PI) / 180));
-  if (areaKm2 / 252 > TERRITORY_MAX_TILES * 1.5) {
-    return { tiles: [], tooMany: true, resolution: TERRITORY_H3_RESOLUTION };
+  if (areaKm2 / perTile > maxCells * 1.5) {
+    return { tiles: [], tooMany: true, resolution };
   }
 
   // polygonToCells loop is [lat, lng] (isGeoJson=false). Clamp to valid lat range.
@@ -5817,17 +5863,17 @@ async function getTerritoryTiles(env, session, url) {
   const loop = [[n, bbox.w], [n, bbox.e], [s, bbox.e], [s, bbox.w], [n, bbox.w]];
   let cells = [];
   try {
-    cells = polygonToCells([loop], TERRITORY_H3_RESOLUTION);
+    cells = polygonToCells([loop], resolution);
   } catch {
     cells = [];
   }
-  if (cells.length === 0) return { tiles: [], resolution: TERRITORY_H3_RESOLUTION };
-  if (cells.length > TERRITORY_MAX_TILES) {
-    return { tiles: [], tooMany: true, count: cells.length, resolution: TERRITORY_H3_RESOLUTION };
+  if (cells.length === 0) return { tiles: [], resolution };
+  if (cells.length > maxCells) {
+    return { tiles: [], tooMany: true, count: cells.length, resolution };
   }
 
   const biomeByCell = new Map();
-  for (const chunk of chunkArray(cells, 90)) {
+  for (const chunk of chunkArray(cells, 200)) {
     const placeholders = chunk.map(() => "?").join(",");
     const res = await env.DB.prepare(
       "SELECT h3_index, biome_type FROM tile_biomes WHERE h3_index IN (" + placeholders + ")"
@@ -5835,31 +5881,36 @@ async function getTerritoryTiles(env, session, url) {
     for (const row of res.results ?? []) biomeByCell.set(row.h3_index, row.biome_type);
   }
 
+  // Ownership is only meaningful at the claimable (res5) level.
   const ownerByCell = new Map();
-  for (const chunk of chunkArray(cells, 90)) {
-    const placeholders = chunk.map(() => "?").join(",");
-    const res = await env.DB.prepare(
-      "SELECT h3_index, owner_id, state FROM tiles WHERE h3_index IN (" + placeholders + ")"
-    ).bind(...chunk).all();
-    for (const row of res.results ?? []) ownerByCell.set(row.h3_index, row);
+  const myUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
+  if (resolution === 5) {
+    for (const chunk of chunkArray(cells, 200)) {
+      const placeholders = chunk.map(() => "?").join(",");
+      const res = await env.DB.prepare(
+        "SELECT h3_index, owner_id, state, garrison_deadline FROM tiles WHERE h3_index IN (" + placeholders + ")"
+      ).bind(...chunk).all();
+      for (const row of res.results ?? []) ownerByCell.set(row.h3_index, row);
+    }
   }
 
-  const myUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
   const tiles = [];
   for (const cell of cells) {
     const biome = biomeByCell.get(cell) || "unknown";
     if (biome === "ocean" || biome === "unknown") continue; // basemap already shows water
+    const boundary = cellToBoundary(cell); // [[lat, lng], ...]
+    if (boundaryCrossesAntimeridian(boundary)) continue;
     const owned = ownerByCell.get(cell) || null;
     tiles.push({
       h3: cell,
       biome,
-      boundary: cellToBoundary(cell), // [[lat, lng], ...]
+      boundary,
       owner: owned?.owner_id ?? null,
       mine: Boolean(myUserId && owned?.owner_id === myUserId),
       state: owned?.state ?? "neutral"
     });
   }
-  return { tiles, resolution: TERRITORY_H3_RESOLUTION };
+  return { tiles, resolution };
 }
 
 async function getTerritoryObservations(env, session, url) {
@@ -5888,7 +5939,7 @@ async function getTerritoryClaims(env, session, url) {
   const myUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
 
   const rows = (await env.DB.prepare(`
-    SELECT t.h3_index, t.owner_id, a.handle, a.avatar_url, a.did
+    SELECT t.h3_index, t.owner_id, t.biome_type, a.handle, a.avatar_url, a.did
     FROM tiles t
     LEFT JOIN users u ON u.id = t.owner_id
     LEFT JOIN accounts a ON a.inat_login = u.inat_login
@@ -5913,6 +5964,7 @@ async function getTerritoryClaims(env, session, url) {
       h3: row.h3_index,
       boundary,
       centroid: [lat, lng],
+      biome: row.biome_type || null,
       login,
       handle: row.handle || login,
       avatarUrl: row.avatar_url || null,
@@ -14387,6 +14439,7 @@ function renderAppHtml() {
       const map = L.map(els.mapCanvas, { zoomControl: true, preferCanvas: false, worldCopyJump: true });
       state.map = map;
       state.mapTileLayer = L.layerGroup().addTo(map);
+      state.mapClaimLayer = L.layerGroup().addTo(map);
       state.mapObsLayer = L.layerGroup().addTo(map);
       state.mapAvatarLayer = L.layerGroup().addTo(map);
       L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
@@ -14435,43 +14488,40 @@ function renderAppHtml() {
       if (!state.map) return;
       const token = (mapLoadToken += 1);
       const b = state.map.getBounds();
-      const zoom = state.map.getZoom();
-      const qs = "n=" + b.getNorth() + "&s=" + b.getSouth() + "&e=" + b.getEast() + "&w=" + b.getWest();
+      const zoom = Math.round(state.map.getZoom());
+      const qs = "n=" + b.getNorth() + "&s=" + b.getSouth() + "&e=" + b.getEast() + "&w=" + b.getWest() + "&zoom=" + zoom;
+      const claims = state.mapMode === "claims";
 
-      if (state.mapMode === "claims") {
-        state.mapTileLayer.clearLayers();
+      // Biome hexes load at every zoom (level-of-detail picks the resolution).
+      try {
+        const tres = await apiFetch("/api/territory/tiles?" + qs);
+        if (token !== mapLoadToken) return;
+        if (tres && tres.tooMany) {
+          state.mapTileLayer.clearLayers();
+          els.mapStatusLabel.textContent = "Zoom in to load biomes.";
+        } else {
+          drawTiles((tres && tres.tiles) || [], Number(tres && tres.resolution) || 5, claims);
+        }
+      } catch (error) { /* ignore */ }
+
+      if (claims) {
+        // Owner-colored claims + avatar clusters overlaid on the biome grid.
         state.mapObsLayer.clearLayers();
         try {
           const cres = await apiFetch("/api/territory/claims?" + qs);
           if (token !== mapLoadToken) return;
           await drawClaims((cres && cres.claims) || []);
         } catch (error) { /* ignore */ }
-        return;
+      } else {
+        // Biomes mode: your observation markers.
+        state.mapClaimLayer.clearLayers();
+        state.mapAvatarLayer.clearLayers();
+        try {
+          const ores = await apiFetch("/api/territory/observations?" + qs);
+          if (token !== mapLoadToken) return;
+          drawObservations((ores && ores.observations) || []);
+        } catch (error) { /* ignore */ }
       }
-
-      // Biomes mode (default): observations + biome hexes.
-      state.mapAvatarLayer.clearLayers();
-      try {
-        const ores = await apiFetch("/api/territory/observations?" + qs);
-        if (token !== mapLoadToken) return;
-        drawObservations((ores && ores.observations) || []);
-      } catch (error) { /* ignore */ }
-
-      if (zoom < MAP_TILE_MIN_ZOOM) {
-        state.mapTileLayer.clearLayers();
-        els.mapStatusLabel.textContent = "Zoom in to reveal biome hexes.";
-        return;
-      }
-      try {
-        const tres = await apiFetch("/api/territory/tiles?" + qs);
-        if (token !== mapLoadToken) return;
-        if (tres && tres.tooMany) {
-          state.mapTileLayer.clearLayers();
-          els.mapStatusLabel.textContent = "Zoom in to reveal biome hexes.";
-          return;
-        }
-        drawTiles((tres && tres.tiles) || []);
-      } catch (error) { /* ignore */ }
     }
 
     // --- Claims mode: owner-colored territory + PFP cluster markers ---
@@ -14583,11 +14633,11 @@ function renderAppHtml() {
     }
 
     async function drawClaims(claims) {
-      state.mapTileLayer.clearLayers();
-      state.mapObsLayer.clearLayers();
+      // Biome grid stays (drawn by drawTiles); we overlay claims + avatars.
+      state.mapClaimLayer.clearLayers();
       state.mapAvatarLayer.clearLayers();
       if (!claims.length) {
-        els.mapStatusLabel.textContent = "No claimed tiles in view yet — claim one in Biomes mode.";
+        els.mapStatusLabel.textContent = "Faint hexes are unclaimed — claim one to plant your flag.";
         return;
       }
 
@@ -14615,10 +14665,11 @@ function renderAppHtml() {
           color: claim.mine ? "#ffffff" : color,
           weight: claim.mine ? 2 : 1
         });
-        poly.bindTooltip("@" + escapeHtml(claim.handle), { sticky: true });
+        const habitat = claim.biome ? escapeHtml(claim.biome) + " · " : "";
+        poly.bindTooltip(habitat + "@" + escapeHtml(claim.handle), { sticky: true });
         const h3 = claim.h3;
         poly.on("click", () => openTilePanel(h3));
-        state.mapTileLayer.addLayer(poly);
+        state.mapClaimLayer.addLayer(poly);
       }
 
       for (const did of dids) {
@@ -14653,25 +14704,30 @@ function renderAppHtml() {
       if (state.map) loadMapData();
     }
 
-    function drawTiles(tiles) {
+    function drawTiles(tiles, resolution, dim) {
       state.mapTileLayer.clearLayers();
+      const claimable = resolution === 5;
       for (let i = 0; i < tiles.length; i += 1) {
         const t = tiles[i];
         if (!t.boundary || !t.boundary.length) continue;
         const poly = L.polygon(t.boundary, {
           fillColor: biomeColor(t.biome),
-          fillOpacity: t.mine ? 0.72 : 0.5,
-          color: t.mine ? "#ffffff" : "rgba(255,255,255,0.35)",
-          weight: t.mine ? 2.5 : 1
+          fillOpacity: dim ? 0.22 : (t.mine ? 0.72 : 0.5),
+          color: dim ? "rgba(255,255,255,0.12)" : (t.mine ? "#ffffff" : "rgba(255,255,255,0.35)"),
+          weight: t.mine && !dim ? 2.5 : 1,
+          interactive: claimable
         });
         poly.bindTooltip(t.biome + (t.mine ? " — yours" : ""), { sticky: true });
-        const h3 = t.h3;
-        poly.on("click", () => openTilePanel(h3));
+        if (claimable) {
+          const h3 = t.h3;
+          poly.on("click", () => openTilePanel(h3));
+        }
         state.mapTileLayer.addLayer(poly);
       }
       // Keep observation points clickable above the hexes just drawn.
       state.mapObsLayer.eachLayer((layer) => { if (layer.bringToFront) layer.bringToFront(); });
-      els.mapStatusLabel.textContent = tiles.length + " biome hexes in view.";
+      els.mapStatusLabel.textContent = tiles.length + " biome hexes in view"
+        + (resolution !== 5 ? " (zoom in to claim)" : "") + ".";
     }
 
     function drawObservations(obs) {

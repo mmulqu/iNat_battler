@@ -129,6 +129,21 @@
 architecture; async territory stays the spine, live is the synchronous PvP pillar + an
 optional "defend live" layer on contests).
 
+**Global biomes (level-of-detail) + claims-mode polish (2026-06-14):**
+
+- **Biomes render at every zoom** via a 3-level LOD picked from zoom: **res2** (world,
+  ~1,431 land tiles, returned whole — `polygonToCells` mis-winds near-global spans),
+  **res3** (regional, bbox-bounded), **res5** (local, claimable + ownership). Per-resolution
+  cell caps + antimeridian-crossing-hex filter. Verified: the whole-world view fetches +
+  renders **1,427 hexes in ~180 ms**, ~470 KB (~90 KB gzipped).
+- **Cost:** no concern. Reads are bounded per pan (world ≈ 1.4 k rows in **1** query; regional
+  ≤ a few thousand; local hundreds) — negligible vs the 25 B/mo read allowance. Storage adds
+  res2+res3 (~11.7 k rows, <2 MB). The real constraint was render/payload, handled by LOD +
+  caps. Only res5 is interactive/claimable; coarse layers are display-only ("zoom in to claim").
+- **Claims mode** now overlays owner clusters on the **faint biome grid**, so unclaimed tiles
+  are visible (and claimable); claimed-tile hover shows **habitat · @owner**.
+- `scripts/make_res2_biomes.mjs` aggregates res3 → res2 (majority biome per parent).
+
 **Territory leaderboard:** the Leaderboard tab has a **Battle / Territory** toggle
 (`GET /api/leaderboard/territory`) ranking holders by tiles controlled (then biome variety),
 with each holder's avatar, biome count, and top biome — the social pull for the map layer,
