@@ -11250,6 +11250,10 @@ function renderAppHtml() {
     .leaflet-container a {
       color: var(--teal);
     }
+    /* No focus rectangle when a hex/marker SVG path is clicked. */
+    .leaflet-interactive:focus {
+      outline: none;
+    }
     .map-legend {
       position: absolute;
       left: 10px;
@@ -13684,9 +13688,12 @@ function renderAppHtml() {
           color: t.mine ? "#ffffff" : "rgba(255,255,255,0.35)",
           weight: t.mine ? 2.5 : 1
         });
+        // Hover-only tooltip; no click handler, so clicking never focuses the hex.
         poly.bindTooltip(t.biome + (t.mine ? " — yours" : ""), { sticky: true });
         state.mapTileLayer.addLayer(poly);
       }
+      // Keep observation points clickable above the hexes just drawn.
+      state.mapObsLayer.eachLayer((layer) => { if (layer.bringToFront) layer.bringToFront(); });
       els.mapStatusLabel.textContent = tiles.length + " biome hexes in view.";
     }
 
@@ -13696,15 +13703,16 @@ function renderAppHtml() {
         const o = obs[i];
         if (!Number.isFinite(o.latitude) || !Number.isFinite(o.longitude)) continue;
         const marker = L.circleMarker([o.latitude, o.longitude], {
-          radius: 5,
+          radius: 6,
           fillColor: taxaColor(o.iconic_taxon_name),
-          fillOpacity: 0.92,
-          color: "#0c1116",
-          weight: 1
+          fillOpacity: 0.95,
+          color: "#ffffff",
+          weight: 1.2
         });
         const name = o.taxon_name || "Observation";
         marker.bindPopup('<strong>' + escapeHtml(name) + '</strong><br><span class="subtle">' + escapeHtml(o.iconic_taxon_name || '') + '</span>');
         state.mapObsLayer.addLayer(marker);
+        marker.bringToFront();
       }
     }
 
