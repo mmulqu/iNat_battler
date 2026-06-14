@@ -109,6 +109,22 @@
   the attacker's and defender's per-tile taxa sets. Surfaced as a 📍 **+4% local** battle
   chip and a "N / 5 species observed here" line in the tile panel.
 
+**Decoupled garrisons + capture grace window (`migrations/0017`):**
+
+- **Garrison exclusivity.** A species can defend **only one tile at a time** (`tile_garrison`,
+  one row per tile×species) — your collection becomes a finite *defensive* resource, so
+  holding more land needs a deeper roster. Offense is unconstrained (any 5).
+- **Decoupled from claiming/attacking.** Claiming a tile, or winning a contest, leaves it
+  **owned but undefended on a 15-min clock** (`tiles.garrison_deadline`, `TERRITORY_GARRISON_GRACE_MIN`).
+  Garrisoning is a separate step (`POST /api/territory/garrison`, 5 *free* species). The old
+  garrison is freed on capture; the captured tile reverts to **neutral** if not garrisoned in
+  time (the every-2-min cron sweeps it; also a lazy revert on read).
+- **Grace window is protected.** A pending (undefended) tile is **contest-locked** — nobody
+  can snipe it during your 15 minutes; the window is grace, not exposure.
+- **UI:** the tile panel shows ⏳ "Undefended — Nm left" with a **Garrison with my 5** button
+  (and **Re-garrison** for defended tiles). Verified: exclusivity check + expiry sweep SQL,
+  client clean.
+
 **Live battles:** recorded separately in `docs/live-battle-infra.md` (Durable-Object
 architecture; async territory stays the spine, live is the synchronous PvP pillar + an
 optional "defend live" layer on contests).

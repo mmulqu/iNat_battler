@@ -204,6 +204,12 @@ export default {
     } catch (error) {
       console.error(error);
     }
+
+    try {
+      await revertExpiredTiles(env); // forfeit ungarrisoned tiles past their grace window
+    } catch (error) {
+      console.error(error);
+    }
   },
 
   async queue(batch, env) {
@@ -389,7 +395,13 @@ async function routeRequest(request, env, ctx) {
   if (request.method === "POST" && url.pathname === "/api/territory/claim") {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
-    return jsonResponse(await claimTerritoryTile(env, session, String(payload.h3 ?? ""), payload.taxonIds));
+    return jsonResponse(await claimTerritoryTile(env, session, String(payload.h3 ?? "")));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/territory/garrison") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await assignTileGarrison(env, session, String(payload.h3 ?? ""), payload.taxonIds));
   }
 
   if (request.method === "POST" && url.pathname === "/api/territory/contest") {
@@ -6009,6 +6021,9 @@ const TERRITORY_MIN_LOCAL_SPECIES = 5;
 // Bonus to a creature you've RG-observed *in this tile* — local knowledge, for
 // both the attacker and the defender (stacks with terrain + held-territory).
 const TERRITORY_LOCAL_BUFF_PCT = 0.04;
+// Minutes a freshly-claimed/captured tile stays owned-but-undefended (and
+// contest-locked) before you must garrison it or it reverts to neutral.
+const TERRITORY_GARRISON_GRACE_MIN = 15;
 
 function ownerDisplayName(userId) {
   if (!userId) return null;
@@ -6072,15 +6087,62 @@ function applyTileDefenseBuff(team, strength) {
   }
 }
 
+function garrisonDeadlineIso() {
+  return new Date(Date.now() + TERRITORY_GARRISON_GRACE_MIN * 60 * 1000).toISOString();
+}
+
+async function tileGarrisonTaxa(env, h3) {
+  const rows = (await env.DB.prepare(
+    "SELECT taxon_id FROM tile_garrison WHERE h3_index = ?"
+  ).bind(h3).all()).results ?? [];
+  return rows.map((r) => Number(r.taxon_id));
+}
+
+async function revertTileToNeutral(env, h3, nowIso) {
+  await env.DB.prepare(
+    "UPDATE tiles SET owner_id = NULL, state = 'neutral', garrison_deadline = NULL, " +
+    "defender_team_json = NULL, capture_progress = 0, defense_strength = 0, updated_at = ? WHERE h3_index = ?"
+  ).bind(nowIso, h3).run();
+  await env.DB.prepare("DELETE FROM tile_garrison WHERE h3_index = ?").bind(h3).run();
+}
+
+// If an owned tile's garrison grace window elapsed undefended, revert it now.
+async function maybeRevertExpiredTile(env, tile, h3, nowIso) {
+  if (!tile || !tile.garrison_deadline) return false;
+  if (tile.garrison_deadline > nowIso) return false;
+  await revertTileToNeutral(env, h3, nowIso);
+  return true;
+}
+
+// Cron sweep: revert every expired, undefended tile to neutral.
+async function revertExpiredTiles(env) {
+  const nowIso = new Date().toISOString();
+  const expired = (await env.DB.prepare(
+    "SELECT h3_index FROM tiles WHERE garrison_deadline IS NOT NULL AND garrison_deadline < ?"
+  ).bind(nowIso).all()).results ?? [];
+  for (const row of expired) {
+    await revertTileToNeutral(env, row.h3_index, nowIso);
+  }
+  return expired.length;
+}
+
 async function getTerritoryTileDetail(env, session, h3) {
   if (!h3) throw httpError("h3 required", 400);
   const myUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
   const biome = await tileBiomeFor(env, h3);
-  const tile = await env.DB.prepare(
-    "SELECT owner_id, state, defense_strength FROM tiles WHERE h3_index = ?"
+  const nowIso = new Date().toISOString();
+  let tile = await env.DB.prepare(
+    "SELECT owner_id, state, defense_strength, garrison_deadline FROM tiles WHERE h3_index = ?"
   ).bind(h3).first();
+  if (await maybeRevertExpiredTile(env, tile, h3, nowIso)) tile = null;
+
   const ownerId = tile?.owner_id ?? null;
   const mine = Boolean(myUserId && ownerId === myUserId);
+  const pending = Boolean(ownerId && tile?.garrison_deadline);
+  const defended = Boolean(ownerId && !pending);
+  const minutesLeft = pending
+    ? Math.max(0, Math.ceil((Date.parse(tile.garrison_deadline) - Date.now()) / 60000))
+    : 0;
   const need = intEnv(env, "TERRITORY_MIN_LOCAL_SPECIES", TERRITORY_MIN_LOCAL_SPECIES);
   const localSpecies = myUserId ? await localSpeciesCount(env, myUserId, h3) : 0;
   const eligible = localSpecies >= need;
@@ -6103,13 +6165,17 @@ async function getTerritoryTileDetail(env, session, h3) {
     owner: ownerDisplayName(ownerId),
     mine,
     owned: Boolean(ownerId),
+    pending,
+    defended,
+    minutesLeft,
     state: tile?.state ?? "neutral",
     defenseStrength: Number(tile?.defense_strength ?? 0),
     localSpecies,
     speciesNeeded: need,
     eligible,
     canClaim: Boolean(myUserId && eligible && !ownerId),
-    canContest: Boolean(myUserId && eligible && ownerId && !mine),
+    canContest: Boolean(myUserId && eligible && defended && !mine),
+    canGarrison: mine,
     actionsLeftToday: Math.max(0, cap - actionsToday),
     favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
     biomeHoldings,
@@ -6132,36 +6198,76 @@ async function assertTerritoryActionAllowed(env, userId, h3) {
   }
 }
 
-async function claimTerritoryTile(env, session, h3, rawTaxonIds) {
+// Claim an unowned tile — takes the tile but leaves it UNDEFENDED on the grace
+// clock; the player garrisons it as a separate step (assignTileGarrison).
+async function claimTerritoryTile(env, session, h3) {
   const userId = requireLinkedUserId(session);
   if (!h3) throw httpError("h3 required", 400);
-  const taxonIds = (rawTaxonIds ?? []).map((id) => Number.parseInt(id, 10)).filter(Number.isFinite).slice(0, 5);
-  if (taxonIds.length !== 5) throw httpError("Pick exactly 5 ready creatures to garrison the tile", 400);
-
   await assertTerritoryActionAllowed(env, userId, h3);
 
-  const existing = await env.DB.prepare("SELECT owner_id FROM tiles WHERE h3_index = ?").bind(h3).first();
+  const now = new Date().toISOString();
+  let existing = await env.DB.prepare(
+    "SELECT owner_id, garrison_deadline FROM tiles WHERE h3_index = ?"
+  ).bind(h3).first();
+  if (await maybeRevertExpiredTile(env, existing, h3, now)) existing = null;
   if (existing?.owner_id) throw httpError("This tile is already claimed — contest it instead", 409);
 
-  await assertUserOwnsReadyTaxa(env, userId, taxonIds);
-
   const biome = await tileBiomeFor(env, h3);
-  const now = new Date().toISOString();
+  const deadline = garrisonDeadlineIso();
   await env.DB.prepare(`
     INSERT INTO tiles (
       h3_index, resolution, biome_type, state, owner_id, capture_progress,
-      defense_strength, defender_team_json, claimed_at, last_activity_at, created_at, updated_at
+      defense_strength, garrison_deadline, defender_team_json, claimed_at, last_activity_at, created_at, updated_at
     )
-    VALUES (?, ?, ?, 'claimed', ?, 100, 1, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, 'claimed', ?, 100, 1, ?, NULL, ?, ?, ?, ?)
     ON CONFLICT(h3_index) DO UPDATE SET
       owner_id = excluded.owner_id, state = 'claimed', capture_progress = 100,
-      defense_strength = 1, defender_team_json = excluded.defender_team_json,
+      defense_strength = 1, garrison_deadline = excluded.garrison_deadline, defender_team_json = NULL,
       claimed_at = excluded.claimed_at, biome_type = excluded.biome_type,
       last_activity_at = excluded.last_activity_at, updated_at = excluded.updated_at
-  `).bind(h3, TERRITORY_H3_RESOLUTION, biome, userId, JSON.stringify(taxonIds), now, now, now, now).run();
+  `).bind(h3, TERRITORY_H3_RESOLUTION, biome, userId, deadline, now, now, now, now).run();
+  await env.DB.prepare("DELETE FROM tile_garrison WHERE h3_index = ?").bind(h3).run();
 
   await logTerritoryAction(env, userId, h3, "claim", null);
-  return { ok: true, h3, biome, owner: ownerDisplayName(userId), mine: true };
+  return { ok: true, h3, biome, owner: ownerDisplayName(userId), mine: true, pending: true, garrisonDeadline: deadline };
+}
+
+// Assign (or swap) a tile's garrison from 5 of your FREE species — each species
+// can defend only one tile. Clears the grace clock once defended.
+async function assignTileGarrison(env, session, h3, rawTaxonIds) {
+  const userId = requireLinkedUserId(session);
+  if (!h3) throw httpError("h3 required", 400);
+  const taxonIds = [...new Set((rawTaxonIds ?? []).map((id) => Number.parseInt(id, 10)).filter(Number.isFinite))].slice(0, 5);
+  if (taxonIds.length !== 5) throw httpError("Pick exactly 5 ready creatures to garrison the tile", 400);
+
+  const now = new Date().toISOString();
+  let tile = await env.DB.prepare(
+    "SELECT owner_id, garrison_deadline FROM tiles WHERE h3_index = ?"
+  ).bind(h3).first();
+  if (await maybeRevertExpiredTile(env, tile, h3, now)) tile = null;
+  if (!tile?.owner_id) throw httpError("You don't hold this tile (it may have reverted to neutral).", 409);
+  if (tile.owner_id !== userId) throw httpError("This tile isn't yours to garrison", 403);
+
+  await assertUserOwnsReadyTaxa(env, userId, taxonIds);
+
+  // Exclusivity: none of these may already defend a DIFFERENT tile of yours.
+  const placeholders = taxonIds.map(() => "?").join(",");
+  const conflicts = (await env.DB.prepare(
+    "SELECT DISTINCT taxon_id FROM tile_garrison WHERE owner_id = ? AND h3_index != ? AND taxon_id IN (" + placeholders + ")"
+  ).bind(userId, h3, ...taxonIds).all()).results ?? [];
+  if (conflicts.length) {
+    throw httpError("Some of those species already defend another tile — each can garrison only one.", 409);
+  }
+
+  await env.DB.prepare("DELETE FROM tile_garrison WHERE h3_index = ?").bind(h3).run();
+  await env.DB.batch(taxonIds.map((tid) => env.DB.prepare(
+    "INSERT INTO tile_garrison (h3_index, owner_id, taxon_id, created_at) VALUES (?, ?, ?, ?)"
+  ).bind(h3, userId, tid, now)));
+  await env.DB.prepare(
+    "UPDATE tiles SET garrison_deadline = NULL, state = 'claimed', last_activity_at = ?, updated_at = ? WHERE h3_index = ?"
+  ).bind(now, now, h3).run();
+
+  return { ok: true, h3, defended: true };
 }
 
 async function contestTerritoryTile(env, session, h3, rawTaxonIds) {
@@ -6172,13 +6278,16 @@ async function contestTerritoryTile(env, session, h3, rawTaxonIds) {
 
   await assertTerritoryActionAllowed(env, userId, h3);
 
-  const tile = await env.DB.prepare(
-    "SELECT owner_id, biome_type, defense_strength, defender_team_json FROM tiles WHERE h3_index = ?"
+  const now0 = new Date().toISOString();
+  let tile = await env.DB.prepare(
+    "SELECT owner_id, biome_type, defense_strength, garrison_deadline FROM tiles WHERE h3_index = ?"
   ).bind(h3).first();
+  if (await maybeRevertExpiredTile(env, tile, h3, now0)) tile = null;
   if (!tile?.owner_id) throw httpError("This tile is unclaimed — claim it instead", 409);
   if (tile.owner_id === userId) throw httpError("You already hold this tile", 400);
+  if (tile.garrison_deadline) throw httpError("This tile was just taken — its defenses are still being set up. Try again shortly.", 409);
 
-  const defenderTaxonIds = tile.defender_team_json ? JSON.parse(tile.defender_team_json) : [];
+  const defenderTaxonIds = await tileGarrisonTaxa(env, h3);
   if (!defenderTaxonIds.length) throw httpError("This tile has no defenders to fight", 409);
 
   await assertUserOwnsReadyTaxa(env, userId, taxonIds);
@@ -6228,16 +6337,19 @@ async function contestTerritoryTile(env, session, h3, rawTaxonIds) {
 }
 
 // Hook from the battle resolver: a finished contest flips (or fortifies) its tile.
+// On a win the tile transfers but starts UNDEFENDED on the grace clock — the new
+// owner must garrison it (the old garrison is freed).
 async function resolveTileContest(env, state, now) {
   const h3 = state.tileH3;
   if (!h3) return;
   if (state.status === "won") {
     await env.DB.prepare(`
-      UPDATE tiles SET owner_id = ?, defender_team_json = ?, state = 'claimed',
-        capture_progress = 100, defense_strength = 1, claimed_at = ?,
-        last_activity_at = ?, updated_at = ?
+      UPDATE tiles SET owner_id = ?, defender_team_json = NULL, state = 'claimed',
+        capture_progress = 100, defense_strength = 1, garrison_deadline = ?,
+        claimed_at = ?, last_activity_at = ?, updated_at = ?
       WHERE h3_index = ?
-    `).bind(state.player.userId, JSON.stringify(state.attackerTaxonIds ?? []), now, now, now, h3).run();
+    `).bind(state.player.userId, garrisonDeadlineIso(), now, now, now, h3).run();
+    await env.DB.prepare("DELETE FROM tile_garrison WHERE h3_index = ?").bind(h3).run();
   } else if (state.status === "lost") {
     await env.DB.prepare(`
       UPDATE tiles SET defense_strength = MIN(defense_strength + 1, ?),
@@ -11878,6 +11990,15 @@ function renderAppHtml() {
       color: #8ec9f0;
       font-weight: 600;
     }
+    .tile-warn {
+      margin: 8px 0 0;
+      padding: 7px 9px;
+      border-radius: 9px;
+      font-size: 0.82rem;
+      background: rgba(224, 133, 42, 0.16);
+      border: 1px solid rgba(224, 133, 42, 0.35);
+      color: #f0cba0;
+    }
     .tile-power strong {
       color: #8ef0a6;
     }
@@ -12605,6 +12726,8 @@ function renderAppHtml() {
       if (event.target.closest("[data-tile-close]")) { closeTilePanel(); return; }
       const claim = event.target.closest("[data-tile-claim]");
       if (claim) { claimTile(claim.getAttribute("data-tile-claim")); return; }
+      const garrison = event.target.closest("[data-tile-garrison]");
+      if (garrison) { garrisonTile(garrison.getAttribute("data-tile-garrison")); return; }
       const contest = event.target.closest("[data-tile-contest]");
       if (contest) { contestTile(contest.getAttribute("data-tile-contest")); return; }
     });
@@ -14629,18 +14752,27 @@ function renderAppHtml() {
         ' / ' + Number(d.speciesNeeded) + ' research-grade species observed here' +
         (d.eligible ? ' — your locals fight +' + Math.round(0.04 * 100) + '%' : '') + '.</p>';
 
+      const garrisonBtn = (label, cls) => '<button class="' + cls + '" type="button" data-tile-garrison="' + escapeAttr(d.h3) + '">' + label + '</button>';
       let action;
-      if (!d.eligible) {
+      if (d.mine && d.pending) {
+        // You just took it — undefended on the clock.
+        action = '<p class="tile-warn">⏳ Undefended — ' + Number(d.minutesLeft) + 'm left to garrison or it reverts to neutral.</p>' +
+          (teamReady ? garrisonBtn("Garrison with my 5", "primary") : '<p class="tile-hint">Select 5 ready creatures in Roster, then garrison.</p>');
+      } else if (d.mine) {
+        action = '<p class="tile-hint">Defended by your garrison (defense ' + Number(d.defenseStrength) + ').</p>' +
+          (teamReady ? garrisonBtn("Re-garrison with my 5", "secondary") : "");
+      } else if (!d.eligible) {
         action = '<p class="tile-hint">Observe ' + Math.max(0, Number(d.speciesNeeded) - Number(d.localSpecies)) +
           ' more research-grade species here to claim or contest this tile.</p>';
-      } else if (!teamReady) {
-        action = '<p class="tile-hint">Select 5 ready creatures in Roster to act on tiles.</p>';
       } else if (d.canClaim) {
         action = '<button class="primary" type="button" data-tile-claim="' + escapeAttr(d.h3) + '">Claim this tile</button>';
+      } else if (d.pending) {
+        // Owned by someone else but undefended — contest-locked grace window.
+        action = '<p class="tile-hint">Just taken by @' + escapeHtml(d.owner || "someone") + ' — its defenses are being set up.</p>';
       } else if (d.canContest) {
-        action = '<button class="primary" type="button" data-tile-contest="' + escapeAttr(d.h3) + '">Contest — battle the garrison' + (Number(d.defenseStrength) > 0 ? " (def +" + Number(d.defenseStrength) + ")" : "") + '</button>';
-      } else if (d.mine) {
-        action = '<p class="tile-hint">Your garrison defends here (defense ' + Number(d.defenseStrength) + ').</p>';
+        action = teamReady
+          ? '<button class="primary" type="button" data-tile-contest="' + escapeAttr(d.h3) + '">Contest — battle the garrison' + (Number(d.defenseStrength) > 0 ? " (def +" + Number(d.defenseStrength) + ")" : "") + '</button>'
+          : '<p class="tile-hint">Select 5 ready creatures in Roster to contest.</p>';
       } else {
         action = "";
       }
@@ -14661,19 +14793,34 @@ function renderAppHtml() {
     }
 
     async function claimTile(h3) {
-      const taxonIds = Array.from(state.selectedTaxa || []).map(Number);
-      if (taxonIds.length !== 5) { els.mapStatusLabel.textContent = "Select 5 ready creatures first."; return; }
       try {
         await apiFetch("/api/territory/claim", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ h3: h3, taxonIds: taxonIds })
+          body: JSON.stringify({ h3: h3 })
         });
-        closeTilePanel();
-        els.mapStatusLabel.textContent = "Tile claimed — it's yours now.";
+        els.mapStatusLabel.textContent = "Tile claimed — garrison it before the timer runs out.";
+        openTilePanel(h3);
         loadMapData();
       } catch (error) {
         els.mapStatusLabel.textContent = error.message || "Claim failed";
+      }
+    }
+
+    async function garrisonTile(h3) {
+      const taxonIds = Array.from(state.selectedTaxa || []).map(Number);
+      if (taxonIds.length !== 5) { els.mapStatusLabel.textContent = "Select 5 ready creatures in Roster first."; return; }
+      try {
+        await apiFetch("/api/territory/garrison", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ h3: h3, taxonIds: taxonIds })
+        });
+        els.mapStatusLabel.textContent = "Tile garrisoned — it's defended now.";
+        openTilePanel(h3);
+        loadMapData();
+      } catch (error) {
+        els.mapStatusLabel.textContent = error.message || "Garrison failed";
       }
     }
 
