@@ -98,6 +98,21 @@
 - ✅ **Surfaced:** the tile panel shows "You hold N {biome} tiles → +X% to your {biome}-native
   species"; buffed creatures wear a 🏞️ **+X% home** chip in battle.
 
+**Locality refinements (2026-06-14):**
+
+- **Presence gate (real, not implicit).** Claiming/contesting a tile now requires **5+
+  distinct research-grade species observed *in* that tile** (`TERRITORY_MIN_LOCAL_SPECIES`),
+  not just one observation — you can only fight for a place you've genuinely documented.
+- **Local-knowledge bonus, both sides.** In a contest, each side's species that they've
+  RG-observed *in that tile* hit **+4%** (`TERRITORY_LOCAL_BUFF_PCT`, all-stat, stacks with
+  terrain + held-territory). `createBattleCreature` takes a `localBuffPct`; the contest feeds
+  the attacker's and defender's per-tile taxa sets. Surfaced as a 📍 **+4% local** battle
+  chip and a "N / 5 species observed here" line in the tile panel.
+
+**Live battles:** recorded separately in `docs/live-battle-infra.md` (Durable-Object
+architecture; async territory stays the spine, live is the synchronous PvP pillar + an
+optional "defend live" layer on contests).
+
 **Territory leaderboard:** the Leaderboard tab has a **Battle / Territory** toggle
 (`GET /api/leaderboard/territory`) ranking holders by tiles controlled (then biome variety),
 with each holder's avatar, biome count, and top biome — the social pull for the map layer,

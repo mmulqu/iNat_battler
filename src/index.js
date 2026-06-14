@@ -4267,7 +4267,7 @@ async function listTeams(env, userId) {
   }));
 }
 
-async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personalView = "owner") {
+async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personalView = "owner", localTaxonIds = null) {
   const cleanTaxonIds = taxonIds
     .map((taxonId) => Number.parseInt(taxonId, 10))
     .filter(Number.isFinite)
@@ -4374,12 +4374,14 @@ async function loadUserBattleCreatures(env, userId, taxonIds, idPrefix, personal
     const selectedVariant = selectSpriteVariant(variantMap.get(taxonId) ?? [], preferenceMap.get(taxonId));
     const finalKey = customKey || selectedVariant?.r2Key || row.r2_key;
     const spriteUrl = finalKey ? `/api/assets/${encodeR2Key(finalKey)}` : null;
+    const localBuffPct = localTaxonIds && localTaxonIds.has(taxonId) ? TERRITORY_LOCAL_BUFF_PCT : 0;
     return createBattleCreature(
       taxonSummaryFromRow(row, spriteUrl),
       `${idPrefix}-${index}`,
       trainingFromRow(row, buffMap),
       movesMap.get(taxonId)?.moves ?? null,
-      territoryBuffByBiome
+      territoryBuffByBiome,
+      localBuffPct
     );
   });
 }
@@ -6001,10 +6003,32 @@ async function proxyAvatar(rawUrl) {
 
 const TERRITORY_DAILY_ACTION_CAP_DEFAULT = 20;
 const TERRITORY_MAX_DEFENSE = 5;
+// You can only claim/contest a tile where you've documented real biodiversity:
+// at least this many distinct research-grade species, observed in the tile.
+const TERRITORY_MIN_LOCAL_SPECIES = 5;
+// Bonus to a creature you've RG-observed *in this tile* — local knowledge, for
+// both the attacker and the defender (stacks with terrain + held-territory).
+const TERRITORY_LOCAL_BUFF_PCT = 0.04;
 
 function ownerDisplayName(userId) {
   if (!userId) return null;
   return userId.startsWith("inat:") ? userId.slice(5) : userId;
+}
+
+// Distinct research-grade species the user has observed in a given tile.
+async function localSpeciesCount(env, userId, h3) {
+  const row = await env.DB.prepare(
+    "SELECT count(DISTINCT taxon_id) AS n FROM tile_observations WHERE user_id = ? AND h3_index = ? AND taxon_id IS NOT NULL"
+  ).bind(userId, h3).first();
+  return Number(row?.n ?? 0);
+}
+
+// The set of taxon ids the user has observed in a tile (for the local battle buff).
+async function localTaxonSet(env, userId, h3) {
+  const rows = (await env.DB.prepare(
+    "SELECT DISTINCT taxon_id FROM tile_observations WHERE user_id = ? AND h3_index = ? AND taxon_id IS NOT NULL"
+  ).bind(userId, h3).all()).results ?? [];
+  return new Set(rows.map((r) => Number(r.taxon_id)));
 }
 
 async function territoryActionsToday(env, userId) {
@@ -6057,7 +6081,9 @@ async function getTerritoryTileDetail(env, session, h3) {
   ).bind(h3).first();
   const ownerId = tile?.owner_id ?? null;
   const mine = Boolean(myUserId && ownerId === myUserId);
-  const observedHere = myUserId ? await userObservedTile(env, myUserId, h3) : false;
+  const need = intEnv(env, "TERRITORY_MIN_LOCAL_SPECIES", TERRITORY_MIN_LOCAL_SPECIES);
+  const localSpecies = myUserId ? await localSpeciesCount(env, myUserId, h3) : 0;
+  const eligible = localSpecies >= need;
   const cap = intEnv(env, "TERRITORY_DAILY_ACTION_CAP", TERRITORY_DAILY_ACTION_CAP_DEFAULT);
   const actionsToday = myUserId ? await territoryActionsToday(env, myUserId) : 0;
 
@@ -6079,9 +6105,11 @@ async function getTerritoryTileDetail(env, session, h3) {
     owned: Boolean(ownerId),
     state: tile?.state ?? "neutral",
     defenseStrength: Number(tile?.defense_strength ?? 0),
-    observedHere,
-    canClaim: Boolean(myUserId && observedHere && !ownerId),
-    canContest: Boolean(myUserId && observedHere && ownerId && !mine),
+    localSpecies,
+    speciesNeeded: need,
+    eligible,
+    canClaim: Boolean(myUserId && eligible && !ownerId),
+    canContest: Boolean(myUserId && eligible && ownerId && !mine),
     actionsLeftToday: Math.max(0, cap - actionsToday),
     favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
     biomeHoldings,
@@ -6094,8 +6122,13 @@ async function assertTerritoryActionAllowed(env, userId, h3) {
   if ((await territoryActionsToday(env, userId)) >= cap) {
     throw httpError("Daily territory action limit reached — try again tomorrow", 429);
   }
-  if (!(await userObservedTile(env, userId, h3))) {
-    throw httpError("You can only act on a tile you've observed in", 403);
+  const need = intEnv(env, "TERRITORY_MIN_LOCAL_SPECIES", TERRITORY_MIN_LOCAL_SPECIES);
+  const have = await localSpeciesCount(env, userId, h3);
+  if (have < need) {
+    throw httpError(
+      "You need " + need + " research-grade species observed in this tile to act on it (you have " + have + ").",
+      403
+    );
   }
 }
 
@@ -6151,8 +6184,11 @@ async function contestTerritoryTile(env, session, h3, rawTaxonIds) {
   await assertUserOwnsReadyTaxa(env, userId, taxonIds);
 
   const defenderUserId = tile.owner_id;
-  const playerCreatures = await loadUserBattleCreatures(env, userId, taxonIds, "p", "owner");
-  const opponentCreatures = await loadUserBattleCreatures(env, defenderUserId, defenderTaxonIds, "o", "public");
+  // Local-knowledge bonus: each side's species RG-observed in this tile hit harder.
+  const attackerLocals = await localTaxonSet(env, userId, h3);
+  const defenderLocals = await localTaxonSet(env, defenderUserId, h3);
+  const playerCreatures = await loadUserBattleCreatures(env, userId, taxonIds, "p", "owner", attackerLocals);
+  const opponentCreatures = await loadUserBattleCreatures(env, defenderUserId, defenderTaxonIds, "o", "public", defenderLocals);
 
   const biome = tile.biome_type || (await tileBiomeFor(env, h3));
   const now = new Date().toISOString();
@@ -10699,6 +10735,10 @@ function renderAppHtml() {
       background: #1f3a28;
       color: #8ef0a6;
     }
+    .lv-chip.local-chip {
+      background: #1f2f3a;
+      color: #8ec9f0;
+    }
 
     .sig-star {
       color: #b48a12;
@@ -11828,6 +11868,15 @@ function renderAppHtml() {
       background: rgba(59, 191, 87, 0.16);
       border: 1px solid rgba(59, 191, 87, 0.3);
       color: #d7f0dd;
+    }
+    .tile-local {
+      margin: 8px 0 0;
+      font-size: 0.82rem;
+      color: #c7d0d5;
+    }
+    .tile-local.ok {
+      color: #8ec9f0;
+      font-weight: 600;
     }
     .tile-power strong {
       color: #8ef0a6;
@@ -14575,9 +14624,15 @@ function renderAppHtml() {
           ? '<p class="subtle">Hold ' + escapeHtml(d.biome) + ' tiles to buff your ' + escapeHtml(d.biome) + '-native species.</p>'
           : "");
 
+      // Local presence: distinct RG species you've observed here vs. the gate.
+      const localLine = '<p class="tile-local' + (d.eligible ? ' ok' : '') + '">📍 ' + Number(d.localSpecies) +
+        ' / ' + Number(d.speciesNeeded) + ' research-grade species observed here' +
+        (d.eligible ? ' — your locals fight +' + Math.round(0.04 * 100) + '%' : '') + '.</p>';
+
       let action;
-      if (!d.observedHere) {
-        action = '<p class="tile-hint">Observe something here on iNaturalist to claim or contest this tile.</p>';
+      if (!d.eligible) {
+        action = '<p class="tile-hint">Observe ' + Math.max(0, Number(d.speciesNeeded) - Number(d.localSpecies)) +
+          ' more research-grade species here to claim or contest this tile.</p>';
       } else if (!teamReady) {
         action = '<p class="tile-hint">Select 5 ready creatures in Roster to act on tiles.</p>';
       } else if (d.canClaim) {
@@ -14598,6 +14653,7 @@ function renderAppHtml() {
           '<h3>' + escapeHtml(name) + ' tile</h3></div>' +
           ownerLine +
           favored +
+          localLine +
           holdings +
           action +
           '<p class="subtle tile-actions-left">' + Number(d.actionsLeftToday) + ' actions left today</p>' +
@@ -17675,6 +17731,7 @@ function renderAppHtml() {
               (Number(creature.trainingLevel) > 0 ? ' <span class="lv-chip">Lv ' + Number(creature.trainingLevel) + '</span>' : '') +
               (Number(creature.trainingBuffPct) > 0 ? ' <span class="lv-chip">+' + Math.round(Number(creature.trainingBuffPct) * 100) + '% mastery</span>' : '') +
               (Number(creature.territoryBuffPct) > 0 ? ' <span class="lv-chip terr-chip">🏞️ +' + Math.round(Number(creature.territoryBuffPct) * 100) + '% home</span>' : '') +
+              (Number(creature.localBuffPct) > 0 ? ' <span class="lv-chip local-chip">📍 +' + Math.round(Number(creature.localBuffPct) * 100) + '% local</span>' : '') +
             '</div>' +
             '<div class="combatant-role">' + escapeHtml((creature.types || []).join(" / ")) + '</div>' +
           '</div>' +

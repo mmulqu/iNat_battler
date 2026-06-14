@@ -195,7 +195,7 @@ export function createGenome(taxon) {
 export const MOVE_TYPES = Object.keys(TYPE_CHART);
 export { TYPE_CHART, TERRAIN_MOVE_BONUS };
 
-export function createBattleCreature(taxon, instanceSuffix = "a", training = null, speciesMoves = null, territoryBuffByBiome = null) {
+export function createBattleCreature(taxon, instanceSuffix = "a", training = null, speciesMoves = null, territoryBuffByBiome = null, localBuffPct = 0) {
   const genome = createGenome(taxon);
   const bondLevel = taxon.bondLevel ?? 0;
   const obsCount = taxon.obsCount ?? 0;
@@ -212,9 +212,11 @@ export function createBattleCreature(taxon, instanceSuffix = "a", training = nul
   // genus/family mastery buffs multiply the result.
   const allocations = training?.allocations ?? null;
   const buffPct = Number(training?.buffPct ?? 0);
-  // Held-territory roster power stacks additively with genus/family mastery.
+  // Held-territory roster power + local-knowledge bonus (this species was
+  // RG-observed on this contested tile) both stack additively with mastery.
   const territoryBuffPct = territoryBuffForTypes(genome.types, territoryBuffByBiome);
-  const totalBuffPct = buffPct + territoryBuffPct;
+  const localPct = Math.max(0, Number(localBuffPct) || 0);
+  const totalBuffPct = buffPct + territoryBuffPct + localPct;
   for (const stat of Object.keys(stats)) {
     if (allocations && Number.isFinite(allocations[stat])) {
       stats[stat] += Math.max(0, Math.floor(allocations[stat]));
@@ -237,6 +239,7 @@ export function createBattleCreature(taxon, instanceSuffix = "a", training = nul
     trainingLevel: Math.max(0, Math.floor(Number(training?.level ?? 0))),
     trainingBuffPct: buffPct,
     territoryBuffPct,
+    localBuffPct: localPct,
     scientificName: taxon.scientificName,
     bodyPlan: genome.bodyPlan,
     types: genome.types,
