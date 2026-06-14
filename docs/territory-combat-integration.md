@@ -1,6 +1,6 @@
 # Territory × Combat — Merging Biome into iNat Battler
 
-**Status:** In progress — **Bridges 1 & 2 done** (see Progress below).
+**Status:** In progress — **Bridges 1, 2 & 3 done** (see Progress below).
 **Decided to pursue:** 2026-06-14.
 **Tile scale:** res5 (~250 km² hexes) for the MVP; res7 hyperlocal later.
 **Source repos:** `iNat_battler` (this repo — the combat layer) and
@@ -63,10 +63,30 @@
   opt-in multiplier) plus an A/B: home terrain is a **+2.3 pt** win-rate edge and trims
   battles ~7.4→6.8 turns. Meaningful home-field advantage, not a hard counter.
 
-**Next — Bridge 3:** make a tile **contest** resolve as a ghost battle on that tile's biome
-(reusing `chooseNpcAction`), with `tile.defense_strength` as a defender buff; win flips
-`capture_progress`. Then the `terrain` the engine already consumes comes from the real
-tile instead of `terrainForTeam`.
+**Bridge 3 — claim & contest tiles: done.** The map is now playable; the loop is closed.
+
+- ✅ **Claim** (`POST /api/territory/claim`) — claim an **unowned** tile you have an
+  observation in; your current 5-team is stored as the tile's **garrison**
+  (`migrations/0016`: `tiles.defender_team_json`, `claimed_at`).
+- ✅ **Contest** (`POST /api/territory/contest`) — start a **ghost battle** vs the owner's
+  garrison snapshot, fought on the tile's **real biome** (the `terrain` the engine already
+  consumes — Bridge 2), with `defense_strength` as a defender HP/guard buff
+  (`applyTileDefenseBuff`). Reuses `loadUserBattleCreatures` + `chooseNpcAction`.
+- ✅ **Resolution** — the existing battle resolver gained a hook: a finished contest with
+  `state.tileH3` **flips the tile** to the attacker (re-snapshotting their team) on a win,
+  or **fortifies** the defender (`defense_strength +1`, capped 5) on a loss. Validated
+  against local D1 (claim → win-flip → loss-fortify, FK-guarded owner).
+- ✅ **Gating (simple daily cap):** both actions require an observation in the tile and
+  count against a per-user **daily action cap** (`TERRITORY_DAILY_ACTION_CAP`, default 20),
+  counted from `territory_actions`. No AP currency yet — a later enhancement.
+- ✅ **UI** — hexes are clickable → a **tile panel** (biome, owner, favored types, actions
+  left) with **Claim** / **Contest** buttons (uses your selected 5-team); contest drops you
+  into the normal battle flow, and winning flips the tile (rendered brighter as `mine`).
+
+**The loop now exists:** observe → sync → the tile shows on your map → **claim** it (or
+**contest** someone for it via a battle on its real biome) → hold territory. Still open:
+**Bridge 4** (held biomes buff your native species via `trainingBuffPct`) and the
+**ecological economy** (tile value → yield/AP) to make holding land *pay*.
 
 ### Cloudflare cost & scale (Workers Paid, $5/mo)
 

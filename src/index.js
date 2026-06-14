@@ -371,6 +371,23 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await getTerritoryObservations(env, session, url));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/territory/tile") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await getTerritoryTileDetail(env, session, url.searchParams.get("h3")));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/territory/claim") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await claimTerritoryTile(env, session, String(payload.h3 ?? ""), payload.taxonIds));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/territory/contest") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    return jsonResponse(await contestTerritoryTile(env, session, String(payload.h3 ?? ""), payload.taxonIds));
+  }
+
   if (request.method === "POST" && url.pathname === "/api/training/allocate") {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
@@ -4633,6 +4650,10 @@ async function submitBattleMove(env, battleId, moveId, switchIndex = null) {
     await env.DB.prepare(`
       UPDATE challenges SET status = 'completed', updated_at = ? WHERE battle_id = ?
     `).bind(now, battleId).run();
+
+    if (next.tileH3) {
+      await resolveTileContest(env, next, now);
+    }
   }
 
   return next;
@@ -5813,6 +5834,207 @@ async function getTerritoryObservations(env, session, url) {
 
   const res = await env.DB.prepare(query).bind(...binds).all();
   return { observations: res.results ?? [] };
+}
+
+// --- Territory: claim & contest tiles (Biome merge, Bridge 3) ---
+
+const TERRITORY_DAILY_ACTION_CAP_DEFAULT = 20;
+const TERRITORY_MAX_DEFENSE = 5;
+
+function ownerDisplayName(userId) {
+  if (!userId) return null;
+  return userId.startsWith("inat:") ? userId.slice(5) : userId;
+}
+
+async function territoryActionsToday(env, userId) {
+  const row = await env.DB.prepare(
+    "SELECT count(*) AS n FROM territory_actions WHERE user_id = ? AND date(created_at) = date('now')"
+  ).bind(userId).first();
+  return Number(row?.n ?? 0);
+}
+
+async function userObservedTile(env, userId, h3) {
+  const row = await env.DB.prepare(
+    "SELECT 1 AS x FROM tile_observations WHERE user_id = ? AND h3_index = ? LIMIT 1"
+  ).bind(userId, h3).first();
+  return Boolean(row);
+}
+
+async function tileBiomeFor(env, h3) {
+  const row = await env.DB.prepare("SELECT biome_type FROM tile_biomes WHERE h3_index = ?").bind(h3).first();
+  return row?.biome_type || "neutral";
+}
+
+async function logTerritoryAction(env, userId, h3, actionType, battleId) {
+  await env.DB.prepare(
+    "INSERT INTO territory_actions (user_id, h3_index, action_type, ap_spent, battle_id, created_at) VALUES (?, ?, ?, 1, ?, ?)"
+  ).bind(userId, h3, actionType, battleId ?? null, new Date().toISOString()).run();
+}
+
+// Garrison home-field buff: defense_strength nudges the defenders' HP/guard up a
+// touch (on top of terrain). Modest and capped.
+function applyTileDefenseBuff(team, strength) {
+  const s = Math.min(TERRITORY_MAX_DEFENSE, Math.max(0, Number(strength) || 0));
+  if (s <= 0) return;
+  const mult = 1 + s * 0.06;
+  for (const creature of team.creatures) {
+    const baseMax = creature.maxHp ?? creature.hp ?? 1;
+    creature.maxHp = Math.round(baseMax * mult);
+    creature.hp = creature.maxHp;
+    if (creature.stats && creature.stats.guard) {
+      creature.stats.guard = Math.round(creature.stats.guard * mult);
+    }
+  }
+}
+
+async function getTerritoryTileDetail(env, session, h3) {
+  if (!h3) throw httpError("h3 required", 400);
+  const myUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
+  const biome = await tileBiomeFor(env, h3);
+  const tile = await env.DB.prepare(
+    "SELECT owner_id, state, defense_strength FROM tiles WHERE h3_index = ?"
+  ).bind(h3).first();
+  const ownerId = tile?.owner_id ?? null;
+  const mine = Boolean(myUserId && ownerId === myUserId);
+  const observedHere = myUserId ? await userObservedTile(env, myUserId, h3) : false;
+  const cap = intEnv(env, "TERRITORY_DAILY_ACTION_CAP", TERRITORY_DAILY_ACTION_CAP_DEFAULT);
+  const actionsToday = myUserId ? await territoryActionsToday(env, myUserId) : 0;
+  return {
+    h3,
+    biome,
+    owner: ownerDisplayName(ownerId),
+    mine,
+    owned: Boolean(ownerId),
+    state: tile?.state ?? "neutral",
+    defenseStrength: Number(tile?.defense_strength ?? 0),
+    observedHere,
+    canClaim: Boolean(myUserId && observedHere && !ownerId),
+    canContest: Boolean(myUserId && observedHere && ownerId && !mine),
+    actionsLeftToday: Math.max(0, cap - actionsToday),
+    favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? []
+  };
+}
+
+async function assertTerritoryActionAllowed(env, userId, h3) {
+  const cap = intEnv(env, "TERRITORY_DAILY_ACTION_CAP", TERRITORY_DAILY_ACTION_CAP_DEFAULT);
+  if ((await territoryActionsToday(env, userId)) >= cap) {
+    throw httpError("Daily territory action limit reached — try again tomorrow", 429);
+  }
+  if (!(await userObservedTile(env, userId, h3))) {
+    throw httpError("You can only act on a tile you've observed in", 403);
+  }
+}
+
+async function claimTerritoryTile(env, session, h3, rawTaxonIds) {
+  const userId = requireLinkedUserId(session);
+  if (!h3) throw httpError("h3 required", 400);
+  const taxonIds = (rawTaxonIds ?? []).map((id) => Number.parseInt(id, 10)).filter(Number.isFinite).slice(0, 5);
+  if (taxonIds.length !== 5) throw httpError("Pick exactly 5 ready creatures to garrison the tile", 400);
+
+  await assertTerritoryActionAllowed(env, userId, h3);
+
+  const existing = await env.DB.prepare("SELECT owner_id FROM tiles WHERE h3_index = ?").bind(h3).first();
+  if (existing?.owner_id) throw httpError("This tile is already claimed — contest it instead", 409);
+
+  await assertUserOwnsReadyTaxa(env, userId, taxonIds);
+
+  const biome = await tileBiomeFor(env, h3);
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    INSERT INTO tiles (
+      h3_index, resolution, biome_type, state, owner_id, capture_progress,
+      defense_strength, defender_team_json, claimed_at, last_activity_at, created_at, updated_at
+    )
+    VALUES (?, ?, ?, 'claimed', ?, 100, 1, ?, ?, ?, ?, ?)
+    ON CONFLICT(h3_index) DO UPDATE SET
+      owner_id = excluded.owner_id, state = 'claimed', capture_progress = 100,
+      defense_strength = 1, defender_team_json = excluded.defender_team_json,
+      claimed_at = excluded.claimed_at, biome_type = excluded.biome_type,
+      last_activity_at = excluded.last_activity_at, updated_at = excluded.updated_at
+  `).bind(h3, TERRITORY_H3_RESOLUTION, biome, userId, JSON.stringify(taxonIds), now, now, now, now).run();
+
+  await logTerritoryAction(env, userId, h3, "claim", null);
+  return { ok: true, h3, biome, owner: ownerDisplayName(userId), mine: true };
+}
+
+async function contestTerritoryTile(env, session, h3, rawTaxonIds) {
+  const userId = requireLinkedUserId(session);
+  if (!h3) throw httpError("h3 required", 400);
+  const taxonIds = (rawTaxonIds ?? []).map((id) => Number.parseInt(id, 10)).filter(Number.isFinite).slice(0, 5);
+  if (taxonIds.length !== 5) throw httpError("Pick exactly 5 ready creatures to contest with", 400);
+
+  await assertTerritoryActionAllowed(env, userId, h3);
+
+  const tile = await env.DB.prepare(
+    "SELECT owner_id, biome_type, defense_strength, defender_team_json FROM tiles WHERE h3_index = ?"
+  ).bind(h3).first();
+  if (!tile?.owner_id) throw httpError("This tile is unclaimed — claim it instead", 409);
+  if (tile.owner_id === userId) throw httpError("You already hold this tile", 400);
+
+  const defenderTaxonIds = tile.defender_team_json ? JSON.parse(tile.defender_team_json) : [];
+  if (!defenderTaxonIds.length) throw httpError("This tile has no defenders to fight", 409);
+
+  await assertUserOwnsReadyTaxa(env, userId, taxonIds);
+
+  const defenderUserId = tile.owner_id;
+  const playerCreatures = await loadUserBattleCreatures(env, userId, taxonIds, "p", "owner");
+  const opponentCreatures = await loadUserBattleCreatures(env, defenderUserId, defenderTaxonIds, "o", "public");
+
+  const biome = tile.biome_type || (await tileBiomeFor(env, h3));
+  const now = new Date().toISOString();
+  const battleId = randomId("battle");
+  const seed = randomId("seed");
+  const defenderName = ownerDisplayName(defenderUserId);
+  const state = {
+    battleId,
+    mode: "territory_contest",
+    tileH3: h3,
+    attackerTaxonIds: taxonIds,
+    seed,
+    turn: 1,
+    terrain: biome,
+    player: { userId, name: "Your Team", activeIndex: 0, creatures: playerCreatures },
+    opponent: {
+      userId: defenderUserId,
+      name: "@" + defenderName + "'s garrison",
+      activeIndex: 0,
+      creatures: opponentCreatures
+    },
+    log: [{ turn: 0, text: "You invade the " + biome + " tile held by @" + defenderName + "." }],
+    status: "active"
+  };
+  applyTileDefenseBuff(state.opponent, Number(tile.defense_strength ?? 0));
+
+  await env.DB.prepare(`
+    INSERT INTO battle_instances (
+      battle_id, mode, attacker_user_id, defender_user_id,
+      state_json, seed, turn, status, created_at, updated_at
+    )
+    VALUES (?, 'territory_contest', ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(battleId, userId, defenderUserId, JSON.stringify(state), seed, state.turn, state.status, now, now).run();
+
+  await logTerritoryAction(env, userId, h3, "contest", battleId);
+  return state;
+}
+
+// Hook from the battle resolver: a finished contest flips (or fortifies) its tile.
+async function resolveTileContest(env, state, now) {
+  const h3 = state.tileH3;
+  if (!h3) return;
+  if (state.status === "won") {
+    await env.DB.prepare(`
+      UPDATE tiles SET owner_id = ?, defender_team_json = ?, state = 'claimed',
+        capture_progress = 100, defense_strength = 1, claimed_at = ?,
+        last_activity_at = ?, updated_at = ?
+      WHERE h3_index = ?
+    `).bind(state.player.userId, JSON.stringify(state.attackerTaxonIds ?? []), now, now, now, h3).run();
+  } else if (state.status === "lost") {
+    await env.DB.prepare(`
+      UPDATE tiles SET defense_strength = MIN(defense_strength + 1, ?),
+        last_activity_at = ?, updated_at = ?
+      WHERE h3_index = ?
+    `).bind(TERRITORY_MAX_DEFENSE, now, now, h3).run();
+  }
 }
 
 function chunkArray(items, size) {
@@ -11309,6 +11531,88 @@ function renderAppHtml() {
       display: inline-block;
       flex: 0 0 auto;
     }
+
+    .tile-panel {
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      z-index: 600;
+      width: min(300px, calc(100% - 24px));
+    }
+    .tile-panel-body {
+      position: relative;
+      background: rgba(12, 17, 22, 0.94);
+      color: #e8eef0;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      padding: 14px 14px 12px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    }
+    .tile-panel-body h3 {
+      margin: 0;
+      font-size: 1.05rem;
+      text-transform: capitalize;
+    }
+    .tile-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .tile-biome-chip {
+      width: 16px;
+      height: 16px;
+      border-radius: 4px;
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+    }
+    .tile-panel .subtle {
+      color: #aab6bd;
+    }
+    .tile-owner {
+      display: inline-block;
+      margin: 6px 0 2px;
+      font-weight: 700;
+      font-size: 0.9rem;
+    }
+    .tile-owner.mine {
+      color: #6fe08a;
+    }
+    .tile-panel .primary {
+      display: block;
+      width: 100%;
+      margin-top: 10px;
+    }
+    .tile-hint {
+      margin: 10px 0 0;
+      font-size: 0.85rem;
+      color: #c7d0d5;
+    }
+    .tile-actions-left {
+      margin: 10px 0 0;
+      font-size: 0.74rem;
+    }
+    .tile-close {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      background: transparent;
+      border: none;
+      color: #aab6bd;
+      font-size: 1.3rem;
+      line-height: 1;
+      cursor: pointer;
+      padding: 2px 6px;
+      width: auto;
+    }
+    @media (max-width: 720px) {
+      .tile-panel {
+        right: 8px;
+        left: 8px;
+        top: auto;
+        bottom: 8px;
+        width: auto;
+      }
+    }
   </style>
 </head>
 <body>
@@ -11568,6 +11872,7 @@ function renderAppHtml() {
           <div class="map-stage">
             <div id="mapCanvas"></div>
             <div class="map-legend" id="mapLegend" aria-hidden="true"></div>
+            <div class="tile-panel" id="tilePanel" hidden></div>
           </div>
         </section>
         <section class="view-panel" id="trainingView" hidden>
@@ -11938,6 +12243,7 @@ function renderAppHtml() {
       mapLegend: document.getElementById("mapLegend"),
       mapStatusLabel: document.getElementById("mapStatusLabel"),
       mapSyncButton: document.getElementById("mapSyncButton"),
+      tilePanel: document.getElementById("tilePanel"),
       mobileNav: document.getElementById("mobileNav"),
       mobileMoreButton: document.getElementById("mobileMoreButton"),
       mobileSheet: document.getElementById("mobileSheet"),
@@ -11985,6 +12291,13 @@ function renderAppHtml() {
     els.buddiesTabButton.addEventListener("click", () => switchView("buddies"));
     els.mapTabButton.addEventListener("click", () => switchView("map"));
     els.mapSyncButton.addEventListener("click", syncTerritory);
+    els.tilePanel.addEventListener("click", (event) => {
+      if (event.target.closest("[data-tile-close]")) { closeTilePanel(); return; }
+      const claim = event.target.closest("[data-tile-claim]");
+      if (claim) { claimTile(claim.getAttribute("data-tile-claim")); return; }
+      const contest = event.target.closest("[data-tile-contest]");
+      if (contest) { contestTile(contest.getAttribute("data-tile-contest")); return; }
+    });
     els.trainingTabButton.addEventListener("click", () => switchView("training"));
     els.buddiesRefreshButton.addEventListener("click", () => startPresence(true));
     els.buddiesPanel.addEventListener("click", onBuddiesPanelClick);
@@ -13721,8 +14034,9 @@ function renderAppHtml() {
           color: t.mine ? "#ffffff" : "rgba(255,255,255,0.35)",
           weight: t.mine ? 2.5 : 1
         });
-        // Hover-only tooltip; no click handler, so clicking never focuses the hex.
         poly.bindTooltip(t.biome + (t.mine ? " — yours" : ""), { sticky: true });
+        const h3 = t.h3;
+        poly.on("click", () => openTilePanel(h3));
         state.mapTileLayer.addLayer(poly);
       }
       // Keep observation points clickable above the hexes just drawn.
@@ -13764,6 +14078,94 @@ function renderAppHtml() {
         els.mapStatusLabel.textContent = error.message || "Sync failed";
       } finally {
         els.mapSyncButton.disabled = false;
+      }
+    }
+
+    function closeTilePanel() {
+      els.tilePanel.hidden = true;
+      els.tilePanel.innerHTML = "";
+    }
+
+    function openTilePanel(h3) {
+      els.tilePanel.hidden = false;
+      els.tilePanel.innerHTML = '<div class="tile-panel-body"><p class="subtle">Loading tile…</p></div>';
+      apiFetch("/api/territory/tile?h3=" + encodeURIComponent(h3))
+        .then(renderTilePanel)
+        .catch((error) => {
+          els.tilePanel.innerHTML = '<div class="tile-panel-body"><button class="tile-close" type="button" data-tile-close aria-label="Close">×</button><p class="subtle">' + escapeHtml(error.message || "Failed to load tile") + '</p></div>';
+        });
+    }
+
+    function renderTilePanel(d) {
+      const name = d.biome.charAt(0).toUpperCase() + d.biome.slice(1);
+      const teamReady = state.selectedTaxa && state.selectedTaxa.size === 5;
+      let ownerLine;
+      if (d.mine) ownerLine = '<span class="tile-owner mine">★ You hold this tile</span>';
+      else if (d.owned) ownerLine = '<span class="tile-owner">Held by @' + escapeHtml(d.owner) + '</span>';
+      else ownerLine = '<span class="tile-owner">Unclaimed</span>';
+
+      const favored = (d.favoredTypes && d.favoredTypes.length)
+        ? '<p class="subtle">Favors ' + escapeHtml(d.favoredTypes.join(" · ")) + ' moves (+15%)</p>'
+        : "";
+
+      let action;
+      if (!d.observedHere) {
+        action = '<p class="tile-hint">Observe something here on iNaturalist to claim or contest this tile.</p>';
+      } else if (!teamReady) {
+        action = '<p class="tile-hint">Select 5 ready creatures in Roster to act on tiles.</p>';
+      } else if (d.canClaim) {
+        action = '<button class="primary" type="button" data-tile-claim="' + escapeAttr(d.h3) + '">Claim this tile</button>';
+      } else if (d.canContest) {
+        action = '<button class="primary" type="button" data-tile-contest="' + escapeAttr(d.h3) + '">Contest — battle the garrison' + (Number(d.defenseStrength) > 0 ? " (def +" + Number(d.defenseStrength) + ")" : "") + '</button>';
+      } else if (d.mine) {
+        action = '<p class="tile-hint">Your garrison defends here (defense ' + Number(d.defenseStrength) + ').</p>';
+      } else {
+        action = "";
+      }
+
+      els.tilePanel.hidden = false;
+      els.tilePanel.innerHTML =
+        '<div class="tile-panel-body">' +
+          '<button class="tile-close" type="button" data-tile-close aria-label="Close">×</button>' +
+          '<div class="tile-head"><span class="tile-biome-chip" style="background:' + biomeColor(d.biome) + '"></span>' +
+          '<h3>' + escapeHtml(name) + ' tile</h3></div>' +
+          ownerLine +
+          favored +
+          action +
+          '<p class="subtle tile-actions-left">' + Number(d.actionsLeftToday) + ' actions left today</p>' +
+        '</div>';
+    }
+
+    async function claimTile(h3) {
+      const taxonIds = Array.from(state.selectedTaxa || []).map(Number);
+      if (taxonIds.length !== 5) { els.mapStatusLabel.textContent = "Select 5 ready creatures first."; return; }
+      try {
+        await apiFetch("/api/territory/claim", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ h3: h3, taxonIds: taxonIds })
+        });
+        closeTilePanel();
+        els.mapStatusLabel.textContent = "Tile claimed — it's yours now.";
+        loadMapData();
+      } catch (error) {
+        els.mapStatusLabel.textContent = error.message || "Claim failed";
+      }
+    }
+
+    async function contestTile(h3) {
+      const taxonIds = Array.from(state.selectedTaxa || []).map(Number);
+      if (taxonIds.length !== 5) { els.mapStatusLabel.textContent = "Select 5 ready creatures first."; return; }
+      try {
+        const battle = await apiFetch("/api/territory/contest", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ h3: h3, taxonIds: taxonIds })
+        });
+        closeTilePanel();
+        enterBattle(battle);
+      } catch (error) {
+        els.mapStatusLabel.textContent = error.message || "Contest failed";
       }
     }
 
@@ -16487,6 +16889,7 @@ function renderAppHtml() {
     // -- Battle rendering ----------------------------------------------------
 
     function battleTitle(battle) {
+      if (battle.mode === "territory_contest") return "Tile Contest";
       if (battle.mode === "pvp_async") return "Challenge Battle";
       if (battle.mode === "demo") return "5v5 Test Battle";
       return "NPC Battle";
