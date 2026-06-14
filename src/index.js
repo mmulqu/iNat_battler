@@ -10038,34 +10038,7 @@ function renderAppHtml() {
 
     .bench {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 6px;
-    }
-
-    .bench-slot {
-      min-height: 44px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #eef2eb;
-      padding: 6px;
-      font-size: 0.72rem;
-      font-weight: 800;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      opacity: 0.72;
-    }
-
-    .bench-slot.active {
-      border-color: var(--teal);
-      opacity: 1;
-      background: #e4f2ef;
-    }
-
-    .bench-hp {
-      display: block;
-      color: var(--muted);
-      font-size: 0.66rem;
     }
 
     .swap-button {
@@ -15567,6 +15540,34 @@ function renderAppHtml() {
       return audioCtx;
     }
 
+    // Mobile browsers (iOS Safari especially) start the AudioContext suspended
+    // and only let it resume — and on iOS, only "unlock" — inside a real user
+    // gesture, with a buffer actually played during that gesture. Prime it on
+    // the first touch/click anywhere so later async-fired SFX can play.
+    function unlockAudio() {
+      try {
+        const ctx = ensureAudio();
+        const source = ctx.createBufferSource();
+        source.buffer = ctx.createBuffer(1, 1, 22050);
+        source.connect(ctx.destination);
+        source.start(0);
+        const cleanup = () => {
+          if (ctx.state === "running") {
+            document.removeEventListener("pointerdown", unlockAudio);
+            document.removeEventListener("touchend", unlockAudio);
+            document.removeEventListener("click", unlockAudio);
+          }
+        };
+        if (ctx.state === "suspended") ctx.resume().then(cleanup, () => {}); else cleanup();
+      } catch (error) {
+        // Audio is best-effort; never break interaction over it.
+      }
+    }
+
+    document.addEventListener("pointerdown", unlockAudio, { passive: true });
+    document.addEventListener("touchend", unlockAudio, { passive: true });
+    document.addEventListener("click", unlockAudio, { passive: true });
+
     function sfxTone(ctx, out, opts) {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -15943,23 +15944,16 @@ function renderAppHtml() {
         ? renderSheetSprite(creature.spriteUrl, animation + (creature.fainted ? " fainted" : ""))
         : '<div class="dummy-sprite' + (creature.fainted ? " fainted" : "") + '">Dummy</div>';
       const battleActive = state.battle && state.battle.status === "active";
-      let benchHtml;
+      // Player gets a Swap! button; the opponent's team roster is hidden from
+      // the player (no scouting their bench).
+      let benchHtml = "";
       if (side === "player") {
         const swappableCount = team.creatures.filter((member, index) => index !== team.activeIndex && !member.fainted).length;
-        benchHtml = (battleActive && swappableCount > 0)
-          ? '<button type="button" class="swap-button" data-open-swap' + (state.battleBusy ? " disabled" : "") + '>' +
+        if (battleActive && swappableCount > 0) {
+          benchHtml = '<button type="button" class="swap-button" data-open-swap' + (state.battleBusy ? " disabled" : "") + '>' +
               'Swap! <span class="swap-count">' + swappableCount + '</span>' +
-            '</button>'
-          : "";
-      } else {
-        benchHtml = team.creatures.map((member, index) => {
-          const isActive = index === team.activeIndex;
-          const memberHpPct = member.maxHp ? Math.max(0, Math.round((member.hp / member.maxHp) * 100)) : 0;
-          return '<div class="bench-slot ' + (isActive ? "active" : "") + (member.fainted ? '" style="opacity:0.35' : "") + '">' +
-            escapeHtml(member.name) +
-            (isActive ? "" : '<span class="bench-hp">' + memberHpPct + '% HP</span>') +
-          '</div>';
-        }).join("");
+            '</button>';
+        }
       }
 
       const STATUS_SPRITE_KINDS = ["stunned", "marked", "poisoned", "shielded", "rallied"];
