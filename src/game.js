@@ -19,6 +19,39 @@ const DEFAULT_STATS = {
   unknown: { vigor: 56, strike: 56, guard: 50, tempo: 58, sense: 56 }
 };
 
+// Shared-pool mana: gates move usage. Full each battle (creatures are built
+// fresh), +1 to every non-fainted creature each turn (active and benched, so a
+// drained creature can swap out and regen). Costs derive from move power.
+const MAX_MANA = 10;
+const MANA_REGEN_PER_TURN = 1;
+
+const STRUGGLE_MOVE = {
+  id: "struggle",
+  name: "Struggle",
+  type: "Normal",
+  category: "physical",
+  power: 15,
+  accuracy: 100,
+  effect: { kind: "recoil", pct: 25 },
+  description: "A desperate last-resort attack with recoil — costs no mana."
+};
+
+export function moveManaCost(move) {
+  if (!move || move.id === "struggle") return 0;
+  if (move.category === "status") return 3;
+  const base = Math.round((Number(move.power) || 0) / 10);
+  let cost = Math.max(2, Math.min(6, base));
+  if (move.effect && move.effect.kind === "multihit") cost += 1;
+  return cost;
+}
+
+function regenMana(team) {
+  for (const creature of team.creatures) {
+    if (creature.fainted) continue;
+    creature.mana = Math.min(creature.maxMana ?? MAX_MANA, (creature.mana ?? 0) + MANA_REGEN_PER_TURN);
+  }
+}
+
 const MOVE_LIBRARY = {
   jab: { id: "jab", name: "Jab", type: "Urban", category: "physical", power: 28, accuracy: 96, description: "A quick close-range strike." },
   peck: { id: "peck", name: "Peck", type: "Sky", category: "physical", power: 34, accuracy: 95, description: "A sharp beak jab." },
@@ -206,6 +239,8 @@ export function createBattleCreature(taxon, instanceSuffix = "a", training = nul
     role: genome.role,
     maxHp,
     hp: maxHp,
+    maxMana: MAX_MANA,
+    mana: MAX_MANA,
     stats,
     statStages: {},
     moves: Array.isArray(speciesMoves) && speciesMoves.length === 4 ? speciesMoves : genome.moves,
@@ -245,7 +280,9 @@ export function createSeededRng(seedString) {
 export function chooseNpcMove(state, difficulty, rng) {
   const npc = getActive(state.opponent);
   const target = getActive(state.player);
-  const legal = npc.moves;
+  // Only consider moves the creature can currently afford; if none, Struggle.
+  const legal = npc.moves.filter((move) => (npc.mana ?? 0) >= moveManaCost(move));
+  if (legal.length === 0) return "struggle";
 
   if (difficulty === "random") {
     return legal[Math.floor(rng() * legal.length)].id;
@@ -361,8 +398,18 @@ export function resolveTurn(state, playerAction, npcAction, rng) {
       continue;
     }
 
-    const move = item.actor.moves.find((candidate) => candidate.id === item.action.moveId);
+    let move = item.action.moveId === "struggle"
+      ? STRUGGLE_MOVE
+      : item.actor.moves.find((candidate) => candidate.id === item.action.moveId);
     if (!move) continue;
+
+    // Shared mana pool: if the chosen move is unaffordable, the creature
+    // Struggles instead. Mana is then deducted for whatever actually runs.
+    if (move.id !== "struggle" && (item.actor.mana ?? 0) < moveManaCost(move)) {
+      next.log.push({ turn: next.turn, text: `${item.actor.name} is out of mana and struggles!` });
+      move = STRUGGLE_MOVE;
+    }
+    item.actor.mana = Math.max(0, (item.actor.mana ?? 0) - moveManaCost(move));
 
     applyMove(next, item.actor, item.target, move, rng);
 
@@ -381,6 +428,9 @@ export function resolveTurn(state, playerAction, npcAction, rng) {
   autoSwitch(next.player);
   autoSwitch(next.opponent);
   next.status = getBattleStatus(next);
+  // +1 mana to every non-fainted creature on both teams (active and benched).
+  regenMana(next.player);
+  regenMana(next.opponent);
   next.turn += 1;
   return next;
 }

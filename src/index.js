@@ -4547,7 +4547,7 @@ async function submitBattleMove(env, battleId, moveId, switchIndex = null) {
   } else {
     if (!moveId) throw new Error("Missing moveId");
     const active = state.player.creatures[state.player.activeIndex];
-    if (!active.moves.some((move) => move.id === moveId)) {
+    if (moveId !== "struggle" && !active.moves.some((move) => move.id === moveId)) {
       throw new Error("Move is not available to the active creature");
     }
     playerAction = { kind: "move", moveId };
@@ -10036,6 +10036,46 @@ function renderAppHtml() {
       background: linear-gradient(90deg, var(--green), var(--teal));
     }
 
+    .mana {
+      height: 8px;
+      border-radius: 999px;
+      background: #d7e0ea;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+
+    .mana > span {
+      display: block;
+      height: 100%;
+      width: var(--mana, 100%);
+      background: linear-gradient(90deg, #2f74d0, #5aa6f0);
+    }
+
+    .mana-text {
+      color: #2f74d0;
+    }
+
+    .move-cost {
+      font-weight: 900;
+      color: #2f74d0;
+      white-space: nowrap;
+    }
+
+    .move-button.unaffordable {
+      opacity: 0.45;
+    }
+
+    .struggle-button {
+      grid-column: 1 / -1;
+      min-height: 44px;
+      border-radius: 8px;
+      background: #b4542a;
+      color: #fff;
+      font-weight: 800;
+      text-align: left;
+      padding: 8px 10px;
+    }
+
     .bench {
       display: grid;
       gap: 6px;
@@ -11212,6 +11252,16 @@ function renderAppHtml() {
       const clamped = Math.max(-4, Math.min(4, Number(stage) || 0));
       if (clamped >= 0) return base * (1 + clamped * 0.25);
       return base / (1 + Math.abs(clamped) * 0.25);
+    }
+
+    // Mirrors game.js moveManaCost — keep the two formulas in sync.
+    function moveManaCost(move) {
+      if (!move || move.id === "struggle") return 0;
+      if (move.category === "status") return 3;
+      const base = Math.round((Number(move.power) || 0) / 10);
+      let cost = Math.max(2, Math.min(6, base));
+      if (move.effect && move.effect.kind === "multihit") cost += 1;
+      return cost;
     }
 
     // Mirrors the server damage formula (game.js estimateDamage) at mid
@@ -15843,8 +15893,14 @@ function renderAppHtml() {
 
       const playerActive = getActiveCreature(battle.player);
       const opponentActive = getActiveCreature(battle.opponent);
-      const moveButtons = battle.status === "active"
-        ? playerActive.moves.map((move) => {
+      let moveButtons;
+      if (battle.status === "active") {
+        const playerMana = Number(playerActive.mana ?? 0);
+        let anyAffordable = false;
+        const buttons = playerActive.moves.map((move) => {
+            const cost = moveManaCost(move);
+            const affordable = playerMana >= cost;
+            if (affordable) anyAffordable = true;
             const eff = move.category === "status" ? 1 : typeMultiplierFor(move.type, opponentActive.types);
             const effClass = eff >= 1.2 ? " eff-strong" : eff <= 0.85 ? " eff-weak" : "";
             const effLabel = "x" + eff.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
@@ -15859,14 +15915,23 @@ function renderAppHtml() {
             }
             metaBits.push(...describeMoveEffect(move).map(escapeHtml));
             if (Number(move.accuracy) < 100) metaBits.push(Number(move.accuracy) + "% acc");
-            return '<button class="move-button' + (move.signature ? " signature" : "") + effClass + '" type="button" data-move-id="' + escapeAttr(move.id) + '" ' +
-              (move.flavor ? 'title="' + escapeAttr(move.flavor) + '" ' : "") + (state.battleBusy ? "disabled" : "") + '>' +
+            return '<button class="move-button' + (move.signature ? " signature" : "") + effClass + (affordable ? "" : " unaffordable") + '" type="button" data-move-id="' + escapeAttr(move.id) + '" ' +
+              (move.flavor ? 'title="' + escapeAttr(move.flavor) + '" ' : "") + ((state.battleBusy || !affordable) ? "disabled" : "") + '>' +
               escapeHtml(move.name) + (move.signature ? ' <span class="sig-star">★</span>' : "") +
+              ' <span class="move-cost">' + cost + ' MP</span>' +
               '<br><span class="subtle">' + escapeHtml(move.type + " / " + move.category) + '</span>' +
               (metaBits.length ? '<span class="move-meta">' + metaBits.join(" · ") + '</span>' : "") +
             '</button>';
-          }).join("")
-        : '<button class="move-button" type="button" disabled>Battle ' + escapeHtml(battle.status) + '</button>';
+          }).join("");
+        const struggle = anyAffordable
+          ? ""
+          : '<button class="struggle-button" type="button" data-move-id="struggle"' + (state.battleBusy ? " disabled" : "") + '>' +
+              'Struggle <span class="subtle">— out of mana: weak hit + recoil</span>' +
+            '</button>';
+        moveButtons = buttons + struggle;
+      } else {
+        moveButtons = '<button class="move-button" type="button" disabled>Battle ' + escapeHtml(battle.status) + '</button>';
+      }
       const recentLog = battle.log.slice(-8).reverse().map((entry) => (
         '<div>Turn ' + Number(entry.turn || 0) + ': ' + escapeHtml(entry.text) + '</div>'
       )).join("");
@@ -15908,6 +15973,7 @@ function renderAppHtml() {
 
       const rowsHtml = rows.map(({ member, index }) => {
         const pct = member.maxHp ? Math.max(0, Math.round((member.hp / member.maxHp) * 100)) : 0;
+        const manaPct = member.maxMana ? Math.max(0, Math.round((member.mana / member.maxMana) * 100)) : 0;
         const thumb = member.spriteUrl
           ? '<div class="swap-thumb" data-sprite-url="' + escapeAttr(member.spriteUrl) + '" style="background-image:url(&quot;' + escapeAttr(member.spriteUrl) + '&quot;)"></div>'
           : '<div class="swap-thumb swap-thumb-blank"></div>';
@@ -15921,6 +15987,8 @@ function renderAppHtml() {
             (types ? '<span class="subtle swap-row-types">' + escapeHtml(types) + '</span>' : '') +
             '<div class="hp"><span class="' + (pct <= 25 ? "hp-low" : "") + '" style="--hp:' + pct + '%"></span></div>' +
             '<span class="subtle">' + Number(member.hp || 0) + ' / ' + Number(member.maxHp || 0) + ' HP</span>' +
+            '<div class="mana"><span style="--mana:' + manaPct + '%"></span></div>' +
+            '<span class="subtle mana-text">' + Number(member.mana || 0) + ' / ' + Number(member.maxMana || 0) + ' MP</span>' +
           '</div>' +
         '</button>';
       }).join("");
@@ -15939,6 +16007,7 @@ function renderAppHtml() {
 
     function renderCombatant(team, creature, side) {
       const hpPct = creature.maxHp ? Math.max(0, Math.round((creature.hp / creature.maxHp) * 100)) : 0;
+      const manaPct = creature.maxMana ? Math.max(0, Math.round((creature.mana / creature.maxMana) * 100)) : 0;
       const animation = side === "player" ? state.battleAnimation : "anim-idle";
       const sprite = creature.spriteUrl
         ? renderSheetSprite(creature.spriteUrl, animation + (creature.fainted ? " fainted" : ""))
@@ -15980,6 +16049,8 @@ function renderAppHtml() {
           '</div>' +
           '<div class="hp" aria-label="HP"><span data-hp-bar="' + side + '" class="' + (hpPct <= 25 ? "hp-low" : "") + '" style="--hp:' + hpPct + '%"></span></div>' +
           '<div class="subtle" data-hp-text="' + side + '">' + Number(creature.hp || 0) + ' / ' + Number(creature.maxHp || 0) + ' HP</div>' +
+          '<div class="mana" aria-label="Mana"><span style="--mana:' + manaPct + '%"></span></div>' +
+          '<div class="subtle mana-text">' + Number(creature.mana || 0) + ' / ' + Number(creature.maxMana || 0) + ' MP</div>' +
           (function () {
             const statusChips = (creature.statuses || []).map((status) => (
               '<span class="status-chip status-' + escapeAttr(status) + '">' + escapeHtml(status) + '</span>'
