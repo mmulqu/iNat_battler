@@ -371,6 +371,10 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await getTerritoryObservations(env, session, url));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/avatar") {
+    return proxyAvatar(url.searchParams.get("url") || "");
+  }
+
   if (request.method === "GET" && url.pathname === "/api/territory/claims") {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryClaims(env, session, url));
@@ -5881,6 +5885,33 @@ async function getTerritoryClaims(env, session, url) {
     });
   }
   return { claims };
+}
+
+// Same-origin proxy for Bluesky avatars so the client can read their pixels on a
+// <canvas> (the bsky CDN doesn't send CORS headers, which taints the canvas and
+// blocks dominant-color extraction). Host-allowlisted to avoid an open proxy.
+async function proxyAvatar(rawUrl) {
+  let target;
+  try {
+    target = new URL(rawUrl);
+  } catch {
+    return new Response("bad url", { status: 400 });
+  }
+  const host = target.hostname;
+  const allowed = host === "cdn.bsky.app" || host.endsWith(".bsky.app") || host.endsWith(".bsky.network");
+  if (target.protocol !== "https:" || !allowed) {
+    return new Response("forbidden host", { status: 403 });
+  }
+  const upstream = await fetch(target.toString(), {
+    headers: { accept: "image/*" },
+    cf: { cacheTtl: 86400, cacheEverything: true }
+  });
+  if (!upstream.ok) return new Response("upstream error", { status: 502 });
+  const headers = new Headers();
+  headers.set("content-type", upstream.headers.get("content-type") || "image/jpeg");
+  headers.set("access-control-allow-origin", "*");
+  headers.set("cache-control", "public, max-age=86400");
+  return new Response(upstream.body, { status: 200, headers });
 }
 
 // --- Territory: claim & contest tiles (Biome merge, Bridge 3) ---
@@ -14162,13 +14193,35 @@ function renderAppHtml() {
     // Dominant color of a Bluesky avatar (most-populated coarse RGB bucket,
     // ignoring near-black/near-white). Falls back to a hash color if the image
     // is CORS-tainted or fails to load.
+    function rgbToHsl(r, g, b) {
+      r /= 255; g /= 255; b /= 255;
+      const mx = Math.max(r, g, b);
+      const mn = Math.min(r, g, b);
+      let h = 0;
+      let s = 0;
+      const l = (mx + mn) / 2;
+      const d = mx - mn;
+      if (d) {
+        s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+        if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+        else if (mx === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h *= 60;
+      }
+      return [h, s, l];
+    }
+
+    // Dominant *characteristic* color of an avatar: weight pixels by saturation
+    // AND brightness (so a vivid logo/garment beats a big muted background),
+    // pick the strongest hue bucket, then re-render it at a fixed tile-friendly
+    // lightness so it reads on the dark map (the raw pixel can be a dark brown).
     function avatarDominantColor(url) {
       return new Promise((resolve) => {
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
           try {
-            const S = 24;
+            const S = 32;
             const canvas = document.createElement("canvas");
             canvas.width = S;
             canvas.height = S;
@@ -14181,18 +14234,22 @@ function renderAppHtml() {
               const r = data[i];
               const g = data[i + 1];
               const bl = data[i + 2];
-              const al = data[i + 3];
-              if (al < 128) continue;
+              if (data[i + 3] < 128) continue;
               const mx = Math.max(r, g, bl);
               const mn = Math.min(r, g, bl);
-              if (mx < 32 || mn > 224) continue;
+              if (mx < 40) continue;
+              const sat = mx === 0 ? 0 : (mx - mn) / mx;
+              if (sat < 0.28) continue; // skip near-grayscale (backgrounds)
+              const w = sat * (mx / 255);
               const key = (r >> 5) + "," + (g >> 5) + "," + (bl >> 5);
-              const bk = buckets[key] || (buckets[key] = { r: 0, g: 0, b: 0, n: 0 });
-              bk.r += r; bk.g += g; bk.b += bl; bk.n += 1;
-              if (!best || bk.n > best.n) best = bk;
+              const bk = buckets[key] || (buckets[key] = { r: 0, g: 0, b: 0, w: 0 });
+              bk.r += r * w; bk.g += g * w; bk.b += bl * w; bk.w += w;
+              if (!best || bk.w > best.w) best = bk;
             }
             if (!best) { resolve(null); return; }
-            resolve("rgb(" + Math.round(best.r / best.n) + "," + Math.round(best.g / best.n) + "," + Math.round(best.b / best.n) + ")");
+            const hsl = rgbToHsl(best.r / best.w, best.g / best.w, best.b / best.w);
+            const sat = Math.round(Math.max(0.55, hsl[1]) * 100);
+            resolve("hsl(" + Math.round(hsl[0]) + ", " + sat + "%, 55%)");
           } catch (error) {
             resolve(null);
           }
@@ -14250,7 +14307,10 @@ function renderAppHtml() {
         if (state.ownerColors[did] !== undefined) return;
         const sample = byDid[did][0];
         let color = null;
-        if (sample.avatarUrl) color = await avatarDominantColor(sample.avatarUrl);
+        if (sample.avatarUrl) {
+          // Read pixels through the same-origin proxy so the canvas isn't tainted.
+          color = await avatarDominantColor("/api/avatar?url=" + encodeURIComponent(sample.avatarUrl));
+        }
         state.ownerColors[did] = color || hashColor(did);
       }));
 
