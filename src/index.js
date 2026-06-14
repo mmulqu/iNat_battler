@@ -371,6 +371,11 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await getTerritoryObservations(env, session, url));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/territory/claims") {
+    const session = await requireSession(request, env);
+    return jsonResponse(await getTerritoryClaims(env, session, url));
+  }
+
   if (request.method === "GET" && url.pathname === "/api/territory/tile") {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryTileDetail(env, session, url.searchParams.get("h3")));
@@ -5834,6 +5839,48 @@ async function getTerritoryObservations(env, session, url) {
 
   const res = await env.DB.prepare(query).bind(...binds).all();
   return { observations: res.results ?? [] };
+}
+
+// Claimed tiles in view, each with its owner's Bluesky handle + avatar (for the
+// "Claims" map mode: owner-colored territory clusters with PFP markers).
+async function getTerritoryClaims(env, session, url) {
+  const bbox = parseBbox(url);
+  const myUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
+
+  const rows = (await env.DB.prepare(`
+    SELECT t.h3_index, t.owner_id, a.handle, a.avatar_url, a.did
+    FROM tiles t
+    LEFT JOIN users u ON u.id = t.owner_id
+    LEFT JOIN accounts a ON a.inat_login = u.inat_login
+    WHERE t.owner_id IS NOT NULL
+    LIMIT 5000
+  `).all()).results ?? [];
+
+  const claims = [];
+  for (const row of rows) {
+    const boundary = cellToBoundary(row.h3_index); // [[lat, lng], ...]
+    let lat = 0;
+    let lng = 0;
+    for (const point of boundary) {
+      lat += point[0];
+      lng += point[1];
+    }
+    lat /= boundary.length;
+    lng /= boundary.length;
+    if (bbox && (lat > bbox.n || lat < bbox.s || lng > bbox.e || lng < bbox.w)) continue;
+    const login = ownerDisplayName(row.owner_id);
+    claims.push({
+      h3: row.h3_index,
+      boundary,
+      centroid: [lat, lng],
+      login,
+      handle: row.handle || login,
+      avatarUrl: row.avatar_url || null,
+      did: row.did || row.owner_id,
+      mine: Boolean(myUserId && row.owner_id === myUserId)
+    });
+  }
+  return { claims };
 }
 
 // --- Territory: claim & contest tiles (Biome merge, Bridge 3) ---
@@ -11532,6 +11579,61 @@ function renderAppHtml() {
       flex: 0 0 auto;
     }
 
+    .map-head-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .map-mode-toggle {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--surface);
+    }
+    .map-mode-btn {
+      border: none;
+      background: transparent;
+      padding: 7px 14px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .map-mode-btn.active {
+      background: var(--teal);
+      color: #fff;
+    }
+
+    .owner-avatar-icon {
+      background: transparent;
+      border: none;
+    }
+    .owner-avatar-ring {
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      border: 3px solid #888;
+      overflow: hidden;
+      background: #0c1116;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .owner-avatar-ring img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .owner-avatar-fallback {
+      color: #fff;
+      font-weight: 800;
+      font-size: 1.2rem;
+    }
+
     .tile-panel {
       position: absolute;
       right: 12px;
@@ -11867,7 +11969,13 @@ function renderAppHtml() {
               <h2>Territory</h2>
               <span class="subtle" id="mapStatusLabel">Your observations on the living map. Each hex is a real biome.</span>
             </div>
-            <button class="secondary" id="mapSyncButton" type="button">Sync my observations</button>
+            <div class="map-head-tools">
+              <div class="map-mode-toggle" id="mapModeToggle" role="group" aria-label="Map mode">
+                <button class="map-mode-btn active" type="button" data-map-mode="biomes">Biomes</button>
+                <button class="map-mode-btn" type="button" data-map-mode="claims">Claims</button>
+              </div>
+              <button class="secondary" id="mapSyncButton" type="button">Sync my observations</button>
+            </div>
           </div>
           <div class="map-stage">
             <div id="mapCanvas"></div>
@@ -12243,6 +12351,7 @@ function renderAppHtml() {
       mapLegend: document.getElementById("mapLegend"),
       mapStatusLabel: document.getElementById("mapStatusLabel"),
       mapSyncButton: document.getElementById("mapSyncButton"),
+      mapModeToggle: document.getElementById("mapModeToggle"),
       tilePanel: document.getElementById("tilePanel"),
       mobileNav: document.getElementById("mobileNav"),
       mobileMoreButton: document.getElementById("mobileMoreButton"),
@@ -12291,6 +12400,10 @@ function renderAppHtml() {
     els.buddiesTabButton.addEventListener("click", () => switchView("buddies"));
     els.mapTabButton.addEventListener("click", () => switchView("map"));
     els.mapSyncButton.addEventListener("click", syncTerritory);
+    els.mapModeToggle.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-map-mode]");
+      if (button) setMapMode(button.getAttribute("data-map-mode"));
+    });
     els.tilePanel.addEventListener("click", (event) => {
       if (event.target.closest("[data-tile-close]")) { closeTilePanel(); return; }
       const claim = event.target.closest("[data-tile-claim]");
@@ -13951,6 +14064,7 @@ function renderAppHtml() {
       state.map = map;
       state.mapTileLayer = L.layerGroup().addTo(map);
       state.mapObsLayer = L.layerGroup().addTo(map);
+      state.mapAvatarLayer = L.layerGroup().addTo(map);
       L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
         attribution: "&copy; OpenStreetMap &copy; CARTO",
         subdomains: "abcd",
@@ -14000,6 +14114,19 @@ function renderAppHtml() {
       const zoom = state.map.getZoom();
       const qs = "n=" + b.getNorth() + "&s=" + b.getSouth() + "&e=" + b.getEast() + "&w=" + b.getWest();
 
+      if (state.mapMode === "claims") {
+        state.mapTileLayer.clearLayers();
+        state.mapObsLayer.clearLayers();
+        try {
+          const cres = await apiFetch("/api/territory/claims?" + qs);
+          if (token !== mapLoadToken) return;
+          await drawClaims((cres && cres.claims) || []);
+        } catch (error) { /* ignore */ }
+        return;
+      }
+
+      // Biomes mode (default): observations + biome hexes.
+      state.mapAvatarLayer.clearLayers();
       try {
         const ores = await apiFetch("/api/territory/observations?" + qs);
         if (token !== mapLoadToken) return;
@@ -14021,6 +14148,156 @@ function renderAppHtml() {
         }
         drawTiles((tres && tres.tiles) || []);
       } catch (error) { /* ignore */ }
+    }
+
+    // --- Claims mode: owner-colored territory + PFP cluster markers ---
+
+    function hashColor(str) {
+      let h = 0;
+      const s = String(str || "");
+      for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) % 360;
+      return "hsl(" + h + ", 65%, 55%)";
+    }
+
+    // Dominant color of a Bluesky avatar (most-populated coarse RGB bucket,
+    // ignoring near-black/near-white). Falls back to a hash color if the image
+    // is CORS-tainted or fails to load.
+    function avatarDominantColor(url) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+          try {
+            const S = 24;
+            const canvas = document.createElement("canvas");
+            canvas.width = S;
+            canvas.height = S;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0, S, S);
+            const data = ctx.getImageData(0, 0, S, S).data;
+            const buckets = {};
+            let best = null;
+            for (let i = 0; i < data.length; i += 4) {
+              const r = data[i];
+              const g = data[i + 1];
+              const bl = data[i + 2];
+              const al = data[i + 3];
+              if (al < 128) continue;
+              const mx = Math.max(r, g, bl);
+              const mn = Math.min(r, g, bl);
+              if (mx < 32 || mn > 224) continue;
+              const key = (r >> 5) + "," + (g >> 5) + "," + (bl >> 5);
+              const bk = buckets[key] || (buckets[key] = { r: 0, g: 0, b: 0, n: 0 });
+              bk.r += r; bk.g += g; bk.b += bl; bk.n += 1;
+              if (!best || bk.n > best.n) best = bk;
+            }
+            if (!best) { resolve(null); return; }
+            resolve("rgb(" + Math.round(best.r / best.n) + "," + Math.round(best.g / best.n) + "," + Math.round(best.b / best.n) + ")");
+          } catch (error) {
+            resolve(null);
+          }
+        };
+        img.onerror = () => resolve(null);
+        img.src = url;
+      });
+    }
+
+    // Union-find clustering by centroid proximity (res5 hex spacing ~0.16deg).
+    function clusterByProximity(tiles) {
+      const parent = tiles.map((_, i) => i);
+      const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+      const union = (a, b) => { parent[find(a)] = find(b); };
+      const THRESH = 0.26;
+      for (let i = 0; i < tiles.length; i += 1) {
+        for (let j = i + 1; j < tiles.length; j += 1) {
+          const a = tiles[i].centroid;
+          const c = tiles[j].centroid;
+          const dLat = a[0] - c[0];
+          const dLng = (a[1] - c[1]) * Math.cos((a[0] * Math.PI) / 180);
+          if (Math.sqrt(dLat * dLat + dLng * dLng) < THRESH) union(i, j);
+        }
+      }
+      const groups = {};
+      for (let i = 0; i < tiles.length; i += 1) {
+        const root = find(i);
+        (groups[root] || (groups[root] = [])).push(tiles[i]);
+      }
+      return Object.keys(groups).map((k) => groups[k]);
+    }
+
+    function ownerAvatarHtml(owner, color) {
+      const inner = owner.avatarUrl
+        ? '<img src="' + escapeAttr(owner.avatarUrl) + '" alt="" referrerpolicy="no-referrer">'
+        : '<span class="owner-avatar-fallback">' + escapeHtml((owner.handle || "?").charAt(0).toUpperCase()) + '</span>';
+      return '<div class="owner-avatar-ring" style="border-color:' + color + '">' + inner + '</div>';
+    }
+
+    async function drawClaims(claims) {
+      state.mapTileLayer.clearLayers();
+      state.mapObsLayer.clearLayers();
+      state.mapAvatarLayer.clearLayers();
+      if (!claims.length) {
+        els.mapStatusLabel.textContent = "No claimed tiles in view yet — claim one in Biomes mode.";
+        return;
+      }
+
+      if (!state.ownerColors) state.ownerColors = {};
+      const byDid = {};
+      for (const claim of claims) (byDid[claim.did] || (byDid[claim.did] = [])).push(claim);
+      const dids = Object.keys(byDid);
+
+      await Promise.all(dids.map(async (did) => {
+        if (state.ownerColors[did] !== undefined) return;
+        const sample = byDid[did][0];
+        let color = null;
+        if (sample.avatarUrl) color = await avatarDominantColor(sample.avatarUrl);
+        state.ownerColors[did] = color || hashColor(did);
+      }));
+
+      for (const claim of claims) {
+        const color = state.ownerColors[claim.did] || "#888";
+        const poly = L.polygon(claim.boundary, {
+          fillColor: color,
+          fillOpacity: claim.mine ? 0.6 : 0.42,
+          color: claim.mine ? "#ffffff" : color,
+          weight: claim.mine ? 2 : 1
+        });
+        poly.bindTooltip("@" + escapeHtml(claim.handle), { sticky: true });
+        const h3 = claim.h3;
+        poly.on("click", () => openTilePanel(h3));
+        state.mapTileLayer.addLayer(poly);
+      }
+
+      for (const did of dids) {
+        const color = state.ownerColors[did] || "#888";
+        const owner = byDid[did][0];
+        for (const cluster of clusterByProximity(byDid[did])) {
+          let lat = 0;
+          let lng = 0;
+          for (const tile of cluster) { lat += tile.centroid[0]; lng += tile.centroid[1]; }
+          lat /= cluster.length;
+          lng /= cluster.length;
+          const icon = L.divIcon({
+            className: "owner-avatar-icon",
+            html: ownerAvatarHtml(owner, color),
+            iconSize: [46, 46],
+            iconAnchor: [23, 23]
+          });
+          L.marker([lat, lng], { icon, title: "@" + owner.handle, interactive: false }).addTo(state.mapAvatarLayer);
+        }
+      }
+
+      els.mapStatusLabel.textContent = claims.length + " claimed tiles · " + dids.length + " holder" + (dids.length === 1 ? "" : "s") + " in view.";
+    }
+
+    function setMapMode(mode) {
+      state.mapMode = mode === "claims" ? "claims" : "biomes";
+      if (els.mapModeToggle) {
+        for (const button of els.mapModeToggle.querySelectorAll("[data-map-mode]")) {
+          button.classList.toggle("active", button.getAttribute("data-map-mode") === state.mapMode);
+        }
+      }
+      if (state.map) loadMapData();
     }
 
     function drawTiles(tiles) {
