@@ -5897,7 +5897,9 @@ async function getTerritoryTiles(env, session, url) {
   const tiles = [];
   for (const cell of cells) {
     const biome = biomeByCell.get(cell) || "unknown";
-    if (biome === "ocean" || biome === "unknown") continue; // basemap already shows water
+    // Only coastal ocean is stored at res5 (open ocean isn't), so showing 'ocean'
+    // here surfaces the claimable coastal-water ring for marine observers.
+    if (biome === "unknown") continue;
     const boundary = cellToBoundary(cell); // [[lat, lng], ...]
     if (boundaryCrossesAntimeridian(boundary)) continue;
     const owned = ownerByCell.get(cell) || null;
@@ -14406,7 +14408,7 @@ function renderAppHtml() {
       shrubland: "#ccb35c", grassland: "#b8e05c", agricultural: "#e9d35f",
       urban: "#e60000", desert: "#c4b79f", polar: "#f0f0f0", freshwater: "#3a86d6",
       wetland: "#13b3b3", tundra: "#7dd67d", forest: "#3bbf57", woodland: "#7cc873",
-      ocean: "#1c2a55", unknown: "#808080"
+      ocean: "#2e6f9e", unknown: "#808080"
     };
     const TAXA_COLORS = {
       Aves: "#3b82f6", Plantae: "#22c55e", Insecta: "#f59e0b", Fungi: "#a855f7",
@@ -14419,7 +14421,7 @@ function renderAppHtml() {
     function taxaColor(t) { return TAXA_COLORS[t] || TAXA_COLORS.unknown; }
 
     function renderMapLegend() {
-      const order = ["forest", "woodland", "grassland", "shrubland", "wetland", "freshwater", "agricultural", "urban", "desert", "tundra", "polar"];
+      const order = ["forest", "woodland", "grassland", "shrubland", "wetland", "freshwater", "ocean", "agricultural", "urban", "desert", "tundra", "polar"];
       let html = "";
       for (let i = 0; i < order.length; i += 1) {
         html += '<span class="map-legend-row"><span class="map-legend-sw" style="background:' + biomeColor(order[i]) + '"></span>' + order[i] + "</span>";
@@ -14661,7 +14663,9 @@ function renderAppHtml() {
         const color = state.ownerColors[claim.did] || "#888";
         const poly = L.polygon(claim.boundary, {
           fillColor: color,
-          fillOpacity: claim.mine ? 0.6 : 0.42,
+          // Near-opaque so the owner color is exact, not tinted by the biome
+          // hex underneath (same owner -> same color regardless of habitat).
+          fillOpacity: 0.95,
           color: claim.mine ? "#ffffff" : color,
           weight: claim.mine ? 2 : 1
         });

@@ -125,6 +125,20 @@
   (and **Re-garrison** for defended tiles). Verified: exclusivity check + expiry sweep SQL,
   client clean.
 
+**Future — hierarchical / province ownership (not built):** when a player holds **every**
+res5 tile that composes a parent hex (res3, then res2), they're granted ownership of that
+larger "province" hex — a prestige tier that the LOD map can show when zoomed out (your
+color filling a whole region). H3 makes the check cheap: `cellToParent(child, parentRes)`
+maps a res5 tile to its res3/res2 parent, and `cellToChildren(parent, 5)` (or a stored
+count) tells you how many children a parent has; on each claim/capture, check whether the
+owner now holds all children of the affected parent and, if so, flip the province to them
+(and revoke if a child is later lost). Pairs naturally with the zoomed-out claims view.
+
+**Future — coastal/marine tiles:** the ring of ocean res5 tiles adjacent to land
+(~24.6k cells, `scripts/make_coastal_ocean.mjs`) is now claimable so high-seas/marine
+observations count; ocean currently maps to **neutral** terrain (no native buff) — a marine
+move-type favorite set could be added later.
+
 **Live battles:** recorded separately in `docs/live-battle-infra.md` (Durable-Object
 architecture; async territory stays the spine, live is the synchronous PvP pillar + an
 optional "defend live" layer on contests).
