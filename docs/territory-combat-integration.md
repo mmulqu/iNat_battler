@@ -139,6 +139,26 @@ owner now holds all children of the affected parent and, if so, flip the provinc
 observations count; ocean currently maps to **neutral** terrain (no native buff) — a marine
 move-type favorite set could be added later.
 
+**Biome basemap via PMTiles (2026-06-15):** the world→regional biome view is now a single
+**PMTiles** vector archive in R2, range-read client-side and rendered with
+**protomaps-leaflet** (GPU/canvas), styled by the `biome` property — far faster than the old
+per-pan API + Leaflet polygons, and it offloads D1 entirely for zoomed-out views.
+- **Pipeline:** `scripts/make_biome_geojson.mjs` (H3 hexes → GeoJSON) → `scripts/build_pmtiles.py`
+  (GDAL/`osgeo` MVT tiling per resolution: res2 z0–4, res3 z5–7 → merge → `pmtiles convert`)
+  → `wrangler r2 object put …/tiles/biomes.pmtiles`. Built in the ESRI arcgis conda env
+  (GDAL 3.7 + `pmtiles`). `scripts/make_res2_biomes.mjs` + `make_coastal_ocean.mjs` feed it.
+- **Serving:** `GET /tiles/biomes.pmtiles` is a thin R2 **Range** proxy (`servePmtiles`); the
+  client's pmtiles.js does the range reads. Public + cacheable.
+- **Hybrid LOD:** PMTiles covers **z<8** (capped at data-zoom 7). The **local res5 grid**
+  (claimable, ownership-aware) is still drawn from `/api/territory/tiles` at **z≥8**
+  (viewport-bounded, fast — never the bottleneck). Clicking the basemap calls
+  `/api/territory/cell` (lat/lng → res5 H3) so claiming works at any zoom without vector
+  interactivity.
+- **Note:** global **res5** in PMTiles is intentionally *not* built — GDAL's MVT driver is too
+  slow for 548k features (10+ min, no finish). If desired later, build res5 z8–11 with
+  **tippecanoe** (per-feature `tippecanoe.minzoom`) — `scripts/build_pmtiles.py --res5` has the
+  GDAL path stubbed but it's impractical without tippecanoe.
+
 **Live battles:** recorded separately in `docs/live-battle-infra.md` (Durable-Object
 architecture; async territory stays the spine, live is the synchronous PvP pillar + an
 optional "defend live" layer on contests).

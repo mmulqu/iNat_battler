@@ -9,3 +9,7 @@ dist/
 *.log
 .playwright-mcp/
 missing_sprite*
+# PMTiles build artifacts (the .pmtiles lives in R2, not git)
+scripts/*.geojsonl
+scripts/*.mbtiles
+scripts/*.pmtiles

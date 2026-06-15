@@ -382,6 +382,15 @@ async function routeRequest(request, env, ctx) {
     return proxyAvatar(url.searchParams.get("url") || "");
   }
 
+  if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/tiles/biomes.pmtiles") {
+    return servePmtiles(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/territory/cell") {
+    await requireSession(request, env);
+    return jsonResponse(await getTerritoryCell(env, url));
+  }
+
   if (request.method === "GET" && url.pathname === "/api/territory/claims") {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryClaims(env, session, url));
@@ -7458,6 +7467,48 @@ async function serveAsset(request, env) {
   return new Response(request.method === "HEAD" ? null : object.body, { headers });
 }
 
+// Serve the biome PMTiles archive from R2 with HTTP Range support, so the
+// client's pmtiles.js can range-read tiles directly (no per-tile worker work).
+const BIOMES_PMTILES_KEY = "tiles/biomes.pmtiles";
+async function servePmtiles(request, env) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return jsonResponse({ error: "Method not allowed" }, 405);
+  }
+  const rangeHeader = request.headers.get("range");
+  const object = rangeHeader
+    ? await env.ASSETS.get(BIOMES_PMTILES_KEY, { range: request.headers })
+    : await env.ASSETS.get(BIOMES_PMTILES_KEY);
+  if (!object) return new Response("Not found", { status: 404 });
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("content-type", "application/octet-stream");
+  headers.set("accept-ranges", "bytes");
+  headers.set("etag", object.httpEtag);
+  headers.set("cache-control", "public, max-age=86400");
+
+  if (rangeHeader && object.range) {
+    const offset = object.range.offset ?? 0;
+    const length = object.range.length ?? (object.size - offset);
+    headers.set("content-range", "bytes " + offset + "-" + (offset + length - 1) + "/" + object.size);
+    headers.set("content-length", String(length));
+    return new Response(request.method === "HEAD" ? null : object.body, { status: 206, headers });
+  }
+  headers.set("content-length", String(object.size));
+  return new Response(request.method === "HEAD" ? null : object.body, { headers });
+}
+
+// Map a click (lat/lng) to its claimable res5 H3 cell + biome — lets the PMTiles
+// biome basemap stay display-only while clicks still resolve to a tile.
+async function getTerritoryCell(env, url) {
+  const lat = Number(url.searchParams.get("lat"));
+  const lng = Number(url.searchParams.get("lng"));
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw httpError("lat/lng required", 400);
+  const h3 = latLngToCell(lat, lng, TERRITORY_H3_RESOLUTION);
+  const biome = await tileBiomeFor(env, h3);
+  return { h3, biome };
+}
+
 async function getOrCreatePromptSpec(env, taxonId) {
   const existing = await env.DB.prepare(`
     SELECT prompt_json
@@ -8318,6 +8369,7 @@ function renderAppHtml() {
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon-180.png">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
+  <script src="https://unpkg.com/protomaps-leaflet@4.0.1/dist/protomaps-leaflet.js" crossorigin="" defer></script>
   <title>iNat Battler</title>
   <script>
     if ("serviceWorker" in navigator) {
@@ -14449,6 +14501,31 @@ function renderAppHtml() {
         subdomains: "abcd",
         maxZoom: 19
       }).addTo(map);
+
+      // Biome basemap: vector hexes from a single PMTiles archive (range-read
+      // client-side), styled by biome — LOD/global handled by the tile pyramid.
+      if (typeof protomapsL !== "undefined") {
+        try {
+          state.biomeLayer = protomapsL.leafletLayer({
+            url: "/tiles/biomes.pmtiles",
+            // PMTiles (res2/res3) paints the fast world→regional view; the local
+            // res5 grid (API, claimable) takes over at z>=8, so cap this at z7.
+            maxDataZoom: 7,
+            paintRules: [{
+              dataLayer: "biomes",
+              minzoom: 0,
+              maxzoom: 7,
+              symbolizer: new protomapsL.PolygonSymbolizer({
+                fill: (z, f) => biomeColor(f.props.biome),
+                opacity: 0.5
+              })
+            }],
+            backgroundColor: "rgba(0,0,0,0)"
+          });
+          state.biomeLayer.addTo(map);
+        } catch (error) { /* fall back to no biome layer */ }
+      }
+
       map.setView([20, 0], 2);
       renderMapLegend();
 
@@ -14456,6 +14533,18 @@ function renderAppHtml() {
       map.on("moveend", () => {
         if (debounce) clearTimeout(debounce);
         debounce = setTimeout(loadMapData, 350);
+      });
+
+      // Click the biome basemap -> resolve the res5 cell -> open the tile panel.
+      map.on("click", async (event) => {
+        if (state.map.getZoom() < 8) {
+          els.mapStatusLabel.textContent = "Zoom in to claim a tile.";
+          return;
+        }
+        try {
+          const res = await apiFetch("/api/territory/cell?lat=" + event.latlng.lat + "&lng=" + event.latlng.lng);
+          if (res && res.h3) openTilePanel(res.h3);
+        } catch (error) { /* ignore */ }
       });
 
       setTimeout(() => {
@@ -14491,23 +14580,22 @@ function renderAppHtml() {
       const token = (mapLoadToken += 1);
       const b = state.map.getBounds();
       const zoom = Math.round(state.map.getZoom());
-      const qs = "n=" + b.getNorth() + "&s=" + b.getSouth() + "&e=" + b.getEast() + "&w=" + b.getWest() + "&zoom=" + zoom;
+      const qs = "n=" + b.getNorth() + "&s=" + b.getSouth() + "&e=" + b.getEast() + "&w=" + b.getWest();
       const claims = state.mapMode === "claims";
 
-      // Biome hexes load at every zoom (level-of-detail picks the resolution).
-      try {
-        const tres = await apiFetch("/api/territory/tiles?" + qs);
-        if (token !== mapLoadToken) return;
-        if (tres && tres.tooMany) {
-          state.mapTileLayer.clearLayers();
-          els.mapStatusLabel.textContent = "Zoom in to load biomes.";
-        } else {
-          drawTiles((tres && tres.tiles) || [], Number(tres && tres.resolution) || 5, claims);
-        }
-      } catch (error) { /* ignore */ }
+      // World→regional biomes come from the PMTiles basemap (z<8). At local zoom
+      // the res5 grid (claimable, ownership-aware) is drawn from the API.
+      if (zoom >= 8) {
+        try {
+          const tres = await apiFetch("/api/territory/tiles?" + qs + "&zoom=" + zoom);
+          if (token !== mapLoadToken) return;
+          drawTiles((tres && tres.tiles) || [], 5, claims);
+        } catch (error) { /* ignore */ }
+      } else {
+        state.mapTileLayer.clearLayers();
+      }
 
       if (claims) {
-        // Owner-colored claims + avatar clusters overlaid on the biome grid.
         state.mapObsLayer.clearLayers();
         try {
           const cres = await apiFetch("/api/territory/claims?" + qs);
@@ -14515,7 +14603,6 @@ function renderAppHtml() {
           await drawClaims((cres && cres.claims) || []);
         } catch (error) { /* ignore */ }
       } else {
-        // Biomes mode: your observation markers.
         state.mapClaimLayer.clearLayers();
         state.mapAvatarLayer.clearLayers();
         try {
