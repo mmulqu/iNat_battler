@@ -1,9 +1,19 @@
-"""Build biomes.pmtiles from per-resolution biome GeoJSON.
+"""Build biomes.pmtiles from per-resolution biome GeoJSON, with tqdm progress.
 
-Run with the ESRI/arcgis python (has osgeo GDAL 3.7 + pmtiles):
-  <esri-env>\python.exe scripts/build_pmtiles.py [--res5]
+Run with the ESRI/arcgis python (has osgeo GDAL 3.7 + pmtiles + tqdm):
+  <esri-env>\\python.exe scripts/build_pmtiles.py            # res2+res3 (fast)
+  <esri-env>\\python.exe scripts/build_pmtiles.py --res5     # + finest res5 (slow)
 
-res2 -> tile z0-4, res3 -> z5-7, res5 -> z8-13 (one MVT layer "biomes").
+Zoom bands -> one MVT layer "biomes":  res2 z0-4, res3 z5-7, res5 z8-11.
+
+Prerequisites (generate the GeoJSON first):
+  node scripts/make_coarse_from_res5.mjs     # writes biome_res2/res3.geojsonl
+  node scripts/make_biome_geojson.mjs 5      # writes biome_res5.geojsonl (slow, 5GB stream)
+
+GDAL's VectorTranslate reports progress per source feature, so the tqdm bar
+reflects how far through the ~548k res5 hexes it is. The res5 tiling is slow
+(GDAL's MVT driver isn't built for this volume) but resumable-by-rerun and the
+bar shows it's alive. If it's too slow, tippecanoe is the faster alternative.
 """
 import os
 import sys
@@ -11,6 +21,7 @@ import json
 import sqlite3
 import subprocess
 from osgeo import gdal
+from tqdm import tqdm
 
 gdal.UseExceptions()
 
@@ -19,22 +30,49 @@ LAYERS = [
     ("scripts/biome_res3.geojsonl", 5, 7),
 ]
 if "--res5" in sys.argv:
-    LAYERS.append(("scripts/biome_res5.geojsonl", 8, 11))  # z11 fully resolves ~5km hexes; client overzooms past
+    LAYERS.append(("scripts/biome_res5.geojsonl", 8, 11))  # finest claimable scale
+
+for src, _, _ in LAYERS:
+    if not os.path.exists(src):
+        raise SystemExit(f"missing {src} — generate the GeoJSON first (see this file's docstring)")
+
+
+def gdal_progress_cb(bar):
+    """GDAL progress callback -> advance a tqdm bar (scaled to 1000)."""
+    last = [0]
+
+    def cb(complete, message, user_data):
+        n = int(complete * 1000)
+        if n > last[0]:
+            bar.update(n - last[0])
+            last[0] = n
+        return 1  # non-zero keeps GDAL going
+
+    return cb
+
 
 tmp = []
 for src, minz, maxz in LAYERS:
     out = src.replace(".geojsonl", ".mbtiles")
     if os.path.exists(out):
         os.remove(out)
-    print(f"tiling {src} z{minz}-{maxz} -> {out}")
-    ds = gdal.VectorTranslate(out, src, options=gdal.VectorTranslateOptions(
-        format="MBTiles",
-        layerName="biomes",
-        datasetCreationOptions=[f"MINZOOM={minz}", f"MAXZOOM={maxz}"],
-    ))
-    ds = None  # flush + close so the file isn't locked
+    desc = f"{os.path.basename(src):28s} z{minz}-{maxz}"
+    with tqdm(total=1000, desc=desc, bar_format="{l_bar}{bar}| {percentage:3.0f}% [{elapsed}<{remaining}]") as bar:
+        ds = gdal.VectorTranslate(
+            out, src,
+            options=gdal.VectorTranslateOptions(
+                format="MBTiles",
+                layerName="biomes",
+                datasetCreationOptions=[f"MINZOOM={minz}", f"MAXZOOM={maxz}"],
+            ),
+            callback=gdal_progress_cb(bar),
+        )
+        ds = None  # flush + close so the file isn't locked
+        bar.n = 1000
+        bar.refresh()
     tmp.append(out)
 
+# Merge the per-band MBTiles (zoom ranges don't overlap) into one.
 merged = "scripts/biomes.mbtiles"
 if os.path.exists(merged):
     os.remove(merged)
@@ -43,7 +81,7 @@ cur = con.cursor()
 cur.execute("CREATE TABLE tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)")
 cur.execute("CREATE UNIQUE INDEX tile_index ON tiles(zoom_level, tile_column, tile_row)")
 cur.execute("CREATE TABLE metadata (name TEXT, value TEXT)")
-for t in tmp:
+for t in tqdm(tmp, desc="merging bands", bar_format="{l_bar}{bar}| {n}/{total}"):
     cur.execute("ATTACH DATABASE ? AS s", (t,))
     cur.execute("INSERT OR REPLACE INTO tiles SELECT zoom_level, tile_column, tile_row, tile_data FROM s.tiles")
     con.commit()
@@ -72,7 +110,9 @@ out_pmtiles = "scripts/biomes.pmtiles"
 if os.path.exists(out_pmtiles):
     os.remove(out_pmtiles)
 convert = os.path.join(os.path.dirname(sys.executable), "Scripts", "pmtiles-convert")
+print("converting to pmtiles…")
 subprocess.run([sys.executable, convert, merged, out_pmtiles], check=False)  # exits 255 on a notice msg even on success
 if not os.path.exists(out_pmtiles):
     raise SystemExit("pmtiles-convert did not produce " + out_pmtiles)
-print(f"wrote {out_pmtiles} ({os.path.getsize(out_pmtiles)} bytes)")
+print(f"wrote {out_pmtiles} ({os.path.getsize(out_pmtiles) / 1_048_576:.1f} MB)")
+print("next: wrangler r2 object put inat-battler-assets/tiles/biomes.pmtiles --file=scripts/biomes.pmtiles --remote, then bump ?v= on the client URL")

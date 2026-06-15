@@ -158,10 +158,30 @@ per-pan API + Leaflet polygons, and it offloads D1 entirely for zoomed-out views
   (viewport-bounded, fast — never the bottleneck). Clicking the basemap calls
   `/api/territory/cell` (lat/lng → res5 H3) so claiming works at any zoom without vector
   interactivity.
-- **Note:** global **res5** in PMTiles is intentionally *not* built — GDAL's MVT driver is too
-  slow for 548k features (10+ min, no finish). If desired later, build res5 z8–11 with
-  **tippecanoe** (per-feature `tippecanoe.minzoom`) — `scripts/build_pmtiles.py --res5` has the
-  GDAL path stubbed but it's impractical without tippecanoe.
+### FUTURE WORK — ship the finest (res5) biome tiles in the PMTiles
+
+Today the PMTiles covers **z<8** (res2/res3) and the local **res5 grid comes from the API**.
+Folding res5 into the PMTiles makes the *entire* biome basemap static/GPU-rendered (drop the
+res5 API render for biomes) and lets you zoom in to crisp hexes anywhere offline. The build is
+prepared with progress tracking; **run it on its own when you have time** (it's slow):
+
+1. **Generate the res5 GeoJSON** (streams the 5 GB res5 JSONL, ~minutes):
+   `node scripts/make_biome_geojson.mjs 5`  → `scripts/biome_res5.geojsonl` (~548k features).
+2. **Build the full pyramid with tqdm progress** (res2 z0-4, res3 z5-7, **res5 z8-11**):
+   `<esri-env>\python.exe scripts/build_pmtiles.py --res5`
+   — `build_pmtiles.py` wires GDAL's `VectorTranslate` progress callback to a **tqdm** bar per
+   layer (the res5 bar tracks the 548k-feature read; the bar's elapsed timer shows it's alive
+   through the slow tiling phase). GDAL's MVT driver is slow at this volume but it does finish;
+   if it's intolerable, **tippecanoe** (per-feature `tippecanoe.minzoom`) is the faster tool.
+3. **Upload + bust cache:** `wrangler r2 object put inat-battler-assets/tiles/biomes.pmtiles
+   --file=scripts/biomes.pmtiles --remote` then bump the client URL `?v=` (currently `?v=2`).
+4. **Flip the client to PMTiles-only biomes:** raise the biome layer `maxDataZoom` 7→11 and the
+   paint rule `maxzoom` 7→11, and drop the `zoom>=8` `drawTiles` biome render in `loadMapData`
+   (keep claims/obs overlays + the click→`/api/territory/cell` claim path). Then `/api/territory/tiles`
+   can be retired.
+
+**Note:** the res5 layer is large (~hundreds of MB / ~200k+ tiles) — fine for R2 + range reads
+(client fetches only what it views), trivial R2 storage cost.
 
 **Live battles:** recorded separately in `docs/live-battle-infra.md` (Durable-Object
 architecture; async territory stays the spine, live is the synchronous PvP pillar + an
