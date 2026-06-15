@@ -14507,7 +14507,8 @@ function renderAppHtml() {
       if (typeof protomapsL !== "undefined") {
         try {
           state.biomeLayer = protomapsL.leafletLayer({
-            url: "/tiles/biomes.pmtiles",
+            // ?v bumps when the tileset is rebuilt, to bust browser/edge cache.
+            url: "/tiles/biomes.pmtiles?v=2",
             // PMTiles (res2/res3) paints the fast world→regional view; the local
             // res5 grid (API, claimable) takes over at z>=8, so cap this at z7.
             maxDataZoom: 7,

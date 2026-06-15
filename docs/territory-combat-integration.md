@@ -143,6 +143,10 @@ move-type favorite set could be added later.
 **PMTiles** vector archive in R2, range-read client-side and rendered with
 **protomaps-leaflet** (GPU/canvas), styled by the `biome` property — far faster than the old
 per-pan API + Leaflet polygons, and it offloads D1 entirely for zoomed-out views.
+- **Coarse hexes aggregate from res5 LAND** (`scripts/make_coarse_from_res5.mjs`): a res2/res3
+  hex gets the majority *land* biome among its land children, so any hex touching land appears
+  — recovers coastlines/islands/peninsulas (Italy, the Caribbean, Florida) that majority-of-
+  *area* aggregation drowned as ocean. Bump `?v=` on the client PMTiles URL when rebuilding.
 - **Pipeline:** `scripts/make_biome_geojson.mjs` (H3 hexes → GeoJSON) → `scripts/build_pmtiles.py`
   (GDAL/`osgeo` MVT tiling per resolution: res2 z0–4, res3 z5–7 → merge → `pmtiles convert`)
   → `wrangler r2 object put …/tiles/biomes.pmtiles`. Built in the ESRI arcgis conda env
