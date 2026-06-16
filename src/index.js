@@ -360,12 +360,25 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "POST" && url.pathname === "/api/training/sync") {
     const session = await requireSession(request, env);
-    return jsonResponse(await syncTrainingData(env, session));
+    const payload = await readJson(request);
+    const rows = Array.isArray(payload?.speciesCounts) ? payload.speciesCounts.slice(0, 12000) : null;
+    return jsonResponse(await syncTrainingData(env, session, rows));
   }
 
   if (request.method === "POST" && url.pathname === "/api/territory/sync") {
     const session = await requireSession(request, env);
     return jsonResponse(await syncTerritoryObservations(env, session));
+  }
+
+  // Browser-fetch path: the user's own browser pulls their observations from
+  // iNaturalist (so the iNat rate limit is per-user, not on the Worker's shared
+  // egress) and POSTs the raw rows here just to be persisted. Capped to bound
+  // the D1 write budget.
+  if (request.method === "POST" && url.pathname === "/api/territory/ingest") {
+    const session = await requireSession(request, env);
+    const payload = await readJson(request);
+    const rows = Array.isArray(payload?.observations) ? payload.observations.slice(0, 3000) : [];
+    return jsonResponse(await ingestTerritoryObservations(env, session, rows));
   }
 
   if (request.method === "GET" && url.pathname === "/api/territory/tiles") {
@@ -469,8 +482,15 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/import") {
+    // Locked to the caller's own verified iNaturalist account — a user can only
+    // import the profile they proved they own (see confirmInatLink), never an
+    // arbitrary login. `speciesCounts` (optional) are rows the user's browser
+    // already fetched from iNat so the Worker skips its own per-user call.
+    const session = await requireSession(request, env);
+    if (!session.inat_login) throw httpError("Link your iNaturalist account first", 400);
     const payload = await readJson(request);
-    const result = await importUserByLogin(env, String(payload.inatLogin ?? payload.login ?? ""));
+    const rows = Array.isArray(payload?.speciesCounts) ? payload.speciesCounts.slice(0, 12000) : null;
+    const result = await importUserByLogin(env, session.inat_login, rows);
     return jsonResponse(result);
   }
 
@@ -754,7 +774,11 @@ async function routeRequest(request, env, ctx) {
   return jsonResponse({ error: "Not found" }, 404);
 }
 
-async function importUserByLogin(env, rawLogin) {
+// `providedRows` (optional) are species_counts rows the user's browser already
+// fetched from iNaturalist (see POST /api/import), so the Worker skips its own
+// iNat call. When absent, the Worker fetches itself (the one-time auto-import
+// after account linking, and the rate-limit fallback, both still use this).
+async function importUserByLogin(env, rawLogin, providedRows = null) {
   const inatLogin = normalizeInatLogin(rawLogin);
   const now = new Date().toISOString();
   const userId = `inat:${inatLogin.toLowerCase()}`;
@@ -770,6 +794,9 @@ async function importUserByLogin(env, rawLogin) {
   let speciesRows;
   let importWarning = null;
 
+  if (Array.isArray(providedRows)) {
+    speciesRows = providedRows;
+  } else {
   try {
     speciesRows = await fetchSpeciesCounts(env, inatLogin);
   } catch (error) {
@@ -789,6 +816,7 @@ async function importUserByLogin(env, rawLogin) {
       rateLimited: true,
       warning: "iNaturalist rate-limited the refresh, so the existing roster was loaded from D1."
     };
+  }
   }
 
   // Batched so a full Research Grade roster (thousands of species) stays
@@ -5681,9 +5709,57 @@ async function fetchUserObservationsGeo(env, inatLogin) {
   return rows;
 }
 
+function emptyTerritorySyncSummary() {
+  return {
+    scanned: 0,
+    recorded: 0,
+    skippedNoGeo: 0,
+    skippedObscured: 0,
+    distinctTiles: 0,
+    resolution: TERRITORY_H3_RESOLUTION,
+    warning: null
+  };
+}
+
+// Server-side sync path: the Worker fetches the user's observations from
+// iNaturalist and ingests them. This is the FALLBACK — the preferred path is
+// the browser fetching its own observations (see /api/territory/ingest), so the
+// iNat rate limit falls on each user's IP instead of funneling every user
+// through the Worker's single shared egress.
 async function syncTerritoryObservations(env, session) {
+  let rows;
+  try {
+    rows = await fetchUserObservationsGeo(env, session.inat_login);
+  } catch (error) {
+    const summary = emptyTerritorySyncSummary();
+    if (error?.code === "INAT_RATE_LIMITED") {
+      summary.warning = "iNaturalist is rate-limiting observation sync; try again shortly";
+    } else {
+      summary.warning = error instanceof Error ? error.message : "Observation fetch failed";
+    }
+    return summary;
+  }
+  return ingestTerritoryObservations(env, session, rows);
+}
+
+// Process + persist raw iNaturalist v2 observation objects into territory tiles.
+// `rows` come from either the Worker fetch (syncTerritoryObservations) or the
+// user's own browser (POST /api/territory/ingest).
+//
+// TRUST NOTE: the account's iNat login IS verified — the user proved control of
+// it via a one-time code in their iNaturalist profile bio, bound to their
+// Bluesky DID (see confirmInatLink). What this browser-fetch path does NOT prove
+// is that these POSTed rows are that user's real iNat observations: unlike the
+// Worker fetch, the payload is client-supplied, so a technical user could
+// fabricate observations (fake taxon/coords) to seed or garrison tiles they
+// never visited. If tile integrity ever needs to be tamper-resistant, re-fetch
+// the rows (or a sample) server-side here and reject mismatches.
+async function ingestTerritoryObservations(env, session, rows) {
   const userId = requireLinkedUserId(session);
   const now = new Date().toISOString();
+  const summary = emptyTerritorySyncSummary();
+
+  if (!Array.isArray(rows)) return summary;
 
   // tile_observations references users(id); make sure the row exists even if the
   // player hasn't run a roster import yet.
@@ -5700,33 +5776,12 @@ async function syncTerritoryObservations(env, session) {
     now
   ).run();
 
-  const summary = {
-    scanned: 0,
-    recorded: 0,
-    skippedNoGeo: 0,
-    skippedObscured: 0,
-    distinctTiles: 0,
-    resolution: TERRITORY_H3_RESOLUTION,
-    warning: null
-  };
-
-  // Per-user sync cooldown: each sync can write up to ~2000 rows, so bound how
-  // often a user can trigger one (protects the D1 write budget from spam).
+  // Per-user write cooldown: each sync can write up to ~2000 rows, so bound how
+  // often a user can trigger one (protects the D1 write budget from spam),
+  // regardless of whether the fetch happened on the Worker or in the browser.
   const syncCooldownKey = "territory:sync:" + userId + ":cooldown";
   if (env.CACHE && (await env.CACHE.get(syncCooldownKey))) {
     summary.warning = "Recently synced — your map is up to date. Try again in a few minutes.";
-    return summary;
-  }
-
-  let rows;
-  try {
-    rows = await fetchUserObservationsGeo(env, session.inat_login);
-  } catch (error) {
-    if (error?.code === "INAT_RATE_LIMITED") {
-      summary.warning = "iNaturalist is rate-limiting observation sync; try again shortly";
-    } else {
-      summary.warning = error instanceof Error ? error.message : "Observation fetch failed";
-    }
     return summary;
   }
 
@@ -5735,6 +5790,11 @@ async function syncTerritoryObservations(env, session) {
 
   for (const obs of rows) {
     summary.scanned += 1;
+    const obsId = Number(obs?.id);
+    if (!Number.isFinite(obsId)) {
+      summary.skippedNoGeo += 1;
+      continue;
+    }
     if (obsIsObscured(obs)) {
       summary.skippedObscured += 1;
       continue;
@@ -5769,7 +5829,7 @@ async function syncTerritoryObservations(env, session) {
         quality_grade = excluded.quality_grade,
         observed_at = excluded.observed_at
     `).bind(
-      Number(obs.id),
+      obsId,
       userId,
       coords.lat,
       coords.lng,
@@ -6511,7 +6571,9 @@ async function applyTrainingRosterFallback(env, userId) {
   return Number(row?.count ?? 0);
 }
 
-async function syncTrainingData(env, session) {
+// `providedRows` (optional) are RG species_counts rows fetched in the user's
+// browser (see POST /api/training/sync), so the Worker skips its own iNat call.
+async function syncTrainingData(env, session, providedRows = null) {
   const userId = requireLinkedUserId(session);
   const now = new Date().toISOString();
   const summary = {
@@ -6526,7 +6588,9 @@ async function syncTrainingData(env, session) {
 
   // 1. Research Grade counts per species, with roster-count fallback during iNat rate limits.
   try {
-    const rgRows = await fetchRgSpeciesCounts(env, session.inat_login);
+    const rgRows = Array.isArray(providedRows)
+      ? providedRows
+      : await fetchRgSpeciesCounts(env, session.inat_login);
     await env.DB.prepare(`
       UPDATE user_taxa
       SET rg_obs_count = 0,
@@ -12181,7 +12245,7 @@ function renderAppHtml() {
         </div>
       </div>
       <form class="login" id="loginForm">
-        <input id="inatLogin" name="inatLogin" autocomplete="username" placeholder="iNaturalist username" maxlength="64" required>
+        <input id="inatLogin" name="inatLogin" autocomplete="username" placeholder="Link iNaturalist to import" maxlength="64" readonly title="Imports your linked iNaturalist account">
         <button class="primary" id="importButton" type="submit">Import</button>
       </form>
     </header>
@@ -12381,7 +12445,7 @@ function renderAppHtml() {
           </div>
           <div class="type-chips" id="rosterTypeChips" aria-label="Filter by taxon group"></div>
           <div class="grid" id="rosterGrid"></div>
-          <div class="empty" id="emptyState">Import a public iNaturalist roster.</div>
+          <div class="empty" id="emptyState">Link your iNaturalist account, then import your roster.</div>
           <div class="roster-pagination" id="rosterPagination"></div>
         </section>
         <section class="view-panel" id="battleView" hidden>
@@ -12848,7 +12912,9 @@ function renderAppHtml() {
 
     els.form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      await importRoster(els.input.value);
+      // Always imports your OWN linked profile; the typed field is ignored (the
+      // server derives the login from your verified session either way).
+      await importRoster();
     });
 
     els.homeTabButton.addEventListener("click", () => switchView("home"));
@@ -13461,7 +13527,45 @@ function renderAppHtml() {
     hydrateGlobalSeedStatus();
     initBlueskySession();
 
-    async function importRoster(inatLogin) {
+    // iNaturalist v2 species_counts fields the roster/training ingest needs.
+    // Mirrors the server INAT_SPECIES_COUNT_FIELDS.
+    var INAT_SPECIES_COUNT_FIELDS_CLIENT = "count,taxon.id,taxon.name,taxon.preferred_common_name,taxon.english_common_name,taxon.rank,taxon.iconic_taxon_name,taxon.ancestry,taxon.parent_id,taxon.default_photo.medium_url,taxon.default_photo.square_url,taxon.default_photo.url";
+
+    // Fetch a user's research-grade species counts in their OWN browser (iNat v2
+    // sends CORS headers for GET), so the iNat rate limit lands on each user's IP
+    // instead of the Worker's shared egress. MAX_PAGES mirrors the server
+    // MAX_IMPORT_PAGES (20 in prod) — up to ~10k species; breaks early for most.
+    async function inatBrowserFetchSpeciesCounts(login, onProgress) {
+      const MAX_PAGES = 20;
+      const rows = [];
+      for (let page = 1; page <= MAX_PAGES; page += 1) {
+        if (onProgress) onProgress(page);
+        const params = new URLSearchParams({
+          user_login: login,
+          quality_grade: "research",
+          per_page: "500",
+          page: String(page),
+          fields: INAT_SPECIES_COUNT_FIELDS_CLIENT,
+          ttl: "21600"
+        });
+        const res = await fetch("https://api.inaturalist.org/v2/observations/species_counts?" + params.toString());
+        if (!res.ok) throw new Error("iNaturalist returned " + res.status);
+        const data = await res.json();
+        const pageRows = (data && Array.isArray(data.results)) ? data.results : [];
+        for (let i = 0; i < pageRows.length; i += 1) rows.push(pageRows[i]);
+        if (pageRows.length < 500) break;
+        await new Promise(function (resolve) { setTimeout(resolve, 700); });
+      }
+      return rows;
+    }
+
+    // Import is locked to the signed-in user's OWN linked iNaturalist account.
+    async function importRoster() {
+      const login = (state.me && state.me.inatLogin) || state.inatLogin;
+      if (!login) {
+        setStatus("Link your iNaturalist account first.");
+        return;
+      }
       setBusy(true, "Importing roster");
 
       try {
@@ -13472,10 +13576,22 @@ function renderAppHtml() {
         state.rosterIconic = "";
         state.activeView = "home";
         els.rosterSearchInput.value = "";
+
+        // Preferred: fetch your species in the browser; the Worker just persists
+        // them. Falls back to the Worker fetch on any CORS/network/iNat hiccup.
+        let speciesCounts = null;
+        try {
+          speciesCounts = await inatBrowserFetchSpeciesCounts(login, function (page) {
+            setBusy(true, "Fetching your species from iNaturalist… (page " + page + ")");
+          });
+        } catch (browserErr) {
+          speciesCounts = null;
+        }
+
         const res = await apiFetch("/api/import", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ inatLogin })
+          body: JSON.stringify(speciesCounts ? { speciesCounts: speciesCounts } : {})
         });
 
         state.userId = res.userId;
@@ -13903,7 +14019,21 @@ function renderAppHtml() {
       setStatus("Syncing iNaturalist training data...");
 
       try {
-        const res = await apiFetch("/api/training/sync", { method: "POST" });
+        // Fetch your RG species counts in your browser (per-user rate limit),
+        // then hand them to the Worker; fall back to the Worker fetch on error.
+        let speciesCounts = null;
+        try {
+          speciesCounts = await inatBrowserFetchSpeciesCounts(state.me.inatLogin, function (page) {
+            setStatus("Fetching your Research Grade species from iNaturalist… (page " + page + ")");
+          });
+        } catch (browserErr) {
+          speciesCounts = null;
+        }
+        const res = await apiFetch("/api/training/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(speciesCounts ? { speciesCounts: speciesCounts } : {})
+        });
         let message = "Synced: " + Number(res.rgSpeciesUpdated || 0) + " RG species, " +
           Number(res.taxaResolved || 0) + " taxa classified, " +
           Number(res.masteriesUpdated || 0) + " masteries updated.";
@@ -14880,11 +15010,68 @@ function renderAppHtml() {
       }
     }
 
+    // iNaturalist v2 observation fields the territory ingest needs. Mirrors the
+    // server INAT_OBSERVATION_GEO_FIELDS so browser-fetched rows match.
+    var INAT_OBS_GEO_FIELDS = "id,observed_on,time_observed_at,quality_grade,geoprivacy,taxon_geoprivacy,obscured,location,geojson,taxon.id,taxon.name,taxon.preferred_common_name,taxon.iconic_taxon_name";
+
+    // Fetch the signed-in user's research-grade geo observations straight from
+    // iNaturalist in their OWN browser (iNat v2 sends CORS headers for GET), so
+    // the iNat rate limit lands on each user's IP instead of funneling every
+    // user through the Worker's shared egress. Returns the raw v2 rows.
+    async function inatBrowserFetchObservations(login, onProgress) {
+      const MAX_PAGES = 10;
+      const rows = [];
+      for (let page = 1; page <= MAX_PAGES; page += 1) {
+        if (onProgress) onProgress(page);
+        const params = new URLSearchParams({
+          user_login: login,
+          quality_grade: "research",
+          geo: "true",
+          order_by: "observed_on",
+          per_page: "200",
+          page: String(page),
+          fields: INAT_OBS_GEO_FIELDS,
+          ttl: "21600"
+        });
+        const res = await fetch("https://api.inaturalist.org/v2/observations?" + params.toString());
+        if (!res.ok) throw new Error("iNaturalist returned " + res.status);
+        const data = await res.json();
+        const pageRows = (data && Array.isArray(data.results)) ? data.results : [];
+        for (let i = 0; i < pageRows.length; i += 1) rows.push(pageRows[i]);
+        if (pageRows.length < 200) break;
+        // Be polite between pages (the Worker fallback waits ~1.1s).
+        await new Promise(function (resolve) { setTimeout(resolve, 700); });
+      }
+      return rows;
+    }
+
     async function syncTerritory() {
       els.mapSyncButton.disabled = true;
       els.mapStatusLabel.textContent = "Syncing observations from iNaturalist…";
       try {
-        const res = await apiFetch("/api/territory/sync", { method: "POST" });
+        let res = null;
+        const login = (state.me && state.me.inatLogin) || state.inatLogin;
+        if (login) {
+          // Preferred path: fetch in the user's browser, then hand the rows to
+          // the Worker just to persist them (keeps iNat rate limits per-user).
+          try {
+            const obs = await inatBrowserFetchObservations(login, function (page) {
+              els.mapStatusLabel.textContent = "Fetching your observations from iNaturalist… (page " + page + ")";
+            });
+            els.mapStatusLabel.textContent = "Saving " + obs.length + " observations…";
+            res = await apiFetch("/api/territory/ingest", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ observations: obs })
+            });
+          } catch (browserErr) {
+            // CORS/network/iNat hiccup -> let the Worker fetch instead.
+            res = null;
+          }
+        }
+        if (!res) {
+          res = await apiFetch("/api/territory/sync", { method: "POST" });
+        }
         if (res && res.warning) {
           els.mapStatusLabel.textContent = res.warning;
         } else {
@@ -15774,7 +15961,7 @@ function renderAppHtml() {
       els.emptyState.style.display = state.taxa.length ? "none" : "grid";
       els.emptyState.textContent = hasFilters
         ? "No roster creatures match these filters."
-        : "Import a public iNaturalist roster.";
+        : "Link your iNaturalist account, then import your roster.";
       els.rosterGrid.classList.toggle("sprite-mode", state.rosterMode === "sprites");
       els.rosterModeButton.textContent = state.rosterMode === "sprites" ? "Card View" : "Sprite Grid";
       els.rosterGrid.innerHTML = state.taxa
