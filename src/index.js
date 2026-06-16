@@ -10375,6 +10375,15 @@ function renderAppHtml() {
       margin-bottom: 4%;
     }
 
+    /* Sprites are drawn facing right; mirror the opponent so the two combatants
+       face each other. Uses the standalone scale property so it composes with
+       the lunge/knockback translate and the faint transform without either one
+       clobbering the flip. */
+    .combatant.opponent .combatant-sprite .sheet-sprite,
+    .combatant.opponent .combatant-sprite .dummy-sprite {
+      scale: -1 1;
+    }
+
     /* Movement arcs use the standalone translate property so they can
        run alongside spriteFrames (background-position), hitFlash (filter),
        and faintDrop (transform) without clobbering each other. The lunge
@@ -11058,14 +11067,14 @@ function renderAppHtml() {
       padding: 8px 10px;
     }
 
-    .bench {
+    .battle-actions {
       display: grid;
-      gap: 6px;
+      margin-top: 4px;
     }
 
     .swap-button {
       grid-column: 1 / -1;
-      min-height: 40px;
+      min-height: 44px;
       border-radius: 8px;
       background: var(--teal);
       color: #fff;
@@ -11819,16 +11828,36 @@ function renderAppHtml() {
         font-size: 0.78rem;
       }
 
-      /* Keep both combatants side-by-side (override the 520px single column). */
+      /* Keep both combatants side-by-side (override the 520px single column).
+         Constrain the single row to fill the stage (minmax(0,1fr)) instead of
+         growing to the combatants' content — otherwise the row expands past the
+         height-capped stage and the plates overflow the clip. */
       body.battle-active .battle .battle-stage {
         grid-template-columns: 1fr 1fr;
+        grid-template-rows: minmax(0, 1fr);
         gap: 6px;
         padding: 8px;
         min-height: 0;
       }
 
+      /* The stage is height-capped (flex column) and clips overflow, so the
+         PLATE (HP/mana — the important UI) must never be the clipped element.
+         Stretch each combatant to the stage height and give the plate an
+         auto (content) row while the sprite takes the shrinkable row and
+         absorbs any clipping. */
+      body.battle-active .battle .combatant {
+        align-self: stretch;
+        grid-template-rows: auto minmax(0, 1fr); /* opponent: plate top, sprite below */
+      }
+
+      body.battle-active .battle .combatant.player {
+        margin-top: 0;
+        grid-template-rows: minmax(0, 1fr) auto; /* player: sprite top, plate bottom */
+      }
+
       body.battle-active .battle .combatant-sprite {
         min-height: 0;
+        overflow: hidden;
       }
 
       /* Stack name above role so the name gets full width (no vertical wrap). */
@@ -11863,8 +11892,13 @@ function renderAppHtml() {
         min-height: 38vh;
       }
 
+      body.battle-active .battle .battle-actions,
       body.battle-active .battle .moves {
         flex: 0 0 auto;
+      }
+
+      body.battle-active .battle .battle-actions {
+        margin-top: 0;
       }
 
       body.battle-active .battle .battle-log {
@@ -14510,12 +14544,17 @@ function renderAppHtml() {
             // ?v bumps when the tileset is rebuilt, to bust browser/edge cache.
             url: "/tiles/biomes.pmtiles?v=2",
             // PMTiles (res2/res3) paints the fast world→regional view; the local
-            // res5 grid (API, claimable) takes over at z>=8, so cap this at z7.
+            // res5 grid (API, claimable) takes over at z>=8. Data caps at z7, but
+            // we let it PAINT through z9 (overzoomed) as a fallback: PMTiles lives
+            // in Leaflet's tilePane (below the overlayPane res5 hexes), so when the
+            // res5 grid loads it overlays cleanly, and when a wide z8/z9 viewport
+            // exceeds the res5 cell cap (returns tooMany) the coarse biome still
+            // shows instead of a blank gap between the medium and finest scales.
             maxDataZoom: 7,
             paintRules: [{
               dataLayer: "biomes",
               minzoom: 0,
-              maxzoom: 7,
+              maxzoom: 9,
               symbolizer: new protomapsL.PolygonSymbolizer({
                 fill: (z, f) => biomeColor(f.props.biome),
                 opacity: 0.5
@@ -17923,6 +17962,19 @@ function renderAppHtml() {
         overlay = '<div class="battle-overlay intro"><div class="overlay-title">Battle Start!</div></div>';
       }
 
+      // Swap! lives in an action bar above the moves (not inside the clipped
+      // stage) so it's always reachable, especially on mobile.
+      const swappableCount = battle.status === "active"
+        ? battle.player.creatures.filter((member, index) => index !== battle.player.activeIndex && !member.fainted).length
+        : 0;
+      const swapBar = swappableCount > 0
+        ? '<div class="battle-actions">' +
+            '<button type="button" class="swap-button" data-open-swap' + (state.battleBusy ? " disabled" : "") + '>' +
+              'Swap! <span class="swap-count">' + swappableCount + '</span>' +
+            '</button>' +
+          '</div>'
+        : "";
+
       els.battlePanel.innerHTML =
         '<div class="roster-head">' +
           '<h2>' + battleTitle(battle) + '</h2>' +
@@ -17938,6 +17990,7 @@ function renderAppHtml() {
           renderCombatant(battle.opponent, opponentActive, "opponent") +
           overlay +
         '</div>' +
+        swapBar +
         '<div class="moves">' + moveButtons + '</div>' +
         '<div class="battle-log" id="battleLogPanel">' + recentLog + '</div>' +
         renderSwapModal(battle, playerActive);
@@ -17993,19 +18046,9 @@ function renderAppHtml() {
       const sprite = creature.spriteUrl
         ? renderSheetSprite(creature.spriteUrl, animation + (creature.fainted ? " fainted" : ""))
         : '<div class="dummy-sprite' + (creature.fainted ? " fainted" : "") + '">Dummy</div>';
-      const battleActive = state.battle && state.battle.status === "active";
-      // Player gets a Swap! button; the opponent's team roster is hidden from
-      // the player (no scouting their bench).
-      let benchHtml = "";
-      if (side === "player") {
-        const swappableCount = team.creatures.filter((member, index) => index !== team.activeIndex && !member.fainted).length;
-        if (battleActive && swappableCount > 0) {
-          benchHtml = '<button type="button" class="swap-button" data-open-swap' + (state.battleBusy ? " disabled" : "") + '>' +
-              'Swap! <span class="swap-count">' + swappableCount + '</span>' +
-            '</button>';
-        }
-      }
-
+      // The Swap! button is rendered in the action bar above the moves (see
+      // renderBattle) so it stays visible on mobile — the plate sits inside the
+      // height-clipped battle-stage where a tall plate would hide it.
       const STATUS_SPRITE_KINDS = ["stunned", "marked", "poisoned", "shielded", "rallied"];
       const activeStatuses = (creature.statuses || []).slice();
       if (creature.rallied) activeStatuses.push("rallied");
@@ -18051,7 +18094,6 @@ function renderAppHtml() {
               ? '<div class="status-chips">' + statusChips + stageChips + '</div>'
               : "";
           })() +
-          '<div class="bench">' + benchHtml + '</div>' +
         '</div>' +
         '<div class="combatant-sprite" data-sprite-zone="' + side + '">' +
           '<div class="platform"></div>' + sprite +
