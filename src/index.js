@@ -700,6 +700,20 @@ async function routeRequest(request, env, ctx) {
     return jsonResponse(await getSpriteTree(env, { limit, q }));
   }
 
+  // Phase 0 (sprite taxonomic tree): list ancestor taxon IDs referenced by
+  // ready-sprite taxa that are not yet stored as their own taxa rows, so the
+  // backfill can fetch exactly the missing internal nodes (orders/families/...).
+  if (request.method === "GET" && url.pathname === "/api/sprite-tree/dev-missing-ancestors") {
+    return jsonResponse(await getMissingAncestorTaxonIds(env));
+  }
+
+  // Phase 0: bulk-upsert iNat taxon objects (fetched client-side) into taxa.
+  if (request.method === "POST" && url.pathname === "/api/taxa/dev-bulk-upsert") {
+    const payload = await readJson(request);
+    const taxa = Array.isArray(payload.taxa) ? payload.taxa : [];
+    return jsonResponse(await bulkUpsertTaxa(env, taxa));
+  }
+
   if (request.method === "GET" && url.pathname === "/api/recent-sprites") {
     const limit = clampInt(url.searchParams.get("limit"), 1, 200, 80);
     const q = String(url.searchParams.get("q") ?? "");
@@ -4182,6 +4196,70 @@ async function getRecentSprites(env, options = {}) {
     limit,
     q
   };
+}
+
+async function getMissingAncestorTaxonIds(env) {
+  // Ancestry strings of every taxon that has a ready sprite.
+  const rows = await env.DB.prepare(`
+    SELECT DISTINCT t.taxon_id, t.ancestry
+    FROM taxa t
+    WHERE EXISTS (
+      SELECT 1 FROM sprite_assets sa
+      WHERE sa.taxon_id = t.taxon_id
+        AND sa.asset_kind = ?
+        AND sa.asset_version = ?
+        AND sa.status = 'ready'
+    )
+  `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION).all();
+
+  const ancestorIds = new Set();
+  let readyCount = 0;
+  for (const row of rows.results ?? []) {
+    readyCount += 1;
+    for (const id of parseTaxonAncestry(row.ancestry)) ancestorIds.add(id);
+  }
+
+  // Which of those ancestors already exist as their own taxa rows?
+  const present = new Set();
+  const allIds = [...ancestorIds];
+  for (const chunk of chunkArray(allIds, D1_ID_CHUNK_SIZE)) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const found = await env.DB.prepare(
+      `SELECT taxon_id FROM taxa WHERE taxon_id IN (${placeholders})`
+    ).bind(...chunk).all();
+    for (const r of found.results ?? []) present.add(Number(r.taxon_id));
+  }
+
+  const missing = allIds.filter((id) => !present.has(id));
+  return {
+    readySpriteTaxa: readyCount,
+    distinctAncestors: allIds.length,
+    alreadyStored: present.size,
+    missing
+  };
+}
+
+async function bulkUpsertTaxa(env, taxa) {
+  const now = new Date().toISOString();
+  let upserted = 0;
+  let skipped = 0;
+  let statements = [];
+  for (const taxon of taxa) {
+    const id = Number.parseInt(taxon?.id, 10);
+    if (!Number.isFinite(id) || !taxon?.name) {
+      skipped += 1;
+      continue;
+    }
+    statements.push(prepareTaxonUpsert(env, { ...taxon, id }, now));
+    upserted += 1;
+    if (statements.length >= 50) {
+      await env.DB.batch(statements);
+      statements = [];
+    }
+  }
+  if (statements.length > 0) await env.DB.batch(statements);
+  return { upserted, skipped };
 }
 
 function buildSpriteTree(leaves) {
