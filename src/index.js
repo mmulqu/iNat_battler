@@ -4335,6 +4335,7 @@ function buildTaxonomicTree(leaves, ancestorMap) {
       ));
       node.scientificName = info.scientificName;
       node.taxonId = ancestorId;
+      if (info.iconicTaxonName) node.iconicTaxonName = info.iconicTaxonName;
       cursor = node;
     }
     cursor.children.push(leaf);
@@ -9981,112 +9982,206 @@ function renderAppHtml() {
       font-weight: 800;
     }
 
-    .sprite-tree {
+    /* Phase 2 taxonomic navigator: breadcrumb trunk + swipe carousel + gallery */
+    .tree-nav {
+      --accent: var(--teal);
       display: grid;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      overflow: hidden;
-      background: rgba(255, 255, 255, 0.84);
+      gap: 2px;
     }
+    .tree-nav[data-group="animals"] { --accent: #2f6fb0; }
+    .tree-nav[data-group="plants"]  { --accent: #3f9d52; }
+    .tree-nav[data-group="fungi"]   { --accent: #b46b1b; }
+    .tree-nav[data-group="other"]   { --accent: #7a5ea8; }
 
-    .tree-menu-row {
-      --tree-indent: 0px;
-      width: 100%;
-      min-width: 0;
-      border: 0;
-      border-bottom: 1px solid #e5e9e2;
-      padding-left: calc(10px + var(--tree-indent));
-      padding-right: 10px;
-      font: inherit;
-      color: var(--ink);
-    }
-
-    .tree-menu-row:last-child {
-      border-bottom: 0;
-    }
-
-    .tree-menu-branch {
-      display: grid;
-      grid-template-columns: 18px minmax(0, 1fr) auto auto;
-      gap: 8px;
+    .tree-breadcrumb {
+      display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      min-height: 42px;
-      background: #fbfcf9;
-      cursor: pointer;
-      text-align: left;
+      gap: 2px 2px;
+      padding: 2px 0 8px;
     }
 
-    .tree-menu-branch:hover,
-    .tree-menu-branch:focus-visible {
-      background: #eef4f0;
-    }
-
-    .tree-menu-branch[aria-expanded="true"] {
-      background: #edf6f1;
-    }
-
-    .tree-disclosure {
-      color: var(--teal);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    .tree-crumb {
+      border: 0;
+      background: none;
+      font: inherit;
       font-weight: 900;
-      text-align: center;
+      color: var(--accent);
+      padding: 4px 5px;
+      border-radius: 7px;
+      cursor: pointer;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    .tree-branch-name,
-    .tree-leaf-name {
-      min-width: 0;
+    .tree-crumb.current {
+      color: var(--ink);
+      cursor: default;
+    }
+
+    .tree-crumb:not(.current):hover,
+    .tree-crumb:not(.current):focus-visible {
+      background: rgba(4, 124, 120, 0.12);
+    }
+
+    .tree-crumb-sep {
+      color: var(--muted);
+      font-weight: 900;
+    }
+
+    .tree-focus {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 10px;
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+      border-bottom: 2px solid var(--accent);
+    }
+
+    .tree-focus-rank {
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.68rem;
+      font-weight: 900;
+      color: var(--accent);
+    }
+
+    .tree-focus-name {
+      font-size: 1.25rem;
       font-weight: 900;
       overflow-wrap: anywhere;
     }
 
-    .tree-rank,
-    .tree-count,
-    .tree-leaf-meta {
+    .tree-focus-sub {
       color: var(--muted);
-      font-size: 0.8rem;
-      font-weight: 900;
-      white-space: nowrap;
+      font-weight: 800;
+      font-size: 0.82rem;
     }
 
-    .tree-menu-leaf {
+    .tree-carousel {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      scroll-snap-type: x mandatory;
+      -webkit-overflow-scrolling: touch;
+      padding: 4px 2px 14px;
+      scrollbar-width: thin;
+      overscroll-behavior-x: contain;
+    }
+
+    .tree-card {
+      scroll-snap-align: center;
+      flex: 0 0 auto;
+      width: min(62%, 224px);
       display: grid;
-      grid-template-columns: var(--leaf-size, 58px) minmax(0, 1fr) auto;
-      gap: 10px;
-      align-items: center;
-      min-height: 72px;
-      padding-top: 7px;
-      padding-bottom: 7px;
+      gap: 8px;
+      justify-items: center;
+      border: 1px solid var(--line);
+      border-top: 3px solid var(--accent);
+      border-radius: 14px;
+      padding: 12px 12px 14px;
       background: #ffffff;
+      box-shadow: var(--shadow);
+      color: var(--ink);
+      font: inherit;
+      cursor: pointer;
+      text-align: center;
     }
 
-    .tree-menu-leaf:nth-child(even) {
-      background: #fbfcf9;
+    .tree-card:hover,
+    .tree-card:focus-visible {
+      border-color: var(--accent);
+      transform: translateY(-2px);
     }
 
-    .tree-leaf-sprite {
+    .tree-card-art {
+      display: flex;
+      justify-content: center;
+      align-items: flex-end;
+      min-height: 96px;
+      width: 100%;
+    }
+
+    .tree-card-chip {
+      width: 70px;
+      aspect-ratio: 1 / 1;
       display: grid;
       place-items: center;
-      width: var(--leaf-size, 58px);
+    }
+
+    .tree-card-art.stacked .tree-card-chip { margin-left: -22px; }
+    .tree-card-art.stacked .tree-card-chip:first-child { margin-left: 0; }
+    .tree-card-chip .sheet-sprite { width: 100%; }
+    .tree-card-art .placeholder-shape { width: 64px; height: 64px; }
+
+    .tree-card-name {
+      font-weight: 900;
+      overflow-wrap: anywhere;
+      line-height: 1.15;
+    }
+
+    .tree-card-meta {
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-weight: 800;
+    }
+
+    .tree-gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(clamp(96px, var(--leaf-size, 120px), 200px), 1fr));
+      gap: 10px;
+      padding-top: 4px;
+    }
+
+    .tree-medallion {
+      display: grid;
+      gap: 3px;
+      justify-items: center;
+      text-align: center;
+      text-decoration: none;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 8px 6px 9px;
+      background: #ffffff;
+      box-shadow: var(--shadow);
+    }
+
+    .tree-medallion:hover,
+    .tree-medallion:focus-visible {
+      border-color: var(--accent);
+    }
+
+    .tree-medallion-art {
+      width: 100%;
       aspect-ratio: 1 / 1;
-      border-radius: 8px;
+      display: grid;
+      place-items: center;
       background: #eef2eb;
+      border-radius: 10px;
       overflow: hidden;
     }
 
-    .tree-leaf-sprite .sheet-sprite {
-      width: 94%;
+    .tree-medallion-art .sheet-sprite { width: 92%; }
+    .tree-medallion-art .placeholder-shape { width: 60%; height: 60%; }
+
+    .tree-medallion-name {
+      font-weight: 900;
+      font-size: 0.8rem;
+      overflow-wrap: anywhere;
+      line-height: 1.12;
     }
 
-    .tree-leaf-copy {
-      min-width: 0;
-      display: grid;
-      gap: 2px;
-    }
-
-    .tree-notice {
+    .tree-medallion-sci {
       color: var(--muted);
-      font-size: 0.84rem;
-      font-weight: 800;
+      font-size: 0.7rem;
+      overflow-wrap: anywhere;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .tree-card { transition: none; }
     }
 
     .grid {
@@ -11985,10 +12080,6 @@ function renderAppHtml() {
         grid-template-columns: 1fr;
       }
 
-      .tree-menu-branch {
-        grid-template-columns: 18px minmax(0, 1fr) auto;
-      }
-
       .training-split {
         grid-template-columns: 1fr;
       }
@@ -11997,21 +12088,8 @@ function renderAppHtml() {
         max-height: 38vh;
       }
 
-      .tree-rank {
-        display: none;
-      }
-
-      .tree-menu-leaf {
-        grid-template-columns: 52px minmax(0, 1fr);
-      }
-
-      .tree-menu-leaf .manual-result-link {
-        grid-column: 2;
-        justify-self: start;
-      }
-
-      .tree-leaf-sprite {
-        width: 52px;
+      .tree-card {
+        width: min(78%, 220px);
       }
 
       .meta {
@@ -12885,7 +12963,6 @@ function renderAppHtml() {
     const DEV_QUEUE_MORE_LIMIT = 100;
     const DEV_BATCH_SUBMIT_LIMIT = 100;
     const GLOBAL_SEED_BATCH_LIMIT = 200;
-    const TREE_RENDER_ROW_LIMIT = 420;
     const BATCH_SYNC_ITEM_LIMIT = 25;
     const ACTIVE_BATCH_STATUSES = new Set(["submitted", "validating", "in_progress", "finalizing", "cancelling"]);
 
@@ -12913,6 +12990,7 @@ function renderAppHtml() {
       recentGroup: "all",
       recentZoom: Number(localStorage.getItem("inatBattler:recentZoom")) || 150,
       expandedTreeNodes: new Set(),
+      treePath: [],
       selectedTaxa: new Set(),
       flippedTaxa: new Set(),
       batchJobs: [],
@@ -13435,19 +13513,24 @@ function renderAppHtml() {
     });
 
     els.spriteTreePanel.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-tree-toggle]");
-      if (!button) return;
-
-      const key = button.getAttribute("data-tree-key");
-      if (!key) return;
-
-      if (state.expandedTreeNodes.has(key)) {
-        state.expandedTreeNodes.delete(key);
-      } else {
-        state.expandedTreeNodes.add(key);
+      const descend = event.target.closest("[data-tree-descend]");
+      if (descend) {
+        const key = descend.getAttribute("data-tree-descend");
+        if (key) {
+          state.treePath = [...state.treePath, key];
+          renderSpriteTree();
+        }
+        return;
       }
 
-      renderSpriteTree();
+      const crumb = event.target.closest("[data-tree-nav]");
+      if (crumb) {
+        const idx = Number(crumb.getAttribute("data-tree-nav"));
+        if (Number.isFinite(idx)) {
+          state.treePath = state.treePath.slice(0, idx + 1);
+          renderSpriteTree();
+        }
+      }
     });
 
     els.battlePanel.addEventListener("click", async (event) => {
@@ -15398,7 +15481,7 @@ function renderAppHtml() {
         const previousQuery = state.spriteTree?.q || "";
         const res = await apiFetch("/api/sprite-tree?limit=1000&q=" + encodeURIComponent(q));
         state.spriteTree = res;
-        syncTreeExpansion(res, q, previousQuery);
+        syncTreePath(res, q, previousQuery);
         renderSpriteTree();
         if (showStatus) setStatus("Loaded " + Number(res.totalSprites || 0) + " ready sprites in the tree");
       } catch (error) {
@@ -16235,6 +16318,9 @@ function renderAppHtml() {
       '</article>';
     }
 
+    // Phase 2: mobile taxonomic navigator. Vertical = depth (breadcrumb trunk +
+    // drill down), horizontal swipe = sibling clades at the current rank
+    // (scroll-snap carousel). Genus level becomes a gallery of animated sprites.
     function renderSpriteTree() {
       const tree = state.spriteTree;
 
@@ -16251,9 +16337,176 @@ function renderAppHtml() {
         return;
       }
 
+      // Search mode: a flat gallery of every matched species (lineage nav off).
+      if (String(tree.q || "").trim()) {
+        const matched = collectTreeLeaves(tree.roots);
+        els.spriteTreePanel.innerHTML =
+          '<div class="tree-summary">' + treeSummaryText(tree) + '</div>' +
+          (matched.length
+            ? renderTreeGallery(matched)
+            : '<div class="empty">No ready sprites match this search.</div>');
+        return;
+      }
+
+      const node = treeNodeByPath(tree.roots, state.treePath);
+      const group = treeGroupToken(tree.roots, state.treePath);
+      const branches = (node.children || []).filter((c) => !c.leaf);
+      const leaves = (node.children || []).filter((c) => c.leaf);
+
       els.spriteTreePanel.innerHTML =
-        '<div class="tree-summary">' + treeSummaryText(tree) + '</div>' +
-        renderTreeMenu(tree.roots);
+        '<div class="tree-nav" data-group="' + escapeAttr(group) + '">' +
+          renderTreeBreadcrumb(tree.roots, state.treePath) +
+          renderTreeFocusHeader(node) +
+          (branches.length ? renderTreeCarousel(branches) : "") +
+          (leaves.length ? renderTreeGallery(leaves) : "") +
+          (!branches.length && !leaves.length ? '<div class="empty">Nothing here yet.</div>' : "") +
+        '</div>';
+    }
+
+    function syncTreePath(tree, query, previousQuery) {
+      const roots = Array.isArray(tree?.roots) ? tree.roots : [];
+      const root = roots[0];
+      if (!root) { state.treePath = []; return; }
+      if (String(query || "") !== String(previousQuery || "") || !treePathResolves(roots, state.treePath)) {
+        state.treePath = [String(root.key)];
+      }
+    }
+
+    function treePathResolves(roots, path) {
+      if (!Array.isArray(path) || path.length === 0) return false;
+      const root = roots[0];
+      if (!root || String(path[0]) !== String(root.key)) return false;
+      let node = root;
+      for (let i = 1; i < path.length; i += 1) {
+        const next = (node.children || []).find((c) => !c.leaf && String(c.key) === String(path[i]));
+        if (!next) return false;
+        node = next;
+      }
+      return true;
+    }
+
+    function treeNodeByPath(roots, path) {
+      let node = roots[0];
+      for (let i = 1; i < (path || []).length; i += 1) {
+        const next = (node.children || []).find((c) => !c.leaf && String(c.key) === String(path[i]));
+        if (!next) break;
+        node = next;
+      }
+      return node;
+    }
+
+    // Kingdom (path[1]) -> a stable token used for per-group color theming.
+    function treeGroupToken(roots, path) {
+      if (!Array.isArray(path) || path.length < 2) return "life";
+      const kingdom = (roots[0].children || []).find((c) => String(c.key) === String(path[1]));
+      const name = String(kingdom?.name || kingdom?.scientificName || "").toLowerCase();
+      if (name.includes("animal")) return "animals";
+      if (name.includes("plant")) return "plants";
+      if (name.includes("fungi")) return "fungi";
+      return "other";
+    }
+
+    function renderTreeBreadcrumb(roots, path) {
+      const crumbs = [];
+      let node = roots[0];
+      crumbs.push({ name: node.name || "Life", idx: 0 });
+      for (let i = 1; i < path.length; i += 1) {
+        const next = (node.children || []).find((c) => !c.leaf && String(c.key) === String(path[i]));
+        if (!next) break;
+        node = next;
+        crumbs.push({ name: node.name || "Taxon", idx: i });
+      }
+      return '<nav class="tree-breadcrumb" aria-label="Lineage">' +
+        crumbs.map((c, i) => {
+          const last = i === crumbs.length - 1;
+          return '<button type="button" class="tree-crumb' + (last ? " current" : "") + '"' +
+              ' data-tree-nav="' + c.idx + '"' + (last ? ' aria-current="true"' : "") + '>' +
+              escapeHtml(c.name) +
+            '</button>' +
+            (last ? "" : '<span class="tree-crumb-sep" aria-hidden="true">&rsaquo;</span>');
+        }).join("") +
+      '</nav>';
+    }
+
+    function renderTreeFocusHeader(node) {
+      const rank = node.rank && node.rank !== "root" ? node.rank : "life";
+      const branchCount = (node.children || []).filter((c) => !c.leaf).length;
+      const sub = branchCount
+        ? branchCount + " " + childRankPlural(node) + " · " + Number(node.spriteCount || 0) + " sprites"
+        : Number(node.spriteCount || 0) + " sprites";
+      return '<div class="tree-focus">' +
+        '<span class="tree-focus-rank">' + escapeHtml(rank) + '</span>' +
+        '<span class="tree-focus-name">' + escapeHtml(node.name || "Life") + '</span>' +
+        '<span class="tree-focus-sub">' + escapeHtml(sub) + '</span>' +
+      '</div>';
+    }
+
+    function childRankPlural(node) {
+      const child = (node.children || []).find((c) => !c.leaf);
+      const map = {
+        kingdom: "kingdoms", phylum: "phyla", class: "classes",
+        order: "orders", family: "families", genus: "genera"
+      };
+      return map[child?.rank] || "groups";
+    }
+
+    function renderTreeCarousel(branches) {
+      return '<div class="tree-carousel" role="list">' +
+        branches.map(renderTreeCard).join("") +
+      '</div>';
+    }
+
+    function renderTreeCard(branch) {
+      const previews = collectTreeLeaves([branch], 3);
+      const chips = previews.map((leaf, i) =>
+        leaf.sprite?.url
+          ? '<span class="tree-card-chip" style="--i:' + i + '">' + renderSheetSprite(leaf.sprite.url, "anim-idle") + '</span>'
+          : ""
+      ).join("");
+      const art = chips ||
+        '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(branch.iconicTaxonName)) + '"></div>';
+      return '<button type="button" class="tree-card" role="listitem" data-tree-descend="' + escapeAttr(String(branch.key)) + '">' +
+        '<span class="tree-card-art' + (previews.length > 1 ? " stacked" : "") + '">' + art + '</span>' +
+        '<span class="tree-card-name">' + escapeHtml(branch.name || "Taxon") + '</span>' +
+        '<span class="tree-card-meta">' + escapeHtml(branch.rank || "") + ' · ' + Number(branch.spriteCount || 0) + '</span>' +
+      '</button>';
+    }
+
+    function renderTreeGallery(leaves) {
+      return '<div class="tree-gallery" role="list">' +
+        leaves.map(renderTreeMedallion).join("") +
+      '</div>';
+    }
+
+    function renderTreeMedallion(leaf) {
+      const art = leaf.sprite?.url
+        ? renderSheetSprite(leaf.sprite.url, "anim-idle")
+        : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(leaf.iconicTaxonName)) + '"></div>';
+      const title = (leaf.scientificName || "") + " · taxon " + Number(leaf.taxonId || 0);
+      return '<a class="tree-medallion" role="listitem" href="' + escapeAttr(leaf.sprite?.url || "#") + '"' +
+          ' target="_blank" rel="noreferrer" title="' + escapeAttr(title) + '">' +
+        '<span class="tree-medallion-art">' + art + '</span>' +
+        '<span class="tree-medallion-name">' + escapeHtml(leaf.name || leaf.scientificName || "Unnamed") + '</span>' +
+        '<span class="tree-medallion-sci"><em>' + escapeHtml(leaf.scientificName || "") + '</em></span>' +
+      '</a>';
+    }
+
+    // Depth-first collection of leaf (species) descendants, optionally capped.
+    function collectTreeLeaves(nodes, limit) {
+      const out = [];
+      const visit = (n) => {
+        if (limit && out.length >= limit) return;
+        if (n.leaf) { out.push(n); return; }
+        for (const child of n.children || []) {
+          if (limit && out.length >= limit) break;
+          visit(child);
+        }
+      };
+      for (const n of nodes || []) {
+        if (limit && out.length >= limit) break;
+        visit(n);
+      }
+      return out;
     }
 
     function renderRecentSprites() {
@@ -16354,114 +16607,11 @@ function renderAppHtml() {
       });
     }
 
-    function syncTreeExpansion(tree, query, previousQuery) {
-      const roots = Array.isArray(tree?.roots) ? tree.roots : [];
-      const branchKeys = collectTreeBranchKeys(roots);
-      const rootKeys = roots
-        .filter((node) => !node.leaf && node.key)
-        .map((node) => String(node.key));
-
-      if (String(query || "").trim()) {
-        state.expandedTreeNodes = branchKeys;
-        return;
-      }
-
-      if (previousQuery !== query || state.expandedTreeNodes.size === 0) {
-        state.expandedTreeNodes = new Set(rootKeys);
-        return;
-      }
-
-      const retained = new Set(rootKeys);
-      for (const key of state.expandedTreeNodes) {
-        if (branchKeys.has(key)) retained.add(key);
-      }
-      state.expandedTreeNodes = retained;
-    }
-
-    function collectTreeBranchKeys(nodes, keys = new Set()) {
-      for (const node of nodes || []) {
-        if (!node || node.leaf) continue;
-        if (node.key) keys.add(String(node.key));
-        collectTreeBranchKeys(node.children || [], keys);
-      }
-      return keys;
-    }
-
     function treeSummaryText(tree) {
       const q = String(tree.q || "").trim();
       const total = Number(tree.totalSprites || 0);
       if (q) return total + ' ready sprites matching "' + escapeHtml(q) + '"';
       return total + " ready sprites by taxonomic branch";
-    }
-
-    function renderTreeMenu(roots) {
-      const renderState = { rows: [], truncated: false };
-      collectVisibleTreeRows(roots || [], 0, renderState);
-
-      const notice = renderState.truncated
-        ? '<div class="tree-notice">Showing first ' + TREE_RENDER_ROW_LIMIT + ' visible rows.</div>'
-        : '';
-
-      return notice +
-        '<div class="sprite-tree" role="tree">' +
-          renderState.rows.map((row) => row.node.leaf
-            ? renderTreeLeaf(row.node, row.depth)
-            : renderTreeBranch(row.node, row.depth)
-          ).join("") +
-        '</div>';
-    }
-
-    function collectVisibleTreeRows(nodes, depth, renderState) {
-      for (const node of nodes || []) {
-        if (renderState.rows.length >= TREE_RENDER_ROW_LIMIT) {
-          renderState.truncated = true;
-          return;
-        }
-
-        renderState.rows.push({ node, depth });
-
-        if (!node.leaf && state.expandedTreeNodes.has(String(node.key))) {
-          collectVisibleTreeRows(node.children || [], depth + 1, renderState);
-          if (renderState.truncated) return;
-        }
-      }
-    }
-
-    function renderTreeBranch(node, depth) {
-      const key = String(node.key || "");
-      const expanded = state.expandedTreeNodes.has(key);
-      const childCount = Array.isArray(node.children) ? node.children.length : 0;
-      const rank = node.rank || "branch";
-
-      return '<button class="tree-menu-row tree-menu-branch" type="button" role="treeitem" ' +
-          treeRowStyle(depth) +
-          ' data-tree-toggle data-tree-key="' + escapeAttr(key) + '" aria-expanded="' + (expanded ? "true" : "false") + '">' +
-        '<span class="tree-disclosure" aria-hidden="true">' + (expanded ? "v" : "&gt;") + '</span>' +
-        '<span class="tree-branch-name">' + escapeHtml(node.name || "Taxon") + '</span>' +
-        '<span class="tree-rank">' + escapeHtml(rank) + '</span>' +
-        '<span class="tree-count">' + Number(node.spriteCount || 0) + ' sprites / ' + childCount + ' items</span>' +
-      '</button>';
-    }
-
-    function renderTreeLeaf(node, depth) {
-      const sprite = node.sprite?.url
-        ? renderSheetSprite(node.sprite.url, "anim-idle")
-        : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(node.iconicTaxonName)) + '"></div>';
-
-      return '<div class="tree-menu-row tree-menu-leaf" role="treeitem" ' + treeRowStyle(depth) + '>' +
-        '<div class="tree-leaf-sprite">' + sprite + '</div>' +
-        '<div class="tree-leaf-copy">' +
-          '<div class="tree-leaf-name">' + escapeHtml(node.name || node.scientificName || "Unnamed taxon") + '</div>' +
-          '<div class="tree-leaf-meta"><em>' + escapeHtml(node.scientificName || "") + '</em></div>' +
-          '<div class="tree-leaf-meta">' + escapeHtml((node.rank || "taxon") + " / " + (node.iconicTaxonName || "Life")) + ' / taxon ' + Number(node.taxonId || 0) + '</div>' +
-        '</div>' +
-        '<a class="manual-result-link" href="' + escapeAttr(node.sprite?.url || "#") + '" target="_blank" rel="noreferrer">Open</a>' +
-      '</div>';
-    }
-
-    function treeRowStyle(depth) {
-      const indent = Math.max(0, Math.min(10, Number(depth) || 0)) * 18;
-      return 'style="--tree-indent:' + indent + 'px"';
     }
 
     async function loadBatchQueue(showStatus) {
