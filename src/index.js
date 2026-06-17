@@ -4117,7 +4117,12 @@ async function getSpriteTree(env, options = {}) {
     leaf: true
   }));
 
-  const tree = buildSpriteTree(leaves);
+  // Phase 1: load named ancestor taxa (orders/families/genera, backfilled in
+  // Phase 0) so we can build a real taxonomic tree instead of iconic+genus.
+  const ancestorMap = await loadAncestorTaxa(env, leaves);
+  const tree = ancestorMap.size > 0
+    ? buildTaxonomicTree(leaves, ancestorMap)
+    : buildSpriteTree(leaves); // fallback if ancestors aren't backfilled yet
 
   return {
     totalSprites: leaves.length,
@@ -4125,6 +4130,32 @@ async function getSpriteTree(env, options = {}) {
     q,
     roots: tree
   };
+}
+
+async function loadAncestorTaxa(env, leaves) {
+  const ids = new Set();
+  for (const leaf of leaves) {
+    for (const id of leaf.ancestorIds || []) ids.add(id);
+  }
+  const map = new Map();
+  for (const chunk of chunkArray([...ids], D1_ID_CHUNK_SIZE)) {
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT taxon_id, scientific_name, common_name, rank, iconic_taxon_name
+       FROM taxa WHERE taxon_id IN (${placeholders})`
+    ).bind(...chunk).all();
+    for (const r of rows.results ?? []) {
+      map.set(Number(r.taxon_id), {
+        taxonId: Number(r.taxon_id),
+        scientificName: r.scientific_name,
+        commonName: r.common_name ?? null,
+        rank: String(r.rank || "").toLowerCase(),
+        iconicTaxonName: r.iconic_taxon_name || null
+      });
+    }
+  }
+  return map;
 }
 
 async function getRecentSprites(env, options = {}) {
@@ -4213,10 +4244,13 @@ async function getMissingAncestorTaxonIds(env) {
   `).bind(DEFAULT_ASSET_KIND, ASSET_VERSION).all();
 
   const ancestorIds = new Set();
+  const orphanTaxa = []; // ready-sprite taxa with no usable ancestry -> can't be placed in the tree
   let readyCount = 0;
   for (const row of rows.results ?? []) {
     readyCount += 1;
-    for (const id of parseTaxonAncestry(row.ancestry)) ancestorIds.add(id);
+    const ids = parseTaxonAncestry(row.ancestry);
+    if (ids.length === 0) orphanTaxa.push(Number(row.taxon_id));
+    for (const id of ids) ancestorIds.add(id);
   }
 
   // Which of those ancestors already exist as their own taxa rows?
@@ -4236,7 +4270,8 @@ async function getMissingAncestorTaxonIds(env) {
     readySpriteTaxa: readyCount,
     distinctAncestors: allIds.length,
     alreadyStored: present.size,
-    missing
+    missing,
+    orphanTaxa
   };
 }
 
@@ -4260,6 +4295,65 @@ async function bulkUpsertTaxa(env, taxa) {
   }
   if (statements.length > 0) await env.DB.batch(statements);
   return { upserted, skipped };
+}
+
+// We navigate by the major Linnaean rungs only. Each maps to itself and
+// creates a visible tree level. EVERY other iNat rank (subphylum, subclass,
+// suborder, superfamily, subfamily, tribe, section, subgenus, complex, ...) is
+// a pass-through: it stays in the ancestry chain but creates no level, so each
+// drill-down path is a consistent kingdom>phylum>class>order>family>genus>species.
+const RANK_BAND = new Map(
+  ["kingdom", "phylum", "class", "order", "family", "genus"].map((r) => [r, r])
+);
+
+// Build a real taxonomic tree: Life -> kingdom -> phylum -> class -> order ->
+// family -> genus -> species(leaf), using backfilled ancestor names. Adapted
+// from the rank-band approach in the iNat_trees client (its worker only does
+// phylo file export; tree construction is client-side).
+function buildTaxonomicTree(leaves, ancestorMap) {
+  if (!Array.isArray(leaves) || leaves.length === 0) return [];
+
+  const lifeNode = branchNode("taxon:life", "Life", "root");
+  const ensureChild = (parent, key, factory) => {
+    if (!parent.childMap.has(key)) parent.childMap.set(key, factory());
+    return parent.childMap.get(key);
+  };
+
+  for (const leaf of leaves) {
+    let cursor = lifeNode;
+    for (const ancestorId of leaf.ancestorIds || []) {
+      if (ancestorId === 48460) continue; // Life root, already represented
+      const info = ancestorMap.get(ancestorId);
+      if (!info) continue;
+      const band = RANK_BAND.get(info.rank);
+      if (!band) continue; // pass-through rank (subfamily/tribe/subgenus/...)
+      const key = `taxon:${ancestorId}`;
+      const node = ensureChild(cursor, key, () => branchNode(
+        key,
+        info.commonName || info.scientificName,
+        band
+      ));
+      node.scientificName = info.scientificName;
+      node.taxonId = ancestorId;
+      cursor = node;
+    }
+    cursor.children.push(leaf);
+  }
+
+  const finalize = (node) => {
+    const direct = Array.isArray(node.children) ? node.children : [];
+    if (node.childMap) {
+      node.children = [...Array.from(node.childMap.values()), ...direct];
+      delete node.childMap;
+    }
+    node.children = (node.children || []).map(finalize).sort(compareTreeNodes);
+    node.spriteCount = node.leaf
+      ? 1
+      : node.children.reduce((sum, child) => sum + Number(child.spriteCount || 0), 0);
+    return node;
+  };
+
+  return [finalize(lifeNode)];
 }
 
 function buildSpriteTree(leaves) {
