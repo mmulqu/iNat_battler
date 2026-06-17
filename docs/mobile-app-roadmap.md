@@ -56,7 +56,7 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
   showed the empty app + import form on the logged-out landing; fixed Home battle-team
   slots rendering 360px tall each.
 - ✅ **Payload**: landing hero re-encoded PNG→WebP, **2.6MB → 168KB (−93.6%)** on the
-  critical path. _(Status sprite sheets ~7.5MB still pending — see below.)_
+  critical path; status sprite sheets resized from 7.37MB to 792KB for battle-only load.
 - ✅ **Mobile battle layout**: active battle is a fixed one-screen surface (nav hidden) —
   stage + both HP bars + status chips + 2×2 moves fit without scrolling; log below.
 - ✅ **Swap species dialog**: replaced unreadable bench boxes with a "Swap!" button →
@@ -70,13 +70,11 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
 
 ### What's next (recommended order)
 
-1. **Finish Phase 1 payload** — optimize the 5 status sprite sheets (~7.5MB, battle-only);
-   needs a lossless/sprite-aware path + a live-battle visual check.
-2. **Real-device QA** — the OAuth round-trip on actual iOS/Android.
-3. **Phase 5 cost gating** (non-negotiable before opening up) — rate-limit your own API,
+1. **Real-device QA** — the OAuth round-trip on actual iOS/Android.
+2. **Phase 5 cost gating** (non-negotiable before opening up) — rate-limit your own API,
    especially sprite generation; per-user + global ceilings with clear 429 UX.
-4. **Phase 2 onboarding** — the guided mobile setup flow + missing-sprite fallback state.
-5. **Phase 4 retention** — wire the Buddy list into challenges ("challenge who's online").
+3. **Phase 2 onboarding** — the guided mobile setup flow + missing-sprite fallback state.
+4. **Phase 4 retention** — wire the Buddy list into challenges ("challenge who's online").
 
 ---
 
