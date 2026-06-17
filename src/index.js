@@ -160,8 +160,12 @@ const GLOBAL_SEED_REGIONS = [
   { key: "europe", label: "Europe", placeId: 67952 }
 ];
 const GLOBAL_SEED_GROUPS = [
-  { key: "plants", label: "Plants", iconicTaxon: "Plantae" },
-  { key: "animals", label: "Animals", iconicTaxon: "Animalia" }
+  // NOTE: filter by kingdom taxon_id, NOT iconic_taxa. In iNat, `iconic_taxa=Animalia`
+  // is the catch-all bucket for invertebrates WITHOUT their own iconic taxon (woodlice,
+  // sea stars, anemones, crabs...) and excludes Aves/Mammalia/Insecta/etc. The Animalia
+  // *kingdom* (taxon_id=1) is what we actually want. Plantae kingdom = 47126.
+  { key: "plants", label: "Plants", iconicTaxon: "Plantae", kingdomTaxonId: 47126 },
+  { key: "animals", label: "Animals", iconicTaxon: "Animalia", kingdomTaxonId: 1 }
 ];
 const DEMO_USER_ID = "demo:birds";
 const DEMO_PLAYER_TAXON_IDS = [13858, 12727, 8229, 7428, 1965];
@@ -1092,7 +1096,7 @@ function prepareGlobalSeedTaxonUpsert(env, group, row, now) {
 }
 
 async function fetchGlobalSeedSpeciesCounts(env, group, limitPerGroup) {
-  const cacheKey = `inat:global_seed:${GLOBAL_SEED_KEY}:${group.key}:${limitPerGroup}:v2:fields:v1`;
+  const cacheKey = `inat:global_seed:${GLOBAL_SEED_KEY}:${group.key}:${limitPerGroup}:v3-kingdom:fields:v1`;
   const cached = await readSpeciesCountsCache(env, cacheKey);
   if (cached?.fresh) return cached.rows;
 
@@ -1108,7 +1112,7 @@ async function fetchGlobalSeedSpeciesCounts(env, group, limitPerGroup) {
       url.searchParams.set("photos", "true");
       url.searchParams.set("per_page", "500");
       url.searchParams.set("page", String(page));
-      url.searchParams.set("iconic_taxa", group.iconicTaxon);
+      url.searchParams.set("taxon_id", String(group.kingdomTaxonId));
       url.searchParams.set("fields", INAT_SPECIES_COUNT_FIELDS);
       url.searchParams.set("ttl", String(INAT_SPECIES_CACHE_TTL_SECONDS));
 
