@@ -10061,27 +10061,20 @@ function renderAppHtml() {
     }
 
     .tree-carousel {
-      display: flex;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
-      overflow-x: auto;
-      scroll-snap-type: x mandatory;
-      -webkit-overflow-scrolling: touch;
-      padding: 4px 2px 14px;
-      scrollbar-width: thin;
-      overscroll-behavior-x: contain;
+      padding: 4px 0 8px;
     }
 
     .tree-card {
-      scroll-snap-align: center;
-      flex: 0 0 auto;
-      width: min(62%, 224px);
       display: grid;
       gap: 8px;
       justify-items: center;
       border: 1px solid var(--line);
       border-top: 3px solid var(--accent);
       border-radius: 14px;
-      padding: 12px 12px 14px;
+      padding: 12px 10px 14px;
       background: #ffffff;
       box-shadow: var(--shadow);
       color: var(--ink);
@@ -10097,24 +10090,15 @@ function renderAppHtml() {
     }
 
     .tree-card-art {
-      display: flex;
-      justify-content: center;
-      align-items: flex-end;
-      min-height: 96px;
-      width: 100%;
-    }
-
-    .tree-card-chip {
-      width: 70px;
-      aspect-ratio: 1 / 1;
       display: grid;
       place-items: center;
+      width: 100%;
+      min-height: 112px;
+      padding: 6px 0;
     }
 
-    .tree-card-art.stacked .tree-card-chip { margin-left: -22px; }
-    .tree-card-art.stacked .tree-card-chip:first-child { margin-left: 0; }
-    .tree-card-chip .sheet-sprite { width: 100%; }
-    .tree-card-art .placeholder-shape { width: 64px; height: 64px; }
+    .tree-card-art .sheet-sprite { width: 76%; }
+    .tree-card-art .placeholder-shape { width: 66px; height: 66px; }
 
     .tree-card-name {
       font-weight: 900;
@@ -12086,10 +12070,6 @@ function renderAppHtml() {
 
       .training-roster {
         max-height: 38vh;
-      }
-
-      .tree-card {
-        width: min(78%, 220px);
       }
 
       .meta {
@@ -16457,16 +16437,12 @@ function renderAppHtml() {
     }
 
     function renderTreeCard(branch) {
-      const previews = collectTreeLeaves([branch], 3);
-      const chips = previews.map((leaf, i) =>
-        leaf.sprite?.url
-          ? '<span class="tree-card-chip" style="--i:' + i + '">' + renderSheetSprite(leaf.sprite.url, "anim-idle") + '</span>'
-          : ""
-      ).join("");
-      const art = chips ||
-        '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(branch.iconicTaxonName)) + '"></div>';
+      const preview = collectTreeLeaves([branch], 1)[0];
+      const art = preview && preview.sprite?.url
+        ? renderSheetSprite(preview.sprite.url, "anim-idle")
+        : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(branch.iconicTaxonName)) + '"></div>';
       return '<button type="button" class="tree-card" role="listitem" data-tree-descend="' + escapeAttr(String(branch.key)) + '">' +
-        '<span class="tree-card-art' + (previews.length > 1 ? " stacked" : "") + '">' + art + '</span>' +
+        '<span class="tree-card-art">' + art + '</span>' +
         '<span class="tree-card-name">' + escapeHtml(branch.name || "Taxon") + '</span>' +
         '<span class="tree-card-meta">' + escapeHtml(branch.rank || "") + ' · ' + Number(branch.spriteCount || 0) + '</span>' +
       '</button>';
