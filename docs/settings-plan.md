@@ -86,8 +86,12 @@ Legend: ✅ already exists (relocate) · 🆕 new build.
    surfaces, no-flash init. Plus contrast fixes (battle empty state, roster chips,
    card-back stats). _Remaining polish: tier/status colored chips + battle-arena gradients
    + map dark-tuning, and a Reduce-motion toggle._
-3. **Privacy & data** (delete account + disclosures) — a hard gate for public alpha. NOT
-   started.
+3. ✅ **Privacy & data — DONE (2026-06-18).** Delete-account flow + "what we store"
+   disclosure. **TODO before relying on it:** the wipe path was never executed
+   end-to-end (couldn't, without deleting a real account). Test once with a throwaway
+   Bluesky account — sign in, link any iNat name, import, then delete — and confirm the
+   rows are actually gone across the user-scoped tables. (Privacy/terms links + data
+   export still pending.)
 4. **Dev Lab access gating** — Dev Lab is consolidated but still visible to all users;
    gate behind admin (ties into Phase 5). NOT started.
 5. Notifications, PWA install, unlink, About — incremental.
