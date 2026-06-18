@@ -8639,6 +8639,17 @@ function renderAppHtml() {
   <script src="https://unpkg.com/protomaps-leaflet@4.0.1/dist/protomaps-leaflet.js" crossorigin="" defer></script>
   <title>iNat Battler</title>
   <script>
+    // Apply the saved theme before first paint to avoid a flash of the wrong theme.
+    (function () {
+      try {
+        var pref = localStorage.getItem("inatBattler:theme") || "system";
+        var dark = pref === "dark" || (pref === "system" && window.matchMedia
+          && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.setAttribute("data-theme", "dark");
+      } catch (e) {}
+    })();
+  </script>
+  <script>
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", function () {
         navigator.serviceWorker.register("/sw.js").catch(function () {});
@@ -8650,15 +8661,40 @@ function renderAppHtml() {
       color-scheme: light;
       --bg: #f5f2ea;
       --surface: #ffffff;
+      --surface-2: var(--surface-2);
+      --surface-3: var(--surface-3);
+      --surface-translucent: var(--surface-translucent);
       --ink: #17201b;
       --muted: #60706a;
       --line: #d9ded4;
+      --line-soft: var(--line-soft);
       --teal: #047c78;
+      --teal-soft: rgba(4, 124, 120, 0.12);
       --green: #2f7d42;
       --amber: #b46b1b;
       --coral: #c54f45;
       --blue: #456da8;
       --shadow: 0 10px 30px rgba(22, 32, 27, 0.08);
+    }
+
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #11161a;
+      --surface: #1b2228;
+      --surface-2: #222a31;
+      --surface-3: #2a333b;
+      --surface-translucent: rgba(33, 41, 48, 0.92);
+      --ink: #e7edea;
+      --muted: #9aa8a4;
+      --line: #333d44;
+      --line-soft: #2a333a;
+      --teal: #3bb9b0;
+      --teal-soft: rgba(59, 185, 176, 0.16);
+      --green: #5cb874;
+      --amber: #d39a45;
+      --coral: #e07a70;
+      --blue: #7ba3df;
+      --shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
     }
 
     * {
@@ -8873,7 +8909,7 @@ function renderAppHtml() {
       border: 1px solid rgba(255, 255, 255, 0.42);
       border-radius: 8px;
       padding: 0 12px;
-      background: rgba(255, 255, 255, 0.92);
+      background: var(--surface-translucent);
       color: var(--ink);
     }
 
@@ -8889,7 +8925,7 @@ function renderAppHtml() {
     }
 
     .landing-auth .bsky-status {
-      background: rgba(255, 255, 255, 0.92);
+      background: var(--surface-translucent);
     }
 
     .landing-section {
@@ -8960,7 +8996,7 @@ function renderAppHtml() {
 
     .secondary {
       color: var(--ink);
-      background: #e7eee9;
+      background: var(--surface-3);
       border: 1px solid var(--line);
     }
 
@@ -8975,7 +9011,7 @@ function renderAppHtml() {
     .card {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.88);
+      background: var(--surface-translucent);
       box-shadow: var(--shadow);
     }
 
@@ -8993,7 +9029,7 @@ function renderAppHtml() {
     .settings-section {
       border: 1px solid var(--line);
       border-radius: 12px;
-      background: rgba(255, 255, 255, 0.84);
+      background: var(--surface-translucent);
       padding: 14px 16px;
       margin-bottom: 14px;
     }
@@ -9015,6 +9051,16 @@ function renderAppHtml() {
 
     .settings-actions button {
       width: auto;
+    }
+
+    .settings-field {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-weight: 800;
+      margin-bottom: 12px;
     }
 
     .settings-toggle {
@@ -9045,7 +9091,7 @@ function renderAppHtml() {
       border-radius: 8px;
       background:
         linear-gradient(135deg, rgba(4, 124, 120, 0.12), rgba(244, 212, 135, 0.12)),
-        rgba(255, 255, 255, 0.88);
+        var(--surface-translucent);
       box-shadow: var(--shadow);
     }
 
@@ -9089,7 +9135,7 @@ function renderAppHtml() {
       padding: 14px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fbfcf9;
+      background: var(--surface-2);
     }
 
     .home-next strong {
@@ -9108,7 +9154,7 @@ function renderAppHtml() {
       min-width: 0;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.88);
+      background: var(--surface-translucent);
       box-shadow: var(--shadow);
     }
 
@@ -9146,10 +9192,10 @@ function renderAppHtml() {
       gap: 9px;
       align-items: center;
       min-height: 54px;
-      border: 1px solid #e5e9e2;
+      border: 1px solid var(--line-soft);
       border-radius: 8px;
       padding: 7px;
-      background: #fbfcf9;
+      background: var(--surface-2);
       text-align: left;
       color: var(--ink);
     }
@@ -9171,7 +9217,7 @@ function renderAppHtml() {
       width: 44px;
       aspect-ratio: 1 / 1;
       border-radius: 8px;
-      background: #e7eee9;
+      background: var(--surface-3);
       color: var(--teal);
       font-weight: 900;
       overflow: hidden;
@@ -9211,7 +9257,7 @@ function renderAppHtml() {
 
     .home-ready-item:hover {
       border-color: var(--teal);
-      background: #eef7f0;
+      background: var(--teal-soft);
     }
 
     .home-progress {
@@ -9238,7 +9284,7 @@ function renderAppHtml() {
       border-radius: 8px;
       background:
         linear-gradient(135deg, rgba(4, 124, 120, 0.12), rgba(242, 206, 114, 0.18)),
-        rgba(255, 255, 255, 0.9);
+        var(--surface-translucent);
       box-shadow: var(--shadow);
     }
 
@@ -9285,7 +9331,7 @@ function renderAppHtml() {
       width: 34px;
       aspect-ratio: 1 / 1;
       border-radius: 50%;
-      background: #e7eee9;
+      background: var(--surface-3);
       color: var(--teal);
       font-weight: 900;
     }
@@ -9316,7 +9362,7 @@ function renderAppHtml() {
       padding: 16px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #fbfcf9;
+      background: var(--surface-2);
     }
 
     .onboarding-form label {
@@ -9344,7 +9390,7 @@ function renderAppHtml() {
       padding: 12px;
       border: 1px solid #bfd6cc;
       border-radius: 8px;
-      background: #edf7f0;
+      background: var(--teal-soft);
     }
 
     .onboarding-code strong {
@@ -9377,7 +9423,7 @@ function renderAppHtml() {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 10px;
-      background: #fbfcf9;
+      background: var(--surface-2);
     }
 
     .stat strong {
@@ -9507,7 +9553,7 @@ function renderAppHtml() {
 
     .typeahead-item:hover,
     .typeahead-item:focus {
-      background: #eef3ec;
+      background: var(--surface-2);
     }
 
     .typeahead-item img,
@@ -9516,7 +9562,7 @@ function renderAppHtml() {
       height: 24px;
       border-radius: 50%;
       flex: 0 0 auto;
-      background: #e3e8e0;
+      background: var(--surface-3);
     }
 
     .typeahead-item span {
@@ -9527,7 +9573,7 @@ function renderAppHtml() {
 
     .bsky-code {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      background: #eef3ec;
+      background: var(--surface-2);
       border: 1px solid var(--line);
       border-radius: 6px;
       padding: 4px 8px;
@@ -9539,14 +9585,14 @@ function renderAppHtml() {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 7px 9px;
-      background: #fbfcf9;
+      background: var(--surface-2);
       color: var(--muted);
       font-weight: 800;
     }
 
     .bsky-status.success {
       border-color: #b7d8c2;
-      background: #eef7f0;
+      background: var(--teal-soft);
       color: #285c38;
     }
 
@@ -9569,7 +9615,7 @@ function renderAppHtml() {
       display: grid;
       gap: 4px;
       padding: 6px 0;
-      border-bottom: 1px solid #e5e9e2;
+      border-bottom: 1px solid var(--line-soft);
       font-size: 0.8rem;
     }
 
@@ -9637,7 +9683,7 @@ function renderAppHtml() {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 8px;
-      background: #fbfcf9;
+      background: var(--surface-2);
       font-size: 0.78rem;
     }
 
@@ -9646,7 +9692,7 @@ function renderAppHtml() {
       gap: 2px;
       min-width: 0;
       padding-bottom: 6px;
-      border-bottom: 1px solid #e5e9e2;
+      border-bottom: 1px solid var(--line-soft);
     }
 
     .batch-item:last-child {
@@ -9673,7 +9719,7 @@ function renderAppHtml() {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 8px 10px;
-      background: #fbfcf9;
+      background: var(--surface-2);
       color: var(--ink);
       font: inherit;
     }
@@ -9830,7 +9876,7 @@ function renderAppHtml() {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 0 12px;
-      background: #fbfcf9;
+      background: var(--surface-2);
       color: var(--ink);
       font: inherit;
     }
@@ -9901,7 +9947,7 @@ function renderAppHtml() {
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 5px 12px;
-      background: #fbfcf9;
+      background: var(--surface-2);
       color: var(--muted);
       font: inherit;
       font-size: 0.82rem;
@@ -9930,7 +9976,7 @@ function renderAppHtml() {
       grid-template-rows: 1fr auto;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.9);
+      background: var(--surface-translucent);
       box-shadow: var(--shadow);
       cursor: pointer;
       overflow: hidden;
@@ -9958,7 +10004,7 @@ function renderAppHtml() {
       aspect-ratio: 1 / 1;
       background:
         linear-gradient(135deg, rgba(4, 124, 120, 0.12), rgba(180, 107, 27, 0.16)),
-        #f8faf6;
+        var(--surface-2);
       overflow: hidden;
     }
 
@@ -10017,7 +10063,7 @@ function renderAppHtml() {
       grid-template-rows: 1fr auto;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.9);
+      background: var(--surface-translucent);
       box-shadow: var(--shadow);
       overflow: hidden;
       min-width: 0;
@@ -10027,7 +10073,7 @@ function renderAppHtml() {
       display: grid;
       place-items: center;
       aspect-ratio: 1 / 1;
-      background: #eef2eb;
+      background: var(--surface-2);
       overflow: hidden;
     }
 
@@ -10141,7 +10187,7 @@ function renderAppHtml() {
       border-top: 3px solid var(--accent);
       border-radius: 14px;
       padding: 12px 10px 14px;
-      background: #ffffff;
+      background: var(--surface);
       box-shadow: var(--shadow);
       color: var(--ink);
       font: inherit;
@@ -10195,7 +10241,7 @@ function renderAppHtml() {
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 8px 6px 9px;
-      background: #ffffff;
+      background: var(--surface);
       box-shadow: var(--shadow);
     }
 
@@ -10209,7 +10255,7 @@ function renderAppHtml() {
       aspect-ratio: 1 / 1;
       display: grid;
       place-items: center;
-      background: #eef2eb;
+      background: var(--surface-2);
       border-radius: 10px;
       overflow: hidden;
     }
@@ -10270,7 +10316,7 @@ function renderAppHtml() {
       min-height: 240px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.9);
+      background: var(--surface-translucent);
       box-shadow: var(--shadow);
       transform-style: preserve-3d;
       transition: transform 260ms ease;
@@ -10294,7 +10340,7 @@ function renderAppHtml() {
       border: 1px solid rgba(23, 32, 27, 0.18);
       border-radius: 999px;
       padding: 4px 8px;
-      background: rgba(255, 255, 255, 0.92);
+      background: var(--surface-translucent);
       color: var(--ink);
       font-size: 0.72rem;
       font-weight: 900;
@@ -10311,7 +10357,7 @@ function renderAppHtml() {
       height: 28px;
       border: 2px solid rgba(23, 32, 27, 0.28);
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.92);
+      background: var(--surface-translucent);
       color: transparent;
       font-weight: 900;
     }
@@ -10331,7 +10377,7 @@ function renderAppHtml() {
       min-width: 0;
       overflow: hidden;
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.9);
+      background: var(--surface-translucent);
       backface-visibility: hidden;
     }
 
@@ -10344,7 +10390,7 @@ function renderAppHtml() {
       padding: 12px;
       padding-bottom: 44px;
       overflow: auto;
-      background: #fbfcf9;
+      background: var(--surface-2);
       transform: rotateY(180deg);
     }
 
@@ -10373,7 +10419,7 @@ function renderAppHtml() {
       height: 8px;
       overflow: hidden;
       border-radius: 999px;
-      background: #e1e8e2;
+      background: var(--surface-3);
     }
 
     .stat-fill {
@@ -10392,7 +10438,7 @@ function renderAppHtml() {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 7px 8px;
-      background: #ffffff;
+      background: var(--surface);
     }
 
     .ability strong,
@@ -10418,7 +10464,7 @@ function renderAppHtml() {
       min-width: 34px;
       border-radius: 999px;
       padding: 3px 6px;
-      background: #e4f2ef;
+      background: var(--teal-soft);
       color: #17433f;
       font-size: 0.72rem;
       font-weight: 900;
@@ -10432,7 +10478,7 @@ function renderAppHtml() {
       aspect-ratio: 1 / 1;
       background:
         linear-gradient(135deg, rgba(4, 124, 120, 0.12), rgba(180, 107, 27, 0.16)),
-        #f8faf6;
+        var(--surface-2);
       overflow: hidden;
     }
 
@@ -10477,7 +10523,7 @@ function renderAppHtml() {
       border: 1px solid rgba(23, 32, 27, 0.18);
       border-radius: 999px;
       padding: 3px 5px;
-      background: rgba(255, 255, 255, 0.94);
+      background: var(--surface-translucent);
       box-shadow: 0 8px 18px rgba(23, 32, 27, 0.12);
       transform: translateX(-50%);
     }
@@ -10491,7 +10537,7 @@ function renderAppHtml() {
       border: 0;
       border-radius: 999px;
       padding: 0;
-      background: #e4f2ef;
+      background: var(--teal-soft);
       color: #17433f;
       font-size: 0.9rem;
       font-weight: 900;
@@ -10586,7 +10632,7 @@ function renderAppHtml() {
     .chip {
       border-radius: 999px;
       padding: 4px 8px;
-      background: #eef2eb;
+      background: var(--surface-2);
       color: #344139;
       font-size: 0.78rem;
       font-weight: 700;
@@ -11037,7 +11083,7 @@ function renderAppHtml() {
       overflow: auto;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.88);
+      background: var(--surface-translucent);
     }
 
     .training-roster-row {
@@ -11047,7 +11093,7 @@ function renderAppHtml() {
       align-items: center;
       padding: 7px 10px;
       border: 0;
-      border-bottom: 1px solid #e5e9e2;
+      border-bottom: 1px solid var(--line-soft);
       background: transparent;
       font: inherit;
       color: var(--ink);
@@ -11060,11 +11106,11 @@ function renderAppHtml() {
     }
 
     .training-roster-row:hover {
-      background: #eef4f0;
+      background: var(--surface-3);
     }
 
     .training-roster-row.active {
-      background: #edf6f1;
+      background: var(--surface-3);
       box-shadow: inset 3px 0 0 var(--teal);
     }
 
@@ -11074,7 +11120,7 @@ function renderAppHtml() {
       width: 44px;
       aspect-ratio: 1 / 1;
       border-radius: 6px;
-      background: #eef2eb;
+      background: var(--surface-2);
       overflow: hidden;
     }
 
@@ -11137,7 +11183,7 @@ function renderAppHtml() {
       padding: 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.88);
+      background: var(--surface-translucent);
     }
 
     .train-head {
@@ -11168,7 +11214,7 @@ function renderAppHtml() {
     .train-stat .stat-track {
       height: 8px;
       border-radius: 999px;
-      background: #e3e8e0;
+      background: var(--surface-3);
       overflow: hidden;
       position: relative;
     }
@@ -11238,7 +11284,7 @@ function renderAppHtml() {
       aspect-ratio: 1;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #f7f7f1;
+      background: var(--surface-2);
       display: grid;
       place-items: center;
       overflow: hidden;
@@ -11313,7 +11359,7 @@ function renderAppHtml() {
       padding: 10px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.88);
+      background: var(--surface-translucent);
       font-size: 0.8rem;
     }
 
@@ -11325,7 +11371,7 @@ function renderAppHtml() {
       font-weight: 800;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      background: #e7ebe5;
+      background: var(--surface-3);
       color: #5b675f;
     }
 
@@ -11375,7 +11421,7 @@ function renderAppHtml() {
       font-weight: 800;
       text-transform: uppercase;
       letter-spacing: 0.4px;
-      background: #e7ebe5;
+      background: var(--surface-3);
       color: #5b675f;
     }
 
@@ -11536,7 +11582,7 @@ function renderAppHtml() {
       padding: 10px;
       border: 1px solid var(--line);
       border-radius: 10px;
-      background: #fbfcf9;
+      background: var(--surface-2);
       color: var(--ink);
     }
 
@@ -12890,6 +12936,14 @@ function renderAppHtml() {
           </div>
           <div class="settings-section">
             <h3>Preferences</h3>
+            <div class="settings-field">
+              <span>Theme</span>
+              <div class="map-mode-toggle" id="themeToggle" role="group" aria-label="Theme">
+                <button class="map-mode-btn" type="button" data-theme-pref="system">System</button>
+                <button class="map-mode-btn" type="button" data-theme-pref="light">Light</button>
+                <button class="map-mode-btn" type="button" data-theme-pref="dark">Dark</button>
+              </div>
+            </div>
             <label class="settings-toggle">
               <input type="checkbox" id="settingsSoundToggle">
               <span>Sound effects</span>
@@ -13228,6 +13282,7 @@ function renderAppHtml() {
       settingsReimportButton: document.getElementById("settingsReimportButton"),
       settingsSignOutButton: document.getElementById("settingsSignOutButton"),
       settingsSoundToggle: document.getElementById("settingsSoundToggle"),
+      themeToggle: document.getElementById("themeToggle"),
       devLabState: document.getElementById("devLabState"),
       devTaxonIdInput: document.getElementById("devTaxonIdInput"),
       devRandomButton: document.getElementById("devRandomButton"),
@@ -13308,6 +13363,36 @@ function renderAppHtml() {
     els.settingsTabButton.addEventListener("click", () => switchView("settings"));
     els.settingsReimportButton.addEventListener("click", () => importRoster());
     els.settingsSignOutButton.addEventListener("click", () => bskyLogout());
+    els.themeToggle.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-theme-pref]");
+      if (btn) setThemePreference(btn.getAttribute("data-theme-pref"));
+    });
+    if (window.matchMedia) {
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+        if ((localStorage.getItem("inatBattler:theme") || "system") === "system") applyTheme();
+      });
+    }
+    applyTheme();
+
+    function setThemePreference(pref) {
+      if (!["light", "dark", "system"].includes(pref)) pref = "system";
+      localStorage.setItem("inatBattler:theme", pref);
+      applyTheme();
+    }
+
+    function applyTheme() {
+      const pref = localStorage.getItem("inatBattler:theme") || "system";
+      const dark = pref === "dark" || (pref === "system" && window.matchMedia
+        && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute("content", dark ? "#11161a" : "#047c78");
+      if (els.themeToggle) {
+        for (const btn of els.themeToggle.querySelectorAll("[data-theme-pref]")) {
+          btn.classList.toggle("active", btn.getAttribute("data-theme-pref") === pref);
+        }
+      }
+    }
     els.settingsSoundToggle.addEventListener("change", () => {
       state.soundOn = els.settingsSoundToggle.checked;
       localStorage.setItem("inatBattler:sound", state.soundOn ? "on" : "off");

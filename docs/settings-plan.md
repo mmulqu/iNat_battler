@@ -30,9 +30,15 @@ Legend: ✅ already exists (relocate) · 🆕 new build.
 - ✅ Account stats (Taxa / Sprites / Queued / Affinity) — move out of the sidebar.
 
 ### Appearance
-- 🆕 **Theme: Light / Dark / System** — the biggest lift (move color values to CSS
-  variables + a `[data-theme]` switch on `<html>`/`<body>`; persist in localStorage).
-  Do as its own follow-up, not part of the cheap-wins pass.
+- ✅ **Theme: Light / Dark / System** — SHIPPED (first pass). `:root` light tokens +
+  `[data-theme="dark"]` override (added `--surface-2/-3`, `--surface-translucent`,
+  `--line-soft`, `--teal-soft`); early `<head>` script sets the theme pre-paint (no
+  flash); Settings segmented toggle persists to `localStorage["inatBattler:theme"]` and
+  follows the OS via `matchMedia` when set to System; updates the PWA `theme-color` meta.
+  Surfaces (cards, panels, buttons, striped rows) were tokenized. _Follow-up: a few
+  semantic-tinted chips remain hardcoded (type chips, tier chips, some blue/coral status
+  tints) and read a bit light in dark mode — tokenize on a polish pass; also the battle
+  arena gradients + map could use dark-tuned values._
 - 🆕 **Reduce motion** toggle (CSS already honors the OS `prefers-reduced-motion`;
   add a manual override).
 - ✅ Default sprite/tile size (per-view zoom sliders exist — promote one global default).
