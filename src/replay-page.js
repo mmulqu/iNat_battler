@@ -294,24 +294,88 @@ function buildTimeline(data) {
 // ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
-const TERRAIN_SKY = {
-  wetland: ["#7fb6c9", "#a9d3d6"], forest: ["#7fa86a", "#a7c98b"], woodland: ["#7fa86a", "#a7c98b"],
-  urban: ["#9aa6b2", "#c3cdd6"], desert: ["#e3c489", "#f0dcae"], default: ["#8fc0a9", "#bfe0c8"]
+// --- Pixel backdrop (ported verbatim from the live battle view) --------------
+const BATTLE_BIOMES = {
+  meadow: { key: "meadow", sky: ["#9fd4e8", "#b5e0ec", "#cdeaf0"], sun: "#f7d978", cloud: "#f4f9f7", hill: "#6fa06b", ground: "#8fbf6f", groundEdge: "#7aae61", groundDark: "#79a85c", groundLight: "#a3cd82", accent: "#e0788a" },
+  wetland: { key: "wetland", sky: ["#a3c8d8", "#b9d8e0", "#cfe6e6"], sun: "#f2e2a0", cloud: "#eef6f4", hill: "#5d8a72", ground: "#6fa384", groundEdge: "#5d927a", groundDark: "#54806a", groundLight: "#8cb89c", accent: "#4f7f9d" },
+  forest: { key: "forest", sky: ["#7fae9a", "#92bda4", "#a8ccae"], sun: "#e8e3b0", cloud: "#dcebdf", hill: "#3f6b4c", ground: "#5d8752", groundEdge: "#4d7544", groundDark: "#46663c", groundLight: "#739a64", accent: "#b06a45" },
+  urban: { key: "urban", sky: ["#b6c3d4", "#c8d2dd", "#dadfe5"], sun: "#f3e9c5", cloud: "#eff2f4", hill: "#7c8894", ground: "#9aa3a3", groundEdge: "#86908f", groundDark: "#7e8887", groundLight: "#b2baba", accent: "#c2554d" },
+  night: { key: "night", sky: ["#23304e", "#2d3c5e", "#3a4a6e"], sun: "#e8e6cf", cloud: "#465574", hill: "#1d2a40", ground: "#33485a", groundEdge: "#2a3d4e", groundDark: "#243443", groundLight: "#41586c", accent: "#8ea4c8" }
 };
-const TERRAIN_GROUND = {
-  wetland: "#4f7a5c", forest: "#3f6b3a", urban: "#6b7178", desert: "#caa468", default: "#5b8c5a"
+const TERRAIN_BACKDROP = {
+  forest: BATTLE_BIOMES.forest, woodland: BATTLE_BIOMES.forest, grassland: BATTLE_BIOMES.meadow,
+  agricultural: BATTLE_BIOMES.meadow, shrubland: BATTLE_BIOMES.meadow, desert: BATTLE_BIOMES.meadow,
+  urban: BATTLE_BIOMES.urban, wetland: BATTLE_BIOMES.wetland, freshwater: BATTLE_BIOMES.wetland,
+  polar: BATTLE_BIOMES.wetland, tundra: BATTLE_BIOMES.wetland
 };
-
-function drawBackground(model, terrain) {
-  const sky = TERRAIN_SKY[terrain] || TERRAIN_SKY.default;
-  const g = ctx.createLinearGradient(0, 0, 0, H * 0.62);
-  g.addColorStop(0, sky[0]); g.addColorStop(1, sky[1]);
-  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H * 0.62);
-  ctx.fillStyle = TERRAIN_GROUND[terrain] || TERRAIN_GROUND.default;
-  ctx.fillRect(0, H * 0.62 - 1, W, H - H * 0.62 + 1);
-  // subtle ground band highlight
-  ctx.fillStyle = "rgba(255,255,255,0.06)";
-  ctx.fillRect(0, H * 0.62 - 1, W, 4);
+function seededPixelRng(seedString) {
+  let hash = 2166136261;
+  for (let i = 0; i < seedString.length; i++) { hash ^= seedString.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+  return function () { hash += 0x6d2b79f5; let v = hash; v = Math.imul(v ^ (v >>> 15), v | 1); v ^= v + Math.imul(v ^ (v >>> 7), v | 61); return ((v ^ (v >>> 14)) >>> 0) / 4294967296; };
+}
+function pickBiome(state) {
+  if (state.terrain && TERRAIN_BACKDROP[state.terrain]) return TERRAIN_BACKDROP[state.terrain];
+  const types = [].concat(getActive(state.opponent).types || []).concat(getActive(state.player).types || []);
+  if (types.includes("Night")) return BATTLE_BIOMES.night;
+  if (types.includes("Wetland")) return BATTLE_BIOMES.wetland;
+  if (types.includes("Fungus") || types.includes("Decay") || types.includes("Wood")) return BATTLE_BIOMES.forest;
+  if (types.includes("Urban")) return BATTLE_BIOMES.urban;
+  return BATTLE_BIOMES.meadow;
+}
+function makePixelBackdropSvg(seedString, biome) {
+  const rng = seededPixelRng(seedString + ":" + biome.key);
+  const BW = 64, BH = 36;
+  let rects = "";
+  const px = (x, y, w, h, fill) => { rects += '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="' + fill + '"/>'; };
+  const skyH = Math.floor(BH * 0.6);
+  for (let band = 0; band < biome.sky.length; band++) {
+    const bandTop = Math.floor((skyH * band) / biome.sky.length);
+    px(0, bandTop, BW, Math.ceil(skyH / biome.sky.length) + 1, biome.sky[band]);
+  }
+  const sunX = 5 + Math.floor(rng() * 22), sunY = 3 + Math.floor(rng() * 5);
+  px(sunX, sunY, 4, 4, biome.sun); px(sunX + 1, sunY - 1, 2, 1, biome.sun); px(sunX + 1, sunY + 4, 2, 1, biome.sun);
+  px(sunX - 1, sunY + 1, 1, 2, biome.sun); px(sunX + 4, sunY + 1, 1, 2, biome.sun);
+  const cloudCount = 3 + Math.floor(rng() * 3);
+  for (let i = 0; i < cloudCount; i++) {
+    const cw = 5 + Math.floor(rng() * 6), cx = Math.floor(rng() * (BW - cw)), cy = 2 + Math.floor(rng() * (skyH - 8));
+    px(cx, cy, cw, 2, biome.cloud); px(cx + 1, cy - 1, cw - 2, 1, biome.cloud);
+  }
+  let hillY = skyH - 4 - Math.floor(rng() * 4);
+  for (let x = 0; x < BW; x += 2) { hillY += Math.floor(rng() * 3) - 1; hillY = Math.max(skyH - 9, Math.min(skyH - 2, hillY)); px(x, hillY, 2, skyH - hillY + 1, biome.hill); }
+  px(0, skyH, BW, BH - skyH, biome.ground); px(0, skyH, BW, 1, biome.groundEdge);
+  for (let i = 0; i < 150; i++) px(Math.floor(rng() * BW), skyH + 1 + Math.floor(rng() * (BH - skyH - 1)), 1, 1, rng() < 0.5 ? biome.groundDark : biome.groundLight);
+  for (let i = 0; i < 9; i++) {
+    const tx = 1 + Math.floor(rng() * (BW - 3)), ty = skyH + 2 + Math.floor(rng() * (BH - skyH - 5));
+    px(tx, ty, 1, 2, biome.accent); px(tx - 1, ty + 1, 1, 1, biome.groundDark); px(tx + 1, ty + 1, 1, 1, biome.groundDark);
+  }
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36" viewBox="0 0 64 36" shape-rendering="crispEdges">' + rects + '</svg>';
+}
+function loadImage(src) {
+  return new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = src; });
+}
+// Pre-rasterize the backdrop once (it doesn't animate) into an offscreen canvas,
+// scaled to "cover" the portrait frame, crisp pixels.
+async function buildBackdrop(seedId, state) {
+  const off = document.createElement("canvas");
+  off.width = W; off.height = H;
+  const octx = off.getContext("2d");
+  octx.imageSmoothingEnabled = false;
+  const biome = pickBiome(state);
+  const svg = makePixelBackdropSvg(seedId, biome);
+  const img = await loadImage("data:image/svg+xml," + encodeURIComponent(svg));
+  if (img) {
+    const scale = Math.max(W / 64, H / 36);
+    const dw = 64 * scale, dh = 36 * scale;
+    octx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  } else {
+    octx.fillStyle = "#" + (biome.sky[0] || "9fd4e8").replace("#", ""); octx.fillRect(0, 0, W, H * 0.6);
+    octx.fillStyle = biome.ground; octx.fillRect(0, H * 0.6, W, H * 0.4);
+  }
+  return off;
+}
+function drawBackground(model) {
+  if (model._bg) ctx.drawImage(model._bg, 0, 0);
+  else { ctx.fillStyle = "#9fd4e8"; ctx.fillRect(0, 0, W, H); }
 }
 
 function easeInOut(p) { return p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2; }
@@ -532,7 +596,7 @@ function trunc(s, n) { s = String(s || ""); return s.length > n ? s.slice(0, n -
 // ---------------------------------------------------------------------------
 // Render one frame at absolute time t (ms)
 // ---------------------------------------------------------------------------
-function renderFrame(model, tl, terrain, t) {
+function renderFrame(model, tl, t) {
   // apply commands up to t
   while (model._ci < tl.commands.length && tl.commands[model._ci].t <= t) {
     tl.commands[model._ci].fn(model); model._ci++;
@@ -547,7 +611,7 @@ function renderFrame(model, tl, terrain, t) {
   }
   ctx.save();
   ctx.translate(sx, sy);
-  drawBackground(model, terrain);
+  drawBackground(model);
   // draw opponent (back) then player (front)
   drawCreature(model, "opponent", model._imgs, t);
   drawCreature(model, "player", model._imgs, t);
@@ -585,7 +649,7 @@ async function pickCodec() {
   return null;
 }
 
-async function encode(model, tl, terrain) {
+async function encode(model, tl) {
   if (typeof VideoEncoder === "undefined") throw new Error("WebCodecs (VideoEncoder) is not available in this browser.");
   const codec = await pickCodec();
   if (!codec) throw new Error("No supported H.264 encoder configuration found.");
@@ -607,7 +671,7 @@ async function encode(model, tl, terrain) {
 
   for (let i = 0; i < totalFrames; i++) {
     const t = (i / FPS) * 1000;
-    renderFrame(model, tl, terrain, t);
+    renderFrame(model, tl, t);
     const frame = new VideoFrame(canvas, { timestamp: Math.round(i * usPerFrame), duration: Math.round(usPerFrame) });
     encoder.encode(frame, { keyFrame: i % (FPS * 2) === 0 });
     frame.close();
@@ -637,11 +701,21 @@ async function run() {
     const data = await loadStates();
     setStatus("Loading sprites…");
     const imgs = await preloadAll(data.states);
+    const bg = await buildBackdrop(battleId, data.states[0]);
     const tl = buildTimeline(data);
-    const model = { player: {}, opponent: {}, caption: "", outro: null, _ci: 0, _anims: [], _imgs: imgs };
+    const model = { player: {}, opponent: {}, caption: "", outro: null, _ci: 0, _anims: [], _imgs: imgs, _bg: bg };
+
+    // Debug: ?still=<ms> renders a single frame (no encode) so a screenshot can
+    // inspect an exact moment of the battle.
+    if (Q.has("still")) {
+      renderFrame(model, tl, clampInt(Q.get("still"), 4000, 0, 600000));
+      window.__replayResult = { ok: true, still: true };
+      setStatus("Still frame at " + Q.get("still") + "ms (totalMs=" + Math.round(tl.totalMs) + ")");
+      return;
+    }
     setStatus("Rendering…");
     const t0 = performance.now();
-    const { buffer, durationMs } = await encode(model, tl, data.states[0].terrain || "default");
+    const { buffer, durationMs } = await encode(model, tl);
     const blob = new Blob([buffer], { type: "video/mp4" });
     window.__replayBlob = blob;
     window.__replayResult = {

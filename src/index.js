@@ -4978,7 +4978,7 @@ async function getBattleReplay(env, battleId, { states = false } = {}) {
   // `__selftest` synthesizes a battle on the fly (no DB/auth) so the renderer
   // can be exercised standalone — used by the Playwright check and as a demo.
   if (battleId === "__selftest") {
-    const replay = buildSelftestReplay();
+    const replay = await buildSelftestReplay(env);
     const built = reconstructBattleStates(replay.replay, replay.actions);
     return {
       available: true,
@@ -5007,12 +5007,23 @@ async function getBattleReplay(env, battleId, { states = false } = {}) {
   };
 }
 
-// Deterministically simulate a short NPC-vs-NPC battle and return its replay
-// artifact (pristine teams + seed + recorded player actions). Mirrors the live
-// loop in submitBattleMove so reconstructBattleStates reproduces it exactly.
-function buildSelftestReplay(seed = "selftest-1") {
-  const playerTeam = createNpcTeam("wetland_watcher");
-  const opponent = createNpcTeam("backyard_beginner");
+// Deterministically simulate a short battle and return its replay artifact
+// (pristine teams + seed + recorded player actions). Mirrors the live loop in
+// submitBattleMove so reconstructBattleStates reproduces it exactly. Teams are
+// drawn from real ready-sprite taxa in the DB so the rendered video shows actual
+// sprites (falls back to the static NPC roster if the DB has no ready sprites).
+async function buildSelftestReplay(env, seed = "selftest-1") {
+  let playerTeam, opponent;
+  try {
+    playerTeam = await createRandomReadyNpcTeam(env, [], 3);
+    const exclude = playerTeam.creatures.map((c) => Number(c.taxonId)).filter(Number.isFinite);
+    opponent = await createRandomReadyNpcTeam(env, exclude, 3);
+    playerTeam = { ...playerTeam, name: "Wild Sprite Team A" };
+    opponent = { ...opponent, name: "Wild Sprite Team B" };
+  } catch (_) {
+    playerTeam = createNpcTeam("wetland_watcher");
+    opponent = createNpcTeam("backyard_beginner");
+  }
   const terrain = terrainForTeam(opponent);
   const pristinePlayer = structuredClone(playerTeam.creatures);
   const pristineOpponent = structuredClone(opponent);
@@ -5023,7 +5034,7 @@ function buildSelftestReplay(seed = "selftest-1") {
     seed,
     turn: 1,
     terrain,
-    player: { name: "Wetland Watcher", activeIndex: 0, creatures: structuredClone(pristinePlayer) },
+    player: { name: playerTeam.name, activeIndex: 0, creatures: structuredClone(pristinePlayer) },
     opponent: structuredClone(pristineOpponent),
     log: [],
     status: "active"
@@ -5048,7 +5059,7 @@ function buildSelftestReplay(seed = "selftest-1") {
       seed,
       difficulty: "normal",
       terrain,
-      player: { name: "Wetland Watcher", creatures: pristinePlayer },
+      player: { name: playerTeam.name, creatures: pristinePlayer },
       opponent: pristineOpponent
     },
     actions

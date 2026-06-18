@@ -184,6 +184,15 @@ participants opted in (a profile/settings flag) — see `docs/settings-plan.md`.
    with Playwright** against the `/replay/__selftest` synthetic battle: produced a
    valid 13.9 MB MP4 (`ftyp`/`isom` + `moov`, fastStart), 56.5s, 720×900, encoded
    in ~14s. R2 untouched.
+   - *Real sprites + backdrop (2026-06-18):* the renderer draws actual 4×4 sprite
+     sheets (`/api/assets/...`, same-origin → no canvas taint) and the live pixel
+     backdrop (`makePixelBackdropSvg` ported verbatim, rasterized once and
+     "cover"-fit to the portrait frame). `__selftest` now pulls real ready-sprite
+     taxa from D1 via `createRandomReadyNpcTeam` so the demo shows real art. Verified
+     on production: sprites, biome backdrop, HP plates, status floats, captions all
+     render; full encode 9.6 MB / ~32s. `?still=<ms>` renders one frame for
+     screenshot inspection. (Note: prod `/api/assets` sends no CORS header, so the
+     renderer must be same-origin — fine for `/replay` on the same Worker.)
    - *Notes / follow-ups:* `mp4-muxer` is loaded from jsdelivr CDN — vendor it
      before the bot relies on it (Browser Rendering needs network too, but a
      pinned local copy is safer). Confirm headless Chrome in Cloudflare Browser
