@@ -3,13 +3,16 @@ import {
   chooseNpcMove,
   createBattleCreature,
   createGenome,
+  createNpcTeam,
   createSeededRng,
+  reconstructBattleStates,
   resolveTurn,
   terrainForTeam,
   territoryBuffPctForBiomeCount,
   TERRAIN_MOVE_BONUS,
   TYPE_CHART
 } from "./game.js";
+import { REPLAY_PAGE_HTML } from "./replay-page.js";
 
 // H3 geospatial indexing for the territory layer (pure-JS asm.js build, runs in
 // workerd). Maps an observation's lat/lng to the tile it falls in, and powers the
@@ -261,6 +264,15 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "GET" && url.pathname === "/") {
     return htmlResponse(renderAppHtml());
+  }
+
+  // Battle highlight video renderer (battle-highlights-bluesky.md). A standalone
+  // page that deterministically replays a battle onto a canvas and encodes an
+  // MP4 in-browser via WebCodecs. Runs both in a user's browser (Share button)
+  // and in headless Chrome (the bot). `/replay/<battleId>`; battleId is read
+  // from the path client-side.
+  if (request.method === "GET" && url.pathname.startsWith("/replay/")) {
+    return htmlResponse(REPLAY_PAGE_HTML);
   }
 
   if (request.method === "GET" && url.pathname === "/assets/landing-hero-battle.webp") {
@@ -825,7 +837,10 @@ async function routeRequest(request, env, ctx) {
 
   const battleReplayMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/replay$/);
   if (battleReplayMatch && request.method === "GET") {
-    return jsonResponse(await getBattleReplay(env, decodeURIComponent(battleReplayMatch[1])));
+    const wantStates = url.searchParams.get("states") === "1";
+    return jsonResponse(
+      await getBattleReplay(env, decodeURIComponent(battleReplayMatch[1]), { states: wantStates })
+    );
   }
 
   const battleActionMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/action$/);
@@ -4959,7 +4974,23 @@ async function getBattle(env, battleId) {
 // renderer feeds this to reconstructBattleStates() to redraw the battle. Only
 // battles created after the replay foundation landed carry `replay`/`actions`;
 // older battles return `available: false`.
-async function getBattleReplay(env, battleId) {
+async function getBattleReplay(env, battleId, { states = false } = {}) {
+  // `__selftest` synthesizes a battle on the fly (no DB/auth) so the renderer
+  // can be exercised standalone — used by the Playwright check and as a demo.
+  if (battleId === "__selftest") {
+    const replay = buildSelftestReplay();
+    const built = reconstructBattleStates(replay.replay, replay.actions);
+    return {
+      available: true,
+      battleId,
+      status: built.at(-1).status,
+      turns: replay.actions.length,
+      replay: replay.replay,
+      actions: replay.actions,
+      states: built
+    };
+  }
+
   const state = await getBattle(env, battleId);
   if (!state) return { error: "Battle not found", available: false };
   if (!state.replay || !Array.isArray(state.actions)) {
@@ -4971,7 +5002,56 @@ async function getBattleReplay(env, battleId) {
     status: state.status ?? null,
     turns: state.actions.length,
     replay: state.replay,
-    actions: state.actions
+    actions: state.actions,
+    states: states ? reconstructBattleStates(state.replay, state.actions) : undefined
+  };
+}
+
+// Deterministically simulate a short NPC-vs-NPC battle and return its replay
+// artifact (pristine teams + seed + recorded player actions). Mirrors the live
+// loop in submitBattleMove so reconstructBattleStates reproduces it exactly.
+function buildSelftestReplay(seed = "selftest-1") {
+  const playerTeam = createNpcTeam("wetland_watcher");
+  const opponent = createNpcTeam("backyard_beginner");
+  const terrain = terrainForTeam(opponent);
+  const pristinePlayer = structuredClone(playerTeam.creatures);
+  const pristineOpponent = structuredClone(opponent);
+
+  let current = {
+    mode: "npc",
+    difficulty: "normal",
+    seed,
+    turn: 1,
+    terrain,
+    player: { name: "Wetland Watcher", activeIndex: 0, creatures: structuredClone(pristinePlayer) },
+    opponent: structuredClone(pristineOpponent),
+    log: [],
+    status: "active"
+  };
+
+  const actions = [];
+  const pick = createSeededRng(`picker:${seed}`);
+  while (current.status === "active" && current.turn < 60) {
+    const rng = createSeededRng(`${current.seed}:${current.turn}`);
+    const npcAction = chooseNpcAction(current, "normal", rng);
+    const active = current.player.creatures[current.player.activeIndex];
+    const move = active.moves[Math.floor(pick() * active.moves.length)];
+    const playerAction = { kind: "move", moveId: move.id };
+    actions.push({ turn: current.turn, ...playerAction });
+    current = resolveTurn(current, playerAction, npcAction, rng);
+  }
+
+  return {
+    replay: {
+      v: 1,
+      mode: "npc",
+      seed,
+      difficulty: "normal",
+      terrain,
+      player: { name: "Wetland Watcher", creatures: pristinePlayer },
+      opponent: pristineOpponent
+    },
+    actions
   };
 }
 

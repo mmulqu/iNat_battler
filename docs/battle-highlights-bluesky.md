@@ -173,9 +173,22 @@ participants opted in (a profile/settings flag) — see `docs/settings-plan.md`.
    `reconstructBattleStates(replay, actions)` in `src/game.js` rebuilds every state;
    determinism proven by `scripts/verify-replay.mjs`. Older battles (pre-change) lack
    `replay` and return `{ available: false, reason: "no_replay" }`.
-2. **Canvas replay renderer** — `/replay/:id` page: deterministic reconstruction +
-   canvas draw of sprites/HP/effects/log, WebCodecs `VideoEncoder` → `mp4-muxer` →
-   MP4 blob. The biggest single piece; unlocks both paths.
+2. **Canvas replay renderer — ✅ DONE (2026-06-18).** `src/replay-page.js`
+   (`REPLAY_PAGE_HTML`), served at `/replay/<battleId>`. Fetches reconstructed
+   states (`GET /api/battles/:id/replay?states=1`), redraws the battle on a
+   720×900 canvas (terrain bg, mirrored sprite-sheet frames, HP plates, lunge /
+   knockback / hit-flash / shake / hurt-vignette / floating damage + crit / faint,
+   per-turn caption, intro + outro/result cards), and encodes H.264 MP4 in-browser
+   via WebCodecs `VideoEncoder` + `mp4-muxer` (CDN). Exposes `window.__replayResult`
+   (base64, for headless) and `window.__replayBlob` (+ Download button). **Verified
+   with Playwright** against the `/replay/__selftest` synthetic battle: produced a
+   valid 13.9 MB MP4 (`ftyp`/`isom` + `moov`, fastStart), 56.5s, 720×900, encoded
+   in ~14s. R2 untouched.
+   - *Notes / follow-ups:* `mp4-muxer` is loaded from jsdelivr CDN — vendor it
+     before the bot relies on it (Browser Rendering needs network too, but a
+     pinned local copy is safer). Confirm headless Chrome in Cloudflare Browser
+     Rendering supports H.264 `VideoEncoder` (Phase 5). Whole-battle clips can run
+     ~1s/turn-pair + intro/outro; add highlight trimming if duration grows.
 3. **Brand account + post pipeline** — `src/bsky-bot.js` (app-password session,
    uploadVideo, getJobStatus, video-embed post). Create + verify the account.
 4. **"Share as video" button** — on the battle-result overlay: render in-browser,
