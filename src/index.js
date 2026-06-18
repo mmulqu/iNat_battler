@@ -11949,7 +11949,8 @@ function renderAppHtml() {
       display: inline-block;
       padding: 2px 8px;
       border-radius: 999px;
-      background: #e7efe3;
+      background: var(--surface-3);
+      color: var(--ink);
       border: 1px solid var(--line);
       font-size: 0.74rem;
       font-weight: 700;
