@@ -94,11 +94,12 @@ export async function getVideoUploadLimits(session) {
 }
 
 // Uploads MP4 bytes through the video service and returns the processed blob ref.
-export async function uploadVideo(session, bytes, { name = "highlight.mp4" } = {}) {
-  const token = await getServiceAuth(session, { lxm: "com.atproto.repo.uploadBlob" });
-
+// `token` is a service-auth JWT (aud = the user's PDS, lxm = uploadBlob). This is
+// shared by the app-password path (below) and the per-user OAuth path (index.js),
+// which obtain the token differently but upload identically.
+export async function uploadVideoWithToken(token, did, bytes, { name = "highlight.mp4" } = {}) {
   const uploadRes = await fetch(
-    `${VIDEO_SERVICE}/xrpc/app.bsky.video.uploadVideo?did=${encodeURIComponent(session.did)}&name=${encodeURIComponent(name)}`,
+    `${VIDEO_SERVICE}/xrpc/app.bsky.video.uploadVideo?did=${encodeURIComponent(did)}&name=${encodeURIComponent(name)}`,
     {
       method: "POST",
       headers: {
@@ -136,6 +137,32 @@ export async function uploadVideo(session, bytes, { name = "highlight.mp4" } = {
   return await pollJobUntilBlob(token, jobId);
 }
 
+// App-password path: obtain a service-auth token from the brand session's PDS,
+// then upload via the shared helper.
+export async function uploadVideo(session, bytes, { name = "highlight.mp4" } = {}) {
+  const token = await getServiceAuth(session, { lxm: "com.atproto.repo.uploadBlob" });
+  return uploadVideoWithToken(token, session.did, bytes, { name });
+}
+
+// Builds an app.bsky.feed.post record carrying a video embed. Shared by the
+// brand (app-password) and per-user (OAuth) posting paths.
+export function buildVideoPostRecord({ text, blob, width, height, alt, facets, langs = ["en"] }) {
+  const record = {
+    $type: "app.bsky.feed.post",
+    text: text || "",
+    createdAt: new Date().toISOString(),
+    langs,
+    embed: {
+      $type: "app.bsky.embed.video",
+      video: blob,
+      ...(alt ? { alt } : {}),
+      ...(width && height ? { aspectRatio: { width, height } } : {})
+    }
+  };
+  if (facets && facets.length) record.facets = facets;
+  return record;
+}
+
 async function pollJobUntilBlob(token, jobId, { tries = 60, intervalMs = 2000 } = {}) {
   for (let i = 0; i < tries; i++) {
     const { ok, data } = await xrpc(VIDEO_SERVICE, "app.bsky.video.getJobStatus", { token, query: { jobId } });
@@ -170,21 +197,8 @@ export function buildMentionFacets(text, mentions = []) {
   return facets;
 }
 
-export async function createVideoPost(session, { text, blob, width, height, alt, facets, langs = ["en"] }) {
-  const record = {
-    $type: "app.bsky.feed.post",
-    text: text || "",
-    createdAt: new Date().toISOString(),
-    langs,
-    embed: {
-      $type: "app.bsky.embed.video",
-      video: blob,
-      ...(alt ? { alt } : {}),
-      ...(width && height ? { aspectRatio: { width, height } } : {})
-    }
-  };
-  if (facets && facets.length) record.facets = facets;
-
+export async function createVideoPost(session, { text, blob, width, height, alt, facets }) {
+  const record = buildVideoPostRecord({ text, blob, width, height, alt, facets });
   const { ok, status, data } = await xrpc(session.pdsUrl, "com.atproto.repo.createRecord", {
     token: session.accessJwt,
     body: { repo: session.did, collection: "app.bsky.feed.post", record }

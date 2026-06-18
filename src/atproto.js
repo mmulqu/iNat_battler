@@ -355,6 +355,41 @@ export async function pdsXrpcCall({ pdsUrl, accessToken, dpopKey, nonce }, nsid,
   }
 }
 
+// DPoP-authenticated XRPC GET (query method). pdsXrpcCall only does POST/JSON;
+// getServiceAuth (needed for video upload) is a GET with query params.
+export async function pdsXrpcGet({ pdsUrl, accessToken, dpopKey, nonce }, nsid, query) {
+  const qs = query ? "?" + new URLSearchParams(query).toString() : "";
+  const url = `${pdsUrl}/xrpc/${nsid}${qs}`;
+  let currentNonce = nonce ?? null;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const proof = await createDpopProof({
+      privateJwk: dpopKey.privateJwk,
+      publicJwk: dpopKey.publicJwk,
+      method: "GET",
+      url,
+      nonce: currentNonce,
+      accessToken
+    });
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { authorization: `DPoP ${accessToken}`, dpop: proof }
+    });
+    const data = await res.json().catch(() => ({}));
+    const serverNonce = res.headers.get("dpop-nonce");
+    if (serverNonce) currentNonce = serverNonce;
+
+    const needsNonce =
+      res.status === 401 &&
+      serverNonce &&
+      (data?.error === "use_dpop_nonce" ||
+        String(res.headers.get("www-authenticate") ?? "").includes("use_dpop_nonce"));
+    if (needsNonce && attempt === 0) continue;
+
+    return { ok: res.ok, status: res.status, data, nonce: currentNonce };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Bluesky post construction (challenge announcement with mention + link facets)
 // ---------------------------------------------------------------------------

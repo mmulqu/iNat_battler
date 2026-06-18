@@ -802,15 +802,67 @@ async function run() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = "battle-" + battleId + ".mp4"; a.textContent = "Download MP4"; a.className = "dl";
-    const btn = document.createElement("button"); btn.textContent = "Download MP4";
-    btn.onclick = () => a.click();
-    barEl.appendChild(btn);
+    const dlBtn = document.createElement("button"); dlBtn.textContent = "Download MP4";
+    dlBtn.onclick = () => a.click();
+    barEl.appendChild(dlBtn);
     if (Q.get("download") === "1") a.click();
+
+    if (Q.get("share") === "1") buildShareUI(data, blob);
   } catch (err) {
     console.error(err);
     window.__replayResult = { ok: false, error: String(err && err.message || err) };
     setStatus("Error: " + (err && err.message || err));
   }
+}
+
+function defaultCaption(data) {
+  const fin = data.states[data.states.length - 1];
+  const pName = data.states[0].player.name || "My team";
+  const oName = data.states[0].opponent.name || "the opponent";
+  const turns = Math.max(1, fin.turn - 1);
+  const outcome = fin.status === "won" ? (pName + " won") : fin.status === "lost" ? (oName + " won") : "A clash";
+  return outcome + " in " + turns + " turns! \\u2694\\uFE0F\\uD83E\\uDD8B #iNatBattler";
+}
+
+function buildShareUI(data, blob) {
+  const wrap = document.querySelector(".wrap");
+  const box = document.createElement("div");
+  box.style.cssText = "display:grid;gap:10px;width:min(92vw,360px);text-align:left";
+  const ta = document.createElement("textarea");
+  ta.value = defaultCaption(data);
+  ta.rows = 3; ta.maxLength = 280;
+  ta.style.cssText = "width:100%;border-radius:10px;border:1px solid #2c3a36;background:#0f1416;color:#e7eef0;padding:8px;font:inherit;box-sizing:border-box";
+  const label = document.createElement("label");
+  label.style.cssText = "display:flex;gap:8px;align-items:center;font-size:0.9rem;opacity:0.9";
+  const cb = document.createElement("input"); cb.type = "checkbox";
+  label.appendChild(cb); label.appendChild(document.createTextNode("Also share to the @wildmarch feed"));
+  const post = document.createElement("button"); post.textContent = "Post to my Bluesky \\uD83E\\uDD8B";
+  const out = document.createElement("div"); out.className = "status";
+
+  post.onclick = async () => {
+    post.disabled = true; out.textContent = "Uploading + posting (this can take ~30s)…";
+    try {
+      const params = new URLSearchParams({ caption: ta.value, brand: cb.checked ? "1" : "0", w: String(W), h: String(H) });
+      const res = await fetch("/api/battles/" + encodeURIComponent(battleId) + "/share-video?" + params, {
+        method: "POST", credentials: "include",
+        headers: { "content-type": "video/mp4" },
+        body: blob
+      });
+      const data2 = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data2.error || ("Failed (" + res.status + ")"));
+      out.innerHTML = "";
+      const mk = (text, href) => { const a = document.createElement("a"); a.href = href; a.target = "_blank"; a.textContent = text; a.style.color = "#7fe0cf"; return a; };
+      if (data2.self && data2.self.webUrl) { out.appendChild(document.createTextNode("Posted to your Bluesky: ")); out.appendChild(mk("view", data2.self.webUrl)); out.appendChild(document.createElement("br")); }
+      if (data2.brand && data2.brand.webUrl) { out.appendChild(document.createTextNode("Also on @wildmarch: ")); out.appendChild(mk("view", data2.brand.webUrl)); }
+      else if (data2.brand && data2.brand.error) { out.appendChild(document.createTextNode("(@wildmarch cross-post failed: " + data2.brand.error + ")")); }
+    } catch (err) {
+      post.disabled = false;
+      out.textContent = "Error: " + (err && err.message || err);
+    }
+  };
+
+  box.appendChild(ta); box.appendChild(label); box.appendChild(post); box.appendChild(out);
+  wrap.appendChild(box);
 }
 
 window.__renderReplay = run;
