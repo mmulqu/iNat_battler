@@ -2,6 +2,7 @@
   "name": "inat-battler",
   "main": "src/index.js",
   "compatibility_date": "2026-05-03",
+  "compatibility_flags": ["nodejs_compat"],
   "rules": [
     {
       "type": "Data",
@@ -38,6 +39,9 @@
   },
   "triggers": {
     "crons": ["*/2 * * * *"]
+  },
+  "browser": {
+    "binding": "BROWSER"
   },
   "d1_databases": [
     {

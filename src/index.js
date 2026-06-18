@@ -59,6 +59,7 @@ import {
   searchActorsTypeahead
 } from "./atproto.js";
 import { postBattleHighlight } from "./bsky-bot.js";
+import { renderHighlightHeadless } from "./highlight-bot.js";
 
 import landingHeroBattleImage from "./assets/landing-hero-battle.webp";
 import statusStunnedImage from "./assets/status-stunned.png";
@@ -802,6 +803,19 @@ async function routeRequest(request, env, ctx) {
     const session = await getSession(request, env);
     const viewerUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
     return jsonResponse(await getTerritoryLeaderboard(env, viewerUserId));
+  }
+
+  // Admin: validate the headless render pipeline (Browser Rendering + WebCodecs).
+  // ?battleId=__selftest&post=0&fps=24&max=40 — with post=1 it also posts to the
+  // brand feed, exercising the full bot path end to end.
+  if (request.method === "GET" && url.pathname === "/api/highlights/render-test") {
+    await requireAdminSession(request, env);
+    return jsonResponse(await renderHighlightTest(env, {
+      battleId: url.searchParams.get("battleId") || "__selftest",
+      post: url.searchParams.get("post") === "1",
+      fps: Number(url.searchParams.get("fps")) || 24,
+      maxSeconds: Number(url.searchParams.get("max")) || 40
+    }));
   }
 
   if (request.method === "POST" && url.pathname === "/api/share/battle") {
@@ -5418,6 +5432,45 @@ async function shareBattleVideo(env, session, battleId, bytes, { caption, width,
     ok: true,
     brand: { uri: post?.uri ?? null, webUrl: rkey ? `https://bsky.app/profile/${post.handle}/post/${rkey}` : null }
   };
+}
+
+// Admin validation of the headless render pipeline. Returns timing + size so we
+// can confirm Browser Rendering's Chrome supports the WebCodecs H.264 encoder
+// before building the autonomous curator on top of it.
+async function renderHighlightTest(env, { battleId, post, fps, maxSeconds }) {
+  const startedAt = Date.now();
+  const render = await renderHighlightHeadless(env, battleId, { fps, maxSeconds });
+  const out = {
+    ok: true,
+    battleId,
+    bytes: render.bytes.byteLength,
+    mb: Number((render.bytes.byteLength / 1024 / 1024).toFixed(2)),
+    width: render.width,
+    height: render.height,
+    durationMs: render.durationMs,
+    inPageEncodeMs: render.encodeMs,
+    totalRenderMs: Date.now() - startedAt
+  };
+
+  if (post) {
+    if (!env.BSKY_BOT_APP_PASSWORD || !env.BSKY_BOT_IDENTIFIER) {
+      out.posted = { error: "Brand posting not configured" };
+    } else {
+      const result = await postBattleHighlight({
+        identifier: env.BSKY_BOT_IDENTIFIER,
+        password: env.BSKY_BOT_APP_PASSWORD,
+        bytes: render.bytes,
+        text: "🌿 iNat Battler highlight (render-test) #iNatBattler",
+        alt: "An automated iNat Battler highlight render test.",
+        width: render.width,
+        height: render.height,
+        name: `rendertest-${battleId}.mp4`
+      });
+      const rkey = result?.uri ? String(result.uri).split("/").pop() : null;
+      out.posted = { uri: result?.uri ?? null, webUrl: rkey ? `https://bsky.app/profile/${result.handle}/post/${rkey}` : null };
+    }
+  }
+  return out;
 }
 
 function defaultHighlightCaption(battle) {
