@@ -8990,6 +8990,46 @@ function renderAppHtml() {
       margin-top: 8px;
     }
 
+    .settings-section {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.84);
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+
+    .settings-section > h3 {
+      margin: 0 0 12px;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+
+    .settings-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .settings-actions button {
+      width: auto;
+    }
+
+    .settings-toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .settings-toggle input {
+      width: 20px;
+      height: 20px;
+    }
+
     .home-dashboard {
       display: grid;
       gap: 18px;
@@ -11999,16 +12039,16 @@ function renderAppHtml() {
       }
 
       /* Keep focused tabs focused: the control sidebar stacks below every view
-         on mobile, so make it contextual. Map is fully self-contained → hide the
-         whole sidebar. Battle keeps only battle controls (Bluesky challenges +
-         team picker + Battle NPC) and drops account/sprite-gen/dev clutter. */
-      body[data-view="map"] .layout > .panel {
+         on mobile, so make it contextual. Map and Settings are fully
+         self-contained → hide the whole sidebar. Battle keeps only battle
+         controls (Bluesky challenges + team picker + Battle NPC) and drops the
+         roster sprite-queue button. */
+      body[data-view="map"] .layout > .panel,
+      body[data-view="settings"] .layout > .panel {
         display: none;
       }
 
-      body[data-view="battle"] .layout > .panel > .account-block,
-      body[data-view="battle"] .layout > .panel > #queueMoreButton,
-      body[data-view="battle"] .layout > .panel > details.dev-batch:not(.bsky-panel) {
+      body[data-view="battle"] .layout > .panel > #queueMoreButton {
         display: none;
       }
     }
@@ -12597,27 +12637,6 @@ function renderAppHtml() {
           </summary>
           <div id="bskyBody" class="bsky-body">Loading Bluesky session…</div>
         </details>
-        <div class="account-block">
-          <h2>Account</h2>
-          <div class="stats">
-            <div class="stat">
-              <span class="subtle">Taxa</span>
-              <strong id="taxaCount">0</strong>
-            </div>
-            <div class="stat">
-              <span class="subtle">Sprites</span>
-              <strong id="spriteCount">0</strong>
-            </div>
-            <div class="stat">
-              <span class="subtle">Queued</span>
-              <strong id="queuedCount">0</strong>
-            </div>
-            <div class="stat">
-              <span class="subtle">Affinity</span>
-              <strong id="bondCount">0</strong>
-            </div>
-          </div>
-        </div>
         <div class="team-picker">
           <div class="team-picker-row">
             <div>
@@ -12634,45 +12653,6 @@ function renderAppHtml() {
           <button class="primary" id="startBattleButton" type="button" disabled>Battle NPC</button>
         </div>
         <button class="secondary" id="queueMoreButton" type="button" disabled>Queue More</button>
-        <details class="dev-batch">
-          <summary class="dev-batch-head">
-            <h2>Dev Batch</h2>
-            <span class="subtle" id="batchQueueCount">0 queued</span>
-          </summary>
-          <p class="dev-batch-hint">Sprite generation for <strong>your roster</strong>. Queue More adds jobs for your taxa that are missing sprites; Submit Batch sends up to 100 queued jobs to OpenAI as one half-price image batch. Species without battle moves get those generated first.</p>
-          <button class="secondary" id="batchPreviewButton" type="button" disabled>Show Batch Queue</button>
-          <button class="secondary" id="batchSubmitButton" type="button" disabled>Submit Batch</button>
-          <div class="batch-list" id="batchQueueList">Load a roster, then click Queue More.</div>
-        </details>
-        <details class="dev-batch">
-          <summary class="dev-batch-head">
-            <h2>Global Seed</h2>
-            <span class="subtle" id="seedQueueCount">0 queued</span>
-          </summary>
-          <p class="dev-batch-hint">Builds the <strong>shared sprite library</strong> everyone draws from: the most-observed plant and animal species across North America and Europe. Queue 200 grabs the next 200 species that still lack a sprite (ready sprites and in-flight jobs are skipped); Submit 200 sends them to OpenAI — moves first, then sprite images. Repeat Queue &rarr; Submit to work through the pool.</p>
-          <button class="secondary" id="seedImportButton" type="button">Import Plants + Animals</button>
-          <button class="secondary" id="seedQueueButton" type="button">Queue 200</button>
-          <button class="secondary" id="seedSubmitButton" type="button" disabled>Submit 200</button>
-          <div class="batch-list" id="seedQueueList">Load seed status to start.</div>
-        </details>
-        <details class="dev-batch">
-          <summary class="dev-batch-head">
-            <h2>Manual Sprite</h2>
-            <span class="subtle" id="manualUploadState">idle</span>
-          </summary>
-          <form class="manual-upload" id="manualSpriteForm">
-            <input id="manualTaxonId" name="taxonId" inputmode="numeric" placeholder="iNaturalist taxon ID">
-            <input id="manualScientificName" name="scientificName" placeholder="Scientific name">
-            <input id="manualCommonName" name="commonName" placeholder="Common name">
-            <input id="manualSpriteFile" name="sprite" type="file" accept="image/png,image/jpeg,image/webp" required>
-            <label class="manual-upload-check">
-              <input id="manualAddToRoster" name="addToRoster" type="checkbox" checked>
-              Add to roster
-            </label>
-            <button class="secondary" id="manualUploadButton" type="submit">Upload Sprite</button>
-          </form>
-          <div class="batch-list" id="manualUploadResult">No manual upload yet.</div>
-        </details>
         <p class="status" id="statusLine"></p>
       </aside>
 
@@ -12688,6 +12668,7 @@ function renderAppHtml() {
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
           <button class="view-tab" id="recentTabButton" type="button" data-view-tab="recent">Recently Added</button>
           <button class="view-tab" id="devTabButton" type="button" data-view-tab="dev">Dev Lab</button>
+          <button class="view-tab" id="settingsTabButton" type="button" data-view-tab="settings">Settings</button>
         </nav>
         <section class="view-panel" id="homeView">
           <div class="home-dashboard" id="homeDashboard"></div>
@@ -12862,6 +12843,76 @@ function renderAppHtml() {
           <div class="batch-list" id="devLabPanel">
             <div class="empty">Enter a taxon ID.</div>
           </div>
+          <details class="dev-batch">
+            <summary class="dev-batch-head">
+              <h2>Dev Batch</h2>
+              <span class="subtle" id="batchQueueCount">0 queued</span>
+            </summary>
+            <p class="dev-batch-hint">Sprite generation for <strong>your roster</strong>. Queue More adds jobs for your taxa that are missing sprites; Submit Batch sends up to 100 queued jobs to OpenAI as one half-price image batch. Species without battle moves get those generated first.</p>
+            <button class="secondary" id="batchPreviewButton" type="button" disabled>Show Batch Queue</button>
+            <button class="secondary" id="batchSubmitButton" type="button" disabled>Submit Batch</button>
+            <div class="batch-list" id="batchQueueList">Load a roster, then click Queue More.</div>
+          </details>
+          <details class="dev-batch">
+            <summary class="dev-batch-head">
+              <h2>Global Seed</h2>
+              <span class="subtle" id="seedQueueCount">0 queued</span>
+            </summary>
+            <p class="dev-batch-hint">Builds the <strong>shared sprite library</strong> everyone draws from: the most-observed plant and animal species across North America and Europe. Queue 200 grabs the next 200 species that still lack a sprite (ready sprites and in-flight jobs are skipped); Submit 200 sends them to OpenAI — moves first, then sprite images. Repeat Queue &rarr; Submit to work through the pool.</p>
+            <button class="secondary" id="seedImportButton" type="button">Import Plants + Animals</button>
+            <button class="secondary" id="seedQueueButton" type="button">Queue 200</button>
+            <button class="secondary" id="seedSubmitButton" type="button" disabled>Submit 200</button>
+            <div class="batch-list" id="seedQueueList">Load seed status to start.</div>
+          </details>
+        </section>
+        <section class="view-panel" id="settingsView" hidden>
+          <div class="roster-head">
+            <h2>Settings</h2>
+            <span class="subtle" id="settingsState"></span>
+          </div>
+          <div class="settings-section">
+            <h3>Account</h3>
+            <div class="account-block">
+              <div class="stats">
+                <div class="stat"><span class="subtle">Taxa</span><strong id="taxaCount">0</strong></div>
+                <div class="stat"><span class="subtle">Sprites</span><strong id="spriteCount">0</strong></div>
+                <div class="stat"><span class="subtle">Queued</span><strong id="queuedCount">0</strong></div>
+                <div class="stat"><span class="subtle">Affinity</span><strong id="bondCount">0</strong></div>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button class="secondary" id="settingsReimportButton" type="button">Re-import roster</button>
+              <button class="secondary" id="settingsSignOutButton" type="button">Sign out</button>
+            </div>
+          </div>
+          <div class="settings-section">
+            <h3>Preferences</h3>
+            <label class="settings-toggle">
+              <input type="checkbox" id="settingsSoundToggle">
+              <span>Sound effects</span>
+            </label>
+          </div>
+          <div class="settings-section">
+            <h3>Sprites</h3>
+            <details class="dev-batch">
+              <summary class="dev-batch-head">
+                <h2>Manual Sprite</h2>
+                <span class="subtle" id="manualUploadState">idle</span>
+              </summary>
+              <form class="manual-upload" id="manualSpriteForm">
+                <input id="manualTaxonId" name="taxonId" inputmode="numeric" placeholder="iNaturalist taxon ID">
+                <input id="manualScientificName" name="scientificName" placeholder="Scientific name">
+                <input id="manualCommonName" name="commonName" placeholder="Common name">
+                <input id="manualSpriteFile" name="sprite" type="file" accept="image/png,image/jpeg,image/webp" required>
+                <label class="manual-upload-check">
+                  <input id="manualAddToRoster" name="addToRoster" type="checkbox" checked>
+                  Add to roster
+                </label>
+                <button class="secondary" id="manualUploadButton" type="submit">Upload Sprite</button>
+              </form>
+              <div class="batch-list" id="manualUploadResult">No manual upload yet.</div>
+            </details>
+          </div>
         </section>
       </section>
     </section>
@@ -12895,6 +12946,7 @@ function renderAppHtml() {
       <button class="mobile-sheet-item" type="button" data-mobile-nav="tree" role="menuitem">🌳 Sprite Tree</button>
       <button class="mobile-sheet-item" type="button" data-mobile-nav="recent" role="menuitem">✨ Recently Added</button>
       <button class="mobile-sheet-item" type="button" data-mobile-nav="dev" role="menuitem">🛠️ Dev Lab</button>
+      <button class="mobile-sheet-item" type="button" data-mobile-nav="settings" role="menuitem">⚙️ Settings</button>
     </div>
   </div>
 
@@ -13168,6 +13220,11 @@ function renderAppHtml() {
       trainingDetail: document.getElementById("trainingDetail"),
       devTabButton: document.getElementById("devTabButton"),
       devView: document.getElementById("devView"),
+      settingsTabButton: document.getElementById("settingsTabButton"),
+      settingsView: document.getElementById("settingsView"),
+      settingsReimportButton: document.getElementById("settingsReimportButton"),
+      settingsSignOutButton: document.getElementById("settingsSignOutButton"),
+      settingsSoundToggle: document.getElementById("settingsSoundToggle"),
       devLabState: document.getElementById("devLabState"),
       devTaxonIdInput: document.getElementById("devTaxonIdInput"),
       devRandomButton: document.getElementById("devRandomButton"),
@@ -13245,6 +13302,14 @@ function renderAppHtml() {
     els.treeTabButton.addEventListener("click", () => switchView("tree"));
     els.recentTabButton.addEventListener("click", () => switchView("recent"));
     els.devTabButton.addEventListener("click", () => switchView("dev"));
+    els.settingsTabButton.addEventListener("click", () => switchView("settings"));
+    els.settingsReimportButton.addEventListener("click", () => importRoster());
+    els.settingsSignOutButton.addEventListener("click", () => bskyLogout());
+    els.settingsSoundToggle.addEventListener("change", () => {
+      state.soundOn = els.settingsSoundToggle.checked;
+      localStorage.setItem("inatBattler:sound", state.soundOn ? "on" : "off");
+      if (state.battle) renderBattle();
+    });
 
     els.trainingSyncButton.addEventListener("click", syncTraining);
 
@@ -14833,7 +14898,7 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "map", "training", "dev"].includes(view) ? view : "home";
+      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "map", "training", "dev", "settings"].includes(view) ? view : "home";
       renderViewTabs();
 
       if (state.activeView === "map") {
@@ -14878,6 +14943,7 @@ function renderAppHtml() {
       els.treeTabButton.classList.toggle("active", view === "tree");
       els.recentTabButton.classList.toggle("active", view === "recent");
       els.devTabButton.classList.toggle("active", view === "dev");
+      els.settingsTabButton.classList.toggle("active", view === "settings");
       els.homeView.hidden = view !== "home";
       els.rosterView.hidden = view !== "roster";
       els.battleView.hidden = view !== "battle";
@@ -14888,6 +14954,8 @@ function renderAppHtml() {
       els.treeView.hidden = view !== "tree";
       els.recentView.hidden = view !== "recent";
       els.devView.hidden = view !== "dev";
+      els.settingsView.hidden = view !== "settings";
+      if (view === "settings") els.settingsSoundToggle.checked = state.soundOn;
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
 
       const primaryMobileViews = ["home", "roster", "battle", "buddies"];
