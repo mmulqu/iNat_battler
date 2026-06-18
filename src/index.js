@@ -9847,6 +9847,7 @@ function renderAppHtml() {
       justify-content: space-between;
       gap: 12px;
       align-items: center;
+      flex-wrap: wrap;
       margin-bottom: 12px;
     }
 
@@ -10776,6 +10777,7 @@ function renderAppHtml() {
       display: flex;
       gap: 8px;
       align-items: center;
+      flex-wrap: wrap;
     }
 
     .battle-head-tools .secondary {
@@ -12202,7 +12204,8 @@ function renderAppHtml() {
       body[data-view="settings"] .layout > .panel,
       body[data-view="leaderboard"] .layout > .panel,
       body[data-view="training"] .layout > .panel,
-      body[data-view="tree"] .layout > .panel {
+      body[data-view="tree"] .layout > .panel,
+      body[data-view="recent"] .layout > .panel {
         display: none;
       }
 
@@ -12556,7 +12559,8 @@ function renderAppHtml() {
     .map-mode-btn {
       border: none;
       background: transparent;
-      padding: 7px 14px;
+      padding: 9px 16px;
+      min-height: 40px;
       font-size: 0.85rem;
       font-weight: 700;
       color: var(--muted);
