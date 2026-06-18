@@ -193,6 +193,7 @@ Moderation works through emoji reactions in a private Discord channel:
 Visibility rules:
 
 - The **submitter sees their own custom sprite while it is pending or approved** in their roster and on their side of battles.
+- The app's custom-sprite submission list is private to the signed-in submitter; other players cannot list another user's submissions, even after approval.
 - **Opponents only see it once approved**; otherwise they see the shared global sprite (or the placeholder if none exists).
 - **Rejected sprites are hidden from everyone, including the submitter** — the roster shows the rejected QA badge but falls back to the shared global sprite.
 - A pending or approved custom sprite also makes that species battle-eligible for its owner even when no global sprite exists yet.

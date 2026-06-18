@@ -512,14 +512,22 @@ async function routeRequest(request, env, ctx) {
   const rosterMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/roster$/);
   if (request.method === "GET" && rosterMatch) {
     const userId = decodeURIComponent(rosterMatch[1]);
-    return jsonResponse(await getRoster(env, userId, rosterOptionsFromUrl(url)));
+    const session = await getSession(request, env);
+    return jsonResponse(await getRoster(env, userId, {
+      ...rosterOptionsFromUrl(url),
+      viewerUserId: session?.inat_login ? inatUserIdFor(session.inat_login) : null
+    }));
   }
 
   if (request.method === "GET" && url.pathname === "/api/roster") {
     const userId = url.searchParams.get("userId");
     if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
 
-    return jsonResponse(await getRoster(env, userId, rosterOptionsFromUrl(url)));
+    const session = await getSession(request, env);
+    return jsonResponse(await getRoster(env, userId, {
+      ...rosterOptionsFromUrl(url),
+      viewerUserId: session?.inat_login ? inatUserIdFor(session.inat_login) : null
+    }));
   }
 
   const spritePreferenceMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/(\d+)\/preference$/);
@@ -3758,7 +3766,7 @@ const ROSTER_SORT_CLAUSES = {
   status: "(r2_key IS NOT NULL OR custom_r2_key IS NOT NULL) DESC, obs_count DESC"
 };
 
-async function getRosterSummary(env, userId) {
+async function getRosterSummary(env, userId, includePendingCustomSprites = false) {
   const row = await env.DB.prepare(`
     WITH roster_status AS (
       SELECT
@@ -3777,7 +3785,7 @@ async function getRosterSummary(env, userId) {
           FROM user_sprite_submissions uss
           WHERE uss.user_id = ut.user_id
             AND uss.taxon_id = ut.taxon_id
-            AND uss.status != 'rejected'
+            AND (uss.status = 'approved' OR (? = 1 AND uss.status = 'pending'))
         ) AS has_ready,
         EXISTS (
           SELECT 1
@@ -3812,6 +3820,7 @@ async function getRosterSummary(env, userId) {
   `).bind(
     DEFAULT_ASSET_KIND,
     ASSET_VERSION,
+    includePendingCustomSprites ? 1 : 0,
     DEFAULT_ASSET_KIND,
     ASSET_VERSION,
     DEFAULT_ASSET_KIND,
@@ -3838,6 +3847,7 @@ async function getRoster(env, userId, options = {}) {
   const iconic = String(options.iconic ?? "");
   const status = ["ready", "pending", "missing"].includes(options.status) ? options.status : "all";
   const orderBy = ROSTER_SORT_CLAUSES[options.sort] ?? ROSTER_SORT_CLAUSES.obs;
+  const includePendingCustomSprites = options.viewerUserId === userId;
 
   const baseQuery = `
     SELECT
@@ -3893,7 +3903,7 @@ async function getRoster(env, userId, options = {}) {
         FROM user_sprite_submissions uss
         WHERE uss.user_id = ut.user_id
           AND uss.taxon_id = t.taxon_id
-          AND uss.status != 'rejected'
+          AND (uss.status = 'approved' OR (? = 1 AND uss.status = 'pending'))
         ORDER BY uss.created_at DESC
         LIMIT 1
       ) AS custom_r2_key,
@@ -3902,6 +3912,7 @@ async function getRoster(env, userId, options = {}) {
         FROM user_sprite_submissions uss
         WHERE uss.user_id = ut.user_id
           AND uss.taxon_id = t.taxon_id
+          AND ? = 1
         ORDER BY uss.created_at DESC
         LIMIT 1
       ) AS custom_status
@@ -3922,6 +3933,8 @@ async function getRoster(env, userId, options = {}) {
     ASSET_VERSION,
     DEFAULT_ASSET_KIND,
     ASSET_VERSION,
+    includePendingCustomSprites ? 1 : 0,
+    includePendingCustomSprites ? 1 : 0,
     userId,
     q,
     q,
@@ -3975,7 +3988,7 @@ async function getRoster(env, userId, options = {}) {
   return {
     userId,
     total: Number(totalRow?.total ?? rosterRows.length),
-    summary: await getRosterSummary(env, userId),
+    summary: await getRosterSummary(env, userId, includePendingCustomSprites),
     limit,
     offset,
     iconicCounts: (iconicRows.results ?? []).map((row) => ({
@@ -3983,8 +3996,7 @@ async function getRoster(env, userId, options = {}) {
       count: Number(row.count)
     })),
     taxa: rosterRows.map((row) => {
-      // The roster is the owner's own view, so pending or approved custom
-      // sprites win here; rejected submissions fall back to the global sprite.
+      // Pending custom sprites are owner-only until Discord QA approves them.
       const taxonId = Number(row.taxon_id);
       const variants = variantMap.get(taxonId) ?? [];
       const selectedVariant = selectSpriteVariant(variants, preferenceMap.get(taxonId));
