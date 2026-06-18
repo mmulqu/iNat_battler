@@ -9814,7 +9814,9 @@ function renderAppHtml() {
     .mobile-sheet {
       position: fixed;
       inset: 0;
-      z-index: 60;
+      /* Above the Leaflet map panes/controls (which reach ~1000) so the More
+         sheet never opens behind the territory map. */
+      z-index: 2000;
       display: flex;
       align-items: flex-end;
     }
@@ -12113,7 +12115,9 @@ function renderAppHtml() {
         left: 0;
         right: 0;
         bottom: 0;
-        z-index: 50;
+        /* Above the Leaflet map (panes/controls ~1000) so the bottom nav and its
+           More button stay on top on the Territory tab; below the More sheet (2000). */
+        z-index: 1500;
         background: var(--surface);
         border-top: 1px solid var(--line);
         box-shadow: 0 -4px 18px rgba(22, 32, 27, 0.08);
