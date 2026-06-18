@@ -13,8 +13,10 @@ and runs a vanilla-JS SPA on top of it. The hard parts already work:
 
 - **Auth**: Bluesky atproto OAuth with a proper session cookie
   (`HttpOnly; Secure; SameSite=Lax`).
-- **iNaturalist linking**: verification-code-in-profile flow, with iNat rate-limit
-  handling.
+- **iNaturalist linking**: verification-code-in-profile flow. Per-user reads (roster
+  import, training sync, territory obs sync) now fetch in the **user's own browser**
+  (iNat v2 CORS GET) and POST rows to the Worker just to persist, so the iNat rate limit
+  lands per-user (Worker fetch kept as fallback). Roster import is capped at 10k species.
 - **Core loop**: roster import, training/stat allocation, sprite generation pipeline
   (D1 + R2 + KV + Queues + OpenAI batch), challenges (async via Bluesky) plus NPC/demo
   battles, leaderboard with Bluesky sharing.
@@ -68,13 +70,35 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
 
 **Tooling:** ✅ project-scoped Playwright MCP added for browser-driven QA.
 
+**Progress (updated 2026-06-17):**
+
+- ✅ **iNat per-user rate-limit funnel SOLVED** (2026-06-15): roster import, training
+  sync, and territory obs sync now fetch in the user's own browser and POST rows to the
+  Worker just to persist — so the iNat budget lands per-user, **no OAuth needed**. Only
+  shared/cacheable data and the admin global-seed import still funnel through the Worker
+  (not user-proportional). **No longer a scaling blocker; iNat OAuth stays deferred** (it
+  would only add unobscured coords for a user's own threatened-taxa observations).
+- ✅ **Species roster re-derived correctly**: fixed the global-seed query to filter by
+  kingdom `taxon_id` (Animalia=1 / Plantae=47126), not `iconic_taxa=Animalia` — which is
+  iNat's invertebrate catch-all and had excluded birds/mammals/insects (so the old roster
+  was woodlice/anemones and missed gray squirrel, mallard, etc.). Rebuilt the
+  most-observed roster and backfilling the gaps via OpenAI batches (ready sprites ~1,560+
+  and climbing).
+- ✅ **Sprite Tree is now a real mobile taxonomic navigator** (not the old indented
+  outline): backfilled ancestor taxa give `Life › kingdom › … › genus › species`
+  normalized to the major Linnaean rungs; breadcrumb trunk + 2-column clade card grid +
+  animated species gallery + per-group color theming. Verified at 390px.
+
 ### What's next (recommended order)
 
 1. **Real-device QA** — the OAuth round-trip on actual iOS/Android.
-2. **Phase 5 cost gating** (non-negotiable before opening up) — rate-limit your own API,
-   especially sprite generation; per-user + global ceilings with clear 429 UX.
+2. **Phase 5 cost gating** (non-negotiable before opening up) — rate-limit **your own**
+   API, especially sprite generation; per-user + global ceilings with clear 429 UX.
+   _(The iNat funnel is already handled — this is about your own OpenAI/generation cost.)_
 3. **Phase 2 onboarding** — the guided mobile setup flow + missing-sprite fallback state.
 4. **Phase 4 retention** — wire the Buddy list into challenges ("challenge who's online").
+5. **Sprite Tree polish (optional)** — SVG "vine" connectors + grow/idle animation, and a
+   sunburst coverage minimap (doubles as a "which branches still need sprites" view).
 
 ---
 
@@ -103,8 +127,9 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
    show/paste verification code → verify → import → first roster summary), designed as a
    stepped mobile flow, not a desktop form.
 8. Default logged-in landing on **Home**, not the raw roster grid.
-9. Graceful "your species has no sprite yet" state — many imported species will be among
-   the ~1378 missing; show a placeholder + on-demand queue rather than a blank.
+9. Graceful "your species has no sprite yet" state — the ready set is ~1,560+ of the
+   ~2,000 most-observed roster (gaps still backfilling), and a user's long-tail species
+   may have none; show a placeholder + on-demand queue rather than a blank.
 
 ### Phase 3 — Roster at scale (mobile-critical)
 
