@@ -89,6 +89,24 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
   normalized to the major Linnaean rungs; breadcrumb trunk + 2-column clade card grid +
   animated species gallery + per-group color theming. Verified at 390px.
 
+**Progress (updated 2026-06-18):**
+
+- ✅ **Mobile tabs decluttered.** The desktop control sidebar stacked below every mobile
+  view; made it contextual via `body[data-view]` — hidden on Map/Settings/Leaderboard/
+  Training/Sprite Tree, Battle keeps only Bluesky challenges + team picker (Queue More
+  hidden), Home/Roster keep it.
+- ✅ **Settings tab** (⚙️ in the More sheet + desktop tab): relocated Account stats,
+  Sound toggle, Re-import roster, Sign out, and the Manual Sprite uploader. **Dev Batch +
+  Global Seed moved into Dev Lab.** See `settings-plan.md`.
+- ✅ **Dark / Light / System theme** (first pass): tokenized surfaces + `[data-theme]`
+  override, no-flash init, Settings toggle persisted + OS-following. Plus contrast fixes
+  (battle empty state, roster chips, card-back stats). _Polish remaining: colored tier/
+  status chips, battle-arena gradients, map dark-tuning, reduce-motion toggle._
+- ✅ Fixed the **More sheet opening behind the Leaflet map** (z-index).
+- ⏳ **Sprite gap backfill** ongoing: ready ~1,734; two image batches (~268 of the
+  most-observed-roster gaps) submitted 2026-06-18 and processing. Fixed expired/cancelled
+  batch sync so partial OpenAI results are recovered.
+
 ### What's next (recommended order)
 
 1. **Real-device QA** — the OAuth round-trip on actual iOS/Android.

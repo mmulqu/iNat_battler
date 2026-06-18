@@ -8,15 +8,16 @@ or buried in other screens. Pairs with the mobile sidebar-decluttering work
 Placement: a ⚙️ **Settings** item in the mobile **More** sheet, and a tab/gear on
 desktop.
 
-## Dev-tools relocation (do alongside / first)
+## Dev-tools relocation — ✅ DONE (2026-06-18)
 
-The shared sidebar's dev sprite tools belong in **Dev Lab only**, not stacked on
-every tab:
+The shared sidebar's dev sprite tools now live where they belong:
 
-- **Dev Batch** (roster sprite generation) → move into `devView`.
-- **Global Seed** (shared sprite library generation) → move into `devView`.
-- **Manual Sprite** (upload your own custom sprite) → move into **Settings → Sprites**
-  (it's a user feature, not a dev/admin tool).
+- ✅ **Dev Batch** (roster sprite generation) → moved into `devView`.
+- ✅ **Global Seed** (shared sprite library generation) → moved into `devView`.
+- ✅ **Manual Sprite** (upload your own custom sprite) → moved into **Settings → Sprites**.
+- ✅ Sidebar now holds only Bluesky challenges + team picker + Queue More, and is hidden
+  on focused mobile tabs (Map/Settings/Leaderboard/Training/Sprite Tree; Queue More
+  hidden on Battle).
 
 ## What goes in Settings
 
@@ -69,10 +70,15 @@ Legend: ✅ already exists (relocate) · 🆕 new build.
 
 ## Build order
 
-1. **Cheap wins (this pass):** create the Settings view + nav entry; relocate
-   **Log out, Account stats, Sound toggle, Manual Sprite, Re-import roster** into it;
-   move **Dev Batch + Global Seed** into Dev Lab. Pure relocation/consolidation — no
-   new features, low risk.
-2. **Dark mode** as a focused follow-up (whole-stylesheet theming).
-3. **Privacy & data** (delete account + disclosures) — a hard gate for public alpha.
-4. Notifications, PWA install, unlink, About — incremental.
+1. ✅ **Cheap wins — DONE (2026-06-18).** Settings view + ⚙️ nav entry; relocated Log out,
+   Account stats, Sound toggle, Manual Sprite, Re-import roster; moved Dev Batch + Global
+   Seed into Dev Lab.
+2. ✅ **Dark mode — DONE (first pass, 2026-06-18).** Light/Dark/System toggle, tokenized
+   surfaces, no-flash init. Plus contrast fixes (battle empty state, roster chips,
+   card-back stats). _Remaining polish: tier/status colored chips + battle-arena gradients
+   + map dark-tuning, and a Reduce-motion toggle._
+3. **Privacy & data** (delete account + disclosures) — a hard gate for public alpha. NOT
+   started.
+4. **Dev Lab access gating** — Dev Lab is consolidated but still visible to all users;
+   gate behind admin (ties into Phase 5). NOT started.
+5. Notifications, PWA install, unlink, About — incremental.
