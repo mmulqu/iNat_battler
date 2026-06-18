@@ -157,6 +157,9 @@ function buildTimeline(data) {
     m[side].spriteUrl = creature.spriteUrl || null;
     m[side].fainted = false;
     m[side].faintStart = null;
+    // Marks when this creature took the field; a faint only applies to the
+    // creature that was active when it occurred (faints linger in tl.anims).
+    m[side].activeSince = t;
   });
   const caption = (t, text) => cmd(t, (m) => { m.caption = text; });
 
@@ -437,13 +440,16 @@ function drawCreature(model, side, imgs, t) {
     } else if (a.kind === "flash") {
       if (p >= 0 && p <= 1) flash = Math.max(flash, Math.sin(p * Math.PI));
     } else if (a.kind === "faint") {
-      if (p >= 0) faintP = Math.min(1, easeInOut(Math.min(1, p)));
+      // Only the creature that was active when this faint fired stays down; once
+      // the replacement is sent in (activeSince advances past the faint) skip it.
+      if (p >= 0 && a.start >= (m.activeSince ?? -Infinity)) faintP = Math.min(1, easeInOut(Math.min(1, p)));
     }
   }
   if (m.fainted && m.faintStart != null && t >= m.faintStart + FAINT_MS) faintP = 1;
 
   const yDrop = faintP * SPRITE * 0.42;
   const alpha = 1 - faintP;
+  m._dbgAlpha = alpha;
   const cx = base.x + dx, cy = base.y + dy + yDrop;
 
   // shadow platform
@@ -708,9 +714,21 @@ async function run() {
     // Debug: ?still=<ms> renders a single frame (no encode) so a screenshot can
     // inspect an exact moment of the battle.
     if (Q.has("still")) {
-      renderFrame(model, tl, clampInt(Q.get("still"), 4000, 0, 600000));
-      window.__replayResult = { ok: true, still: true };
-      setStatus("Still frame at " + Q.get("still") + "ms (totalMs=" + Math.round(tl.totalMs) + ")");
+      // Re-render any timestamp from a fresh model (commands replay from t=0).
+      const renderAt = (ms) => {
+        const fresh = { player: {}, opponent: {}, caption: "", outro: null, _ci: 0, _anims: [], _imgs: imgs, _bg: bg };
+        renderFrame(fresh, tl, ms);
+        return { t: ms, player: { name: fresh.player.name, alpha: fresh.player._dbgAlpha }, opponent: { name: fresh.opponent.name, alpha: fresh.opponent._dbgAlpha } };
+      };
+      window.__renderAt = renderAt;
+      const st = clampInt(Q.get("still"), 4000, 0, 600000);
+      const info = renderAt(st);
+      window.__replayResult = {
+        ok: true, still: true, totalMs: Math.round(tl.totalMs),
+        faints: tl.anims.filter((a) => a.kind === "faint").map((a) => ({ side: a.side, start: Math.round(a.start) })),
+        ...info
+      };
+      setStatus("Still frame at " + st + "ms (totalMs=" + Math.round(tl.totalMs) + ")");
       return;
     }
     setStatus("Rendering…");
