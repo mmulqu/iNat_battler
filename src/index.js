@@ -11997,6 +11997,20 @@ function renderAppHtml() {
       .layout > .panel {
         order: 2;
       }
+
+      /* Keep focused tabs focused: the control sidebar stacks below every view
+         on mobile, so make it contextual. Map is fully self-contained → hide the
+         whole sidebar. Battle keeps only battle controls (Bluesky challenges +
+         team picker + Battle NPC) and drops account/sprite-gen/dev clutter. */
+      body[data-view="map"] .layout > .panel {
+        display: none;
+      }
+
+      body[data-view="battle"] .layout > .panel > .account-block,
+      body[data-view="battle"] .layout > .panel > #queueMoreButton,
+      body[data-view="battle"] .layout > .panel > details.dev-batch:not(.bsky-panel) {
+        display: none;
+      }
     }
 
     @media (max-width: 720px) {
@@ -12583,23 +12597,25 @@ function renderAppHtml() {
           </summary>
           <div id="bskyBody" class="bsky-body">Loading Bluesky session…</div>
         </details>
-        <h2>Account</h2>
-        <div class="stats">
-          <div class="stat">
-            <span class="subtle">Taxa</span>
-            <strong id="taxaCount">0</strong>
-          </div>
-          <div class="stat">
-            <span class="subtle">Sprites</span>
-            <strong id="spriteCount">0</strong>
-          </div>
-          <div class="stat">
-            <span class="subtle">Queued</span>
-            <strong id="queuedCount">0</strong>
-          </div>
-          <div class="stat">
-            <span class="subtle">Affinity</span>
-            <strong id="bondCount">0</strong>
+        <div class="account-block">
+          <h2>Account</h2>
+          <div class="stats">
+            <div class="stat">
+              <span class="subtle">Taxa</span>
+              <strong id="taxaCount">0</strong>
+            </div>
+            <div class="stat">
+              <span class="subtle">Sprites</span>
+              <strong id="spriteCount">0</strong>
+            </div>
+            <div class="stat">
+              <span class="subtle">Queued</span>
+              <strong id="queuedCount">0</strong>
+            </div>
+            <div class="stat">
+              <span class="subtle">Affinity</span>
+              <strong id="bondCount">0</strong>
+            </div>
           </div>
         </div>
         <div class="team-picker">
@@ -14851,6 +14867,7 @@ function renderAppHtml() {
 
     function renderViewTabs() {
       const view = state.activeView;
+      document.body.dataset.view = view;
       els.homeTabButton.classList.toggle("active", view === "home");
       els.rosterTabButton.classList.toggle("active", view === "roster");
       els.battleTabButton.classList.toggle("active", view === "battle");
