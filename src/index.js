@@ -318,6 +318,10 @@ async function routeRequest(request, env, ctx) {
     return handleLogout(request, env);
   }
 
+  if (request.method === "POST" && url.pathname === "/api/account/delete") {
+    return handleAccountDelete(request, env);
+  }
+
   if (request.method === "GET" && url.pathname === "/api/me") {
     return jsonResponse(await getMe(request, env));
   }
@@ -5439,6 +5443,85 @@ async function handleLogout(request, env) {
   });
 }
 
+// Permanently delete the signed-in player's account and all their data. Shared/
+// global data (taxa, the sprite_assets library, biome geography) is preserved;
+// owned tiles are released to neutral. `deleteSharedSprites` also removes sprites
+// the player contributed to the shared library (others lose that art).
+async function handleAccountDelete(request, env) {
+  const session = await requireSession(request, env);
+  const did = session.did;
+  const inatLogin = session.inat_login || null;
+  const userId = inatLogin ? inatUserIdFor(inatLogin) : null;
+  const payload = await readJson(request);
+  const deleteSharedSprites = payload.deleteSharedSprites === true;
+
+  // Collect R2 blobs to remove (before the rows that reference them are gone).
+  const r2Keys = [];
+  if (userId) {
+    if (deleteSharedSprites) {
+      const subs = await env.DB.prepare(
+        "SELECT r2_key FROM user_sprite_submissions WHERE user_id = ?"
+      ).bind(userId).all();
+      for (const r of subs.results ?? []) if (r.r2_key) r2Keys.push(r.r2_key);
+      // Remove the shared sprite_assets promoted from this user's approved uploads.
+      await env.DB.prepare(
+        "DELETE FROM sprite_assets WHERE prompt_hash IN " +
+        "(SELECT 'user-approved:' || submission_id FROM user_sprite_submissions WHERE user_id = ?)"
+      ).bind(userId).run();
+    } else {
+      // Keep promoted shared sprites: only delete uploads no sprite_asset references.
+      const subs = await env.DB.prepare(
+        "SELECT r2_key FROM user_sprite_submissions WHERE user_id = ? " +
+        "AND r2_key NOT IN (SELECT r2_key FROM sprite_assets WHERE r2_key IS NOT NULL)"
+      ).bind(userId).all();
+      for (const r of subs.results ?? []) if (r.r2_key) r2Keys.push(r.r2_key);
+    }
+    // Release any tiles this player owns back to neutral (geography is shared).
+    await env.DB.prepare(
+      "UPDATE tiles SET owner_id = NULL, owner_faction_id = NULL, state = 'neutral', " +
+      "defender_team_json = NULL, garrison_deadline = NULL, claimed_at = NULL WHERE owner_id = ?"
+    ).bind(userId).run();
+  }
+
+  const statements = [];
+  if (userId) {
+    for (const table of [
+      "user_taxa", "teams", "species_training", "user_masteries", "user_sprite_preferences",
+      "player_ratings", "user_generation_budget_daily", "territory_players",
+      "tile_observations", "territory_actions", "user_sprite_submissions"
+    ]) {
+      statements.push(env.DB.prepare(`DELETE FROM ${table} WHERE user_id = ?`).bind(userId));
+    }
+    statements.push(env.DB.prepare("DELETE FROM tile_garrison WHERE owner_id = ?").bind(userId));
+    statements.push(env.DB.prepare(
+      "DELETE FROM battle_instances WHERE attacker_user_id = ? OR defender_user_id = ?"
+    ).bind(userId, userId));
+    statements.push(env.DB.prepare(
+      "DELETE FROM battle_results WHERE winner_user_id = ? OR loser_user_id = ?"
+    ).bind(userId, userId));
+    statements.push(env.DB.prepare("DELETE FROM users WHERE id = ?").bind(userId));
+  }
+  statements.push(env.DB.prepare(
+    "DELETE FROM challenges WHERE challenger_did = ? OR opponent_did = ?"
+  ).bind(did, did));
+  statements.push(env.DB.prepare("DELETE FROM oauth_requests WHERE did = ?").bind(did));
+  statements.push(env.DB.prepare("DELETE FROM oauth_sessions WHERE did = ?").bind(did));
+  statements.push(env.DB.prepare("DELETE FROM accounts WHERE did = ?").bind(did));
+  await env.DB.batch(statements);
+
+  // Best-effort R2 cleanup (the DB rows are already gone regardless).
+  for (const key of r2Keys) {
+    try { await env.ASSETS.delete(key); } catch (e) { /* ignore */ }
+  }
+
+  return new Response(JSON.stringify({ ok: true, deleted: true, deletedSharedSprites: deleteSharedSprites }), {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "set-cookie": sessionCookieHeader("", 0)
+    }
+  });
+}
+
 async function getMe(request, env) {
   const session = await getSession(request, env);
   if (!session) return { loggedIn: false };
@@ -9069,6 +9152,26 @@ function renderAppHtml() {
       gap: 10px;
       font-weight: 800;
       cursor: pointer;
+    }
+
+    .settings-disclosure {
+      line-height: 1.5;
+    }
+
+    .secondary.settings-danger {
+      background: var(--coral);
+      color: #fff;
+      border: 0;
+    }
+
+    .delete-panel {
+      margin-top: 12px;
+      padding: 14px;
+      border: 1px solid var(--coral);
+      border-radius: 10px;
+      background: var(--surface-2);
+      display: grid;
+      gap: 10px;
     }
 
     .settings-toggle input {
@@ -12978,6 +13081,25 @@ function renderAppHtml() {
               <div class="batch-list" id="manualUploadResult">No manual upload yet.</div>
             </details>
           </div>
+          <div class="settings-section">
+            <h3>Privacy &amp; data</h3>
+            <p class="subtle settings-disclosure">We store: your Bluesky handle &amp; DID and login session; your linked iNaturalist username; your imported <strong>research-grade</strong> species roster and observation summaries (public iNaturalist data only — never your iNat password); your team, training, and territory choices; any sprites you upload; and battle/challenge records. Per-user iNaturalist fetches happen in your own browser.</p>
+            <div class="settings-actions">
+              <button class="secondary settings-danger" id="settingsDeleteButton" type="button">Delete account &amp; data</button>
+            </div>
+            <div class="delete-panel" id="settingsDeletePanel" hidden>
+              <p><strong>This permanently deletes your account and all your data, and can't be undone.</strong> Your owned territory tiles are released to neutral.</p>
+              <label class="settings-toggle">
+                <input type="checkbox" id="deleteSharedSpritesCheck">
+                <span>Also remove sprites I contributed to the shared library</span>
+              </label>
+              <p class="subtle">If left unchecked, sprites you contributed stay in the shared library for other players (de-identified). If checked, any species using your art falls back to AI-generated sprites for everyone.</p>
+              <div class="settings-actions">
+                <button class="secondary" id="settingsDeleteCancel" type="button">Cancel</button>
+                <button class="secondary settings-danger" id="settingsDeleteConfirm" type="button">Permanently delete</button>
+              </div>
+            </div>
+          </div>
         </section>
       </section>
     </section>
@@ -13291,6 +13413,11 @@ function renderAppHtml() {
       settingsSignOutButton: document.getElementById("settingsSignOutButton"),
       settingsSoundToggle: document.getElementById("settingsSoundToggle"),
       themeToggle: document.getElementById("themeToggle"),
+      settingsDeleteButton: document.getElementById("settingsDeleteButton"),
+      settingsDeletePanel: document.getElementById("settingsDeletePanel"),
+      deleteSharedSpritesCheck: document.getElementById("deleteSharedSpritesCheck"),
+      settingsDeleteCancel: document.getElementById("settingsDeleteCancel"),
+      settingsDeleteConfirm: document.getElementById("settingsDeleteConfirm"),
       devLabState: document.getElementById("devLabState"),
       devTaxonIdInput: document.getElementById("devTaxonIdInput"),
       devRandomButton: document.getElementById("devRandomButton"),
@@ -13374,6 +13501,32 @@ function renderAppHtml() {
     els.themeToggle.addEventListener("click", (event) => {
       const btn = event.target.closest("[data-theme-pref]");
       if (btn) setThemePreference(btn.getAttribute("data-theme-pref"));
+    });
+    els.settingsDeleteButton.addEventListener("click", () => {
+      els.settingsDeletePanel.hidden = false;
+      els.settingsDeleteButton.hidden = true;
+    });
+    els.settingsDeleteCancel.addEventListener("click", () => {
+      els.settingsDeletePanel.hidden = true;
+      els.settingsDeleteButton.hidden = false;
+      els.deleteSharedSpritesCheck.checked = false;
+    });
+    els.settingsDeleteConfirm.addEventListener("click", async () => {
+      els.settingsDeleteConfirm.disabled = true;
+      els.settingsDeleteConfirm.textContent = "Deleting…";
+      try {
+        await apiFetch("/api/account/delete", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ deleteSharedSprites: els.deleteSharedSpritesCheck.checked })
+        });
+        // Account + session are gone; reload to the public landing.
+        window.location.href = "/";
+      } catch (error) {
+        els.settingsDeleteConfirm.disabled = false;
+        els.settingsDeleteConfirm.textContent = "Permanently delete";
+        setStatus(error.message || "Could not delete account");
+      }
     });
     if (window.matchMedia) {
       window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {

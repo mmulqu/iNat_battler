@@ -59,9 +59,18 @@ Legend: ✅ already exists (relocate) · 🆕 new build.
 - 🆕 Challenge received / accepted → email / Bluesky / web-push toggles.
 
 ### Privacy & data — required before public alpha (see public-alpha-readiness-plan.md)
-- 🆕 **Delete account + imported data** (Bluesky DID + iNat data).
-- 🆕 "What we store" disclosure + privacy / terms links.
-- 🆕 Export my data (optional).
+- ✅ **Delete account + imported data — DONE (2026-06-18).** Settings → Privacy & data:
+  "what we store" disclosure + a two-step **Delete account** flow → `POST
+  /api/account/delete`. Wipes everything keyed to the player's DID and `inat:<login>`
+  (account/auth, roster, teams, training, masteries, sprite prefs, ratings, gen budget,
+  territory players/observations/actions/garrison, battle instances/results, challenges);
+  releases owned tiles to neutral; preserves shared/global data. Player chooses whether to
+  also remove sprites they contributed to the shared library (with an effect note);
+  best-effort R2 blob cleanup; logs out + returns to landing. _Caveat: the deletion path
+  itself wasn't run end-to-end (can't without deleting a real account) — SQL reviewed
+  against the schema; test with a throwaway Bluesky account before relying on it._
+- 🆕 "What we store" disclosure ✅ (in the section). Privacy / terms **links** still TODO.
+- 🆕 Export my data (optional) — not started.
 
 ### About / app
 - 🆕 **Install app** (PWA `beforeinstallprompt` — not currently wired).
