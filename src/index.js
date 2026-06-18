@@ -12039,12 +12039,15 @@ function renderAppHtml() {
       }
 
       /* Keep focused tabs focused: the control sidebar stacks below every view
-         on mobile, so make it contextual. Map and Settings are fully
-         self-contained → hide the whole sidebar. Battle keeps only battle
-         controls (Bluesky challenges + team picker + Battle NPC) and drops the
-         roster sprite-queue button. */
+         on mobile, so make it contextual. Self-contained views (Map, Settings,
+         Leaderboard, Training, Sprite Tree) hide the whole sidebar. Battle keeps
+         only battle controls (Bluesky challenges + team picker + Battle NPC) and
+         drops the roster sprite-queue button. */
       body[data-view="map"] .layout > .panel,
-      body[data-view="settings"] .layout > .panel {
+      body[data-view="settings"] .layout > .panel,
+      body[data-view="leaderboard"] .layout > .panel,
+      body[data-view="training"] .layout > .panel,
+      body[data-view="tree"] .layout > .panel {
         display: none;
       }
 
