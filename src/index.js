@@ -2579,7 +2579,14 @@ async function syncSpriteBatch(env, batchId, options = {}) {
   const remote = await retrieveOpenAIBatch(env, batchId);
   await updateStoredSpriteBatch(env, remote);
 
-  if (remote.status !== "completed") {
+  // A batch can expire/cancel with some requests done — OpenAI still puts those
+  // completed results in the output file. Sync any terminal batch that has files,
+  // not just "completed". Only bail while it is still running.
+  const terminalWithFiles =
+    remote.status === "completed" ||
+    (["expired", "cancelled", "canceled", "failed"].includes(remote.status) &&
+      (remote.output_file_id || remote.error_file_id));
+  if (!terminalWithFiles) {
     return {
       synced: false,
       batchId,
@@ -2629,6 +2636,25 @@ async function syncSpriteBatch(env, batchId, options = {}) {
     }
   }
 
+  // Expired/cancelled batches: requests that never ran are in neither file and
+  // will never resolve. Once both files are fully drained, settle the leftovers
+  // as failed so the batch reaches a terminal synced state.
+  if (remote.status !== "completed" && outputComplete && errorComplete && pendingCustomIds.size > 0) {
+    for (const customId of [...pendingCustomIds]) {
+      if (processed >= maxItems) { errorComplete = false; break; }
+      const result = await markSpriteBatchItemFailed(
+        env,
+        batchId,
+        customId,
+        `Batch ${remote.status} before this request completed`
+      );
+      if (result) {
+        pendingCustomIds.delete(customId);
+        processed += 1;
+      }
+    }
+  }
+
   const counts = await getBatchItemSyncCounts(env, batchId);
   const synced = counts.itemCount > 0 && counts.ready + counts.failed >= counts.itemCount;
 
@@ -2658,7 +2684,7 @@ async function syncPendingSpriteBatches(
   const rows = await env.DB.prepare(`
     SELECT b.batch_id
     FROM openai_sprite_batches b
-    WHERE b.status IN ('submitted', 'validating', 'in_progress', 'finalizing', 'completed')
+    WHERE b.status IN ('submitted', 'validating', 'in_progress', 'finalizing', 'completed', 'expired', 'cancelled', 'canceled')
       AND EXISTS (
         SELECT 1
         FROM openai_sprite_batch_items bi
