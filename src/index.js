@@ -10414,7 +10414,7 @@ function renderAppHtml() {
       align-items: center;
       font-size: 0.74rem;
       font-weight: 800;
-      color: #344139;
+      color: var(--ink);
     }
 
     .stat-track {
@@ -10635,7 +10635,7 @@ function renderAppHtml() {
       border-radius: 999px;
       padding: 4px 8px;
       background: var(--surface-2);
-      color: #344139;
+      color: var(--ink);
       font-size: 0.78rem;
       font-weight: 700;
       overflow-wrap: anywhere;
@@ -10645,19 +10645,23 @@ function renderAppHtml() {
       display: grid;
       place-items: center;
       min-height: 360px;
-      border: 1px dashed #bcc6bc;
+      border: 1px dashed var(--line);
       border-radius: 8px;
       color: var(--muted);
-      background: rgba(255,255,255,0.56);
+      background: var(--surface-2);
       text-align: center;
       padding: 24px;
+    }
+
+    .empty strong {
+      color: var(--ink);
     }
 
     .battle {
       padding: 16px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255,255,255,0.88);
+      background: var(--surface-translucent);
       box-shadow: var(--shadow);
     }
 
