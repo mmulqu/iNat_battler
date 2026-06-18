@@ -11210,15 +11210,19 @@ function renderAppHtml() {
       align-items: start;
     }
 
+    /* The plate keeps a light background in both themes, so its text is fixed
+       dark — otherwise dark-mode var(--ink)/var(--muted) flip to light and the
+       name/role render white-on-white. */
     .combatant-name {
       min-width: 0;
       font-weight: 800;
       line-height: 1.2;
       overflow-wrap: anywhere;
+      color: #17201b;
     }
 
     .combatant-role {
-      color: var(--muted);
+      color: #5a6b62;
       font-size: 0.82rem;
       white-space: nowrap;
     }
@@ -12018,15 +12022,22 @@ function renderAppHtml() {
       margin-top: 12px;
     }
 
+    /* Move buttons keep a light background in both themes; fix the text dark so
+       the move name (and muted sub-text) stay readable in dark mode. */
     .move-button {
       min-height: 44px;
       border-radius: 8px;
       padding: 8px 10px;
-      color: var(--ink);
+      color: #17201b;
       background: #edf1ec;
       border: 1px solid var(--line);
       font-weight: 800;
       text-align: left;
+    }
+
+    .move-button .subtle,
+    .move-button .move-meta {
+      color: #5a6b62;
     }
 
     .move-button.eff-strong {
