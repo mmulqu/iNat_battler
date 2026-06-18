@@ -9467,6 +9467,38 @@ function renderAppHtml() {
       gap: 10px;
     }
 
+    /* "Are you sure?" confirmation for irreversible account deletion. */
+    .confirm-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 80;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: rgba(18, 26, 22, 0.55);
+    }
+
+    .confirm-modal[hidden] {
+      display: none;
+    }
+
+    .confirm-sheet {
+      width: min(460px, 100%);
+      margin-top: 0;
+      background: var(--surface);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    }
+
+    .confirm-title {
+      margin: 0;
+      color: var(--coral);
+    }
+
+    .confirm-actions {
+      justify-content: flex-end;
+    }
+
     .settings-toggle input {
       width: 20px;
       height: 20px;
@@ -13305,16 +13337,19 @@ function renderAppHtml() {
             <div class="settings-actions">
               <button class="secondary settings-danger" id="settingsDeleteButton" type="button">Delete account &amp; data</button>
             </div>
-            <div class="delete-panel" id="settingsDeletePanel" hidden>
-              <p><strong>This permanently deletes your account and all your data, and can't be undone.</strong> Your owned territory tiles are released to neutral.</p>
-              <label class="settings-toggle">
-                <input type="checkbox" id="deleteSharedSpritesCheck">
-                <span>Also remove sprites I contributed to the shared library</span>
-              </label>
-              <p class="subtle">If left unchecked, sprites you contributed stay in the shared library for other players (de-identified). If checked, any species using your art falls back to AI-generated sprites for everyone.</p>
-              <div class="settings-actions">
-                <button class="secondary" id="settingsDeleteCancel" type="button">Cancel</button>
-                <button class="secondary settings-danger" id="settingsDeleteConfirm" type="button">Permanently delete</button>
+            <div class="confirm-modal" id="settingsDeletePanel" hidden>
+              <div class="confirm-sheet delete-panel" role="dialog" aria-modal="true" aria-labelledby="settingsDeleteHeading">
+                <h3 class="confirm-title" id="settingsDeleteHeading">Delete your account &amp; data?</h3>
+                <p><strong>Are you sure? This permanently deletes your account and all your data, and can't be undone.</strong> Your owned territory tiles are released to neutral.</p>
+                <label class="settings-toggle">
+                  <input type="checkbox" id="deleteSharedSpritesCheck">
+                  <span>Also remove sprites I contributed to the shared library</span>
+                </label>
+                <p class="subtle">If left unchecked, sprites you contributed stay in the shared library for other players (de-identified). If checked, any species using your art falls back to AI-generated sprites for everyone.</p>
+                <div class="settings-actions confirm-actions">
+                  <button class="secondary" id="settingsDeleteCancel" type="button">Cancel</button>
+                  <button class="secondary settings-danger" id="settingsDeleteConfirm" type="button">Yes, delete permanently</button>
+                </div>
               </div>
             </div>
           </div>
@@ -13700,14 +13735,22 @@ function renderAppHtml() {
       const btn = event.target.closest("[data-theme-pref]");
       if (btn) setThemePreference(btn.getAttribute("data-theme-pref"));
     });
+    const closeDeleteModal = () => {
+      els.settingsDeletePanel.hidden = true;
+      els.deleteSharedSpritesCheck.checked = false;
+    };
     els.settingsDeleteButton.addEventListener("click", () => {
       els.settingsDeletePanel.hidden = false;
-      els.settingsDeleteButton.hidden = true;
     });
-    els.settingsDeleteCancel.addEventListener("click", () => {
-      els.settingsDeletePanel.hidden = true;
-      els.settingsDeleteButton.hidden = false;
-      els.deleteSharedSpritesCheck.checked = false;
+    els.settingsDeleteCancel.addEventListener("click", closeDeleteModal);
+    // Dismiss on backdrop click or Escape (but not while a delete is in flight).
+    els.settingsDeletePanel.addEventListener("click", (event) => {
+      if (event.target === els.settingsDeletePanel && !els.settingsDeleteConfirm.disabled) closeDeleteModal();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !els.settingsDeletePanel.hidden && !els.settingsDeleteConfirm.disabled) {
+        closeDeleteModal();
+      }
     });
     els.settingsDeleteConfirm.addEventListener("click", async () => {
       els.settingsDeleteConfirm.disabled = true;
