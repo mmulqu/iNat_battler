@@ -189,8 +189,23 @@ participants opted in (a profile/settings flag) — see `docs/settings-plan.md`.
      pinned local copy is safer). Confirm headless Chrome in Cloudflare Browser
      Rendering supports H.264 `VideoEncoder` (Phase 5). Whole-battle clips can run
      ~1s/turn-pair + intro/outro; add highlight trimming if duration grows.
-3. **Brand account + post pipeline** — `src/bsky-bot.js` (app-password session,
-   uploadVideo, getJobStatus, video-embed post). Create + verify the account.
+3. **Brand account + post pipeline — ✅ DONE (2026-06-18).** `src/bsky-bot.js`:
+   app-password `createSession` → resolve PDS from didDoc → `getServiceAuth`
+   (**aud = `did:web:<PDS host>`, lxm = `com.atproto.repo.uploadBlob`** — verified
+   against the live API; other combos are explicitly rejected) → POST bytes to
+   `video.bsky.app/xrpc/app.bsky.video.uploadVideo` → poll `getJobStatus` for the
+   blob → `createRecord` `app.bsky.feed.post` with `app.bsky.embed.video`
+   (aspectRatio + alt) + `buildMentionFacets`. **Live-tested:** posted a real
+   12 MB rendered battle to `wildmarch.bsky.social`
+   (`bsky.app/profile/wildmarch.bsky.social/post/3molo7a5mux2b`), confirmed as a
+   playable `app.bsky.embed.video#view` (720×900 HLS). `scripts/post-highlight-test.mjs`
+   drives the flow from a rendered `hl.mp4` using `BSKY_BOT_*` env vars.
+   - **Account `wildmarch.bsky.social` email is verified** (required before the
+     first upload — the only thing that blocked us initially). `canUpload: true`,
+     limits ~100 videos/40 GB per day.
+   - **TODO before going live:** set the production secret
+     `wrangler secret put BSKY_BOT_APP_PASSWORD` and var `BSKY_BOT_IDENTIFIER`;
+     wire the HTTP trigger in Phase 4/5 (the module is callable from the Worker as-is).
 4. **"Share as video" button** — on the battle-result overlay: render in-browser,
    upload MP4 to a Worker endpoint, post to the brand account, confirm + link.
 5. **Autonomous curator** — scoring cron + render-via-Browser-Rendering job + opt-in
