@@ -85,6 +85,7 @@ const INAT_SPECIES_CACHE_TTL_SECONDS = 6 * 60 * 60;
 const INAT_SPECIES_STALE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
 const INAT_TAXON_CACHE_TTL_SECONDS = 24 * 60 * 60;
 const INAT_RATE_LIMIT_COOLDOWN_SECONDS = 5 * 60;
+const SPRITE_TREE_CACHE_TTL_MS = 60 * 1000;
 const TRAINING_COUNT_SOURCE_RESEARCH = "research_grade";
 const TRAINING_COUNT_SOURCE_ROSTER_FALLBACK = "roster_fallback";
 const D1_ID_CHUNK_SIZE = 80;
@@ -168,6 +169,8 @@ const GLOBAL_SEED_GROUPS = [
   { key: "animals", label: "Animals", iconicTaxon: "Animalia", kingdomTaxonId: 1 }
 ];
 const DEMO_USER_ID = "demo:birds";
+const spriteTreeCache = new Map();
+const spriteTreeAncestorCache = new Map();
 const DEMO_PLAYER_TAXON_IDS = [13858, 12727, 8229, 7428, 1965];
 const DEMO_DUMMY_TAXA = [
   { taxonId: -101, commonName: "Gray Box Alpha", scientificName: "Placeholder alpha", iconicTaxonName: "Life", obsCount: 10, bondLevel: 8 },
@@ -4097,7 +4100,35 @@ async function getSpriteStatus(env, taxonIds) {
 
 async function getSpriteTree(env, options = {}) {
   const q = String(options.q ?? "").trim();
+  const limit = Math.max(1, Math.min(1000, Number(options.limit ?? 500)));
+  const cacheKey = `${limit}:${q.toLowerCase()}`;
+  const cached = spriteTreeCache.get(cacheKey);
+  if (cached && Date.now() - cached.createdAt < SPRITE_TREE_CACHE_TTL_MS) {
+    return cached.result;
+  }
+
   const rows = await env.DB.prepare(`
+    WITH ranked_assets AS (
+      SELECT
+        sa.taxon_id,
+        sa.r2_key,
+        sa.model,
+        ROW_NUMBER() OVER (
+          PARTITION BY sa.taxon_id
+          ORDER BY
+            CASE
+              WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
+              WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
+              ELSE 3
+            END,
+            sa.created_at DESC,
+            sa.asset_id DESC
+        ) AS asset_rank
+      FROM sprite_assets sa
+      WHERE sa.asset_kind = ?
+        AND sa.asset_version = ?
+        AND sa.status = 'ready'
+    )
     SELECT
       t.taxon_id,
       t.scientific_name,
@@ -4106,67 +4137,30 @@ async function getSpriteTree(env, options = {}) {
       t.iconic_taxon_name,
       t.ancestry,
       t.parent_id,
-      (
-        SELECT sa.r2_key
-        FROM sprite_assets sa
-        WHERE sa.taxon_id = t.taxon_id
-          AND sa.asset_kind = ?
-          AND sa.asset_version = ?
-          AND sa.status = 'ready'
-        ORDER BY
-          CASE
-            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
-            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
-            ELSE 3
-          END,
-          sa.created_at DESC
-        LIMIT 1
-      ) AS r2_key,
-      (
-        SELECT sa.model
-        FROM sprite_assets sa
-        WHERE sa.taxon_id = t.taxon_id
-          AND sa.asset_kind = ?
-          AND sa.asset_version = ?
-          AND sa.status = 'ready'
-        ORDER BY
-          CASE
-            WHEN sa.model = 'manual-upload' OR sa.model = 'manual-upload-web' OR sa.prompt_hash LIKE 'manual-upload:%' THEN 1
-            WHEN sa.prompt_hash LIKE 'manual-%' THEN 2
-            ELSE 3
-          END,
-          sa.created_at DESC
-        LIMIT 1
-      ) AS sprite_model
-    FROM taxa t
-    WHERE EXISTS (
-        SELECT 1
-        FROM sprite_assets sa
-        WHERE sa.taxon_id = t.taxon_id
-          AND sa.asset_kind = ?
-          AND sa.asset_version = ?
-          AND sa.status = 'ready'
-      )
+      ra.r2_key,
+      ra.model AS sprite_model
+    FROM ranked_assets ra
+    JOIN taxa t ON t.taxon_id = ra.taxon_id
+    WHERE ra.asset_rank = 1
+      AND ra.r2_key IS NOT NULL
       AND (
         ? = ''
         OR lower(t.scientific_name) LIKE '%' || lower(?) || '%'
         OR lower(COALESCE(t.common_name, '')) LIKE '%' || lower(?) || '%'
         OR lower(COALESCE(t.iconic_taxon_name, '')) LIKE '%' || lower(?) || '%'
+        OR CAST(t.taxon_id AS TEXT) = ?
       )
     ORDER BY COALESCE(t.iconic_taxon_name, 'Life') ASC, t.scientific_name ASC
     LIMIT ?
   `).bind(
     DEFAULT_ASSET_KIND,
     ASSET_VERSION,
-    DEFAULT_ASSET_KIND,
-    ASSET_VERSION,
-    DEFAULT_ASSET_KIND,
-    ASSET_VERSION,
     q,
     q,
     q,
     q,
-    options.limit ?? 500
+    q,
+    limit
   ).all();
 
   const leaves = (rows.results ?? []).map((row) => ({
@@ -4196,12 +4190,20 @@ async function getSpriteTree(env, options = {}) {
     ? buildTaxonomicTree(leaves, ancestorMap)
     : buildSpriteTree(leaves); // fallback if ancestors aren't backfilled yet
 
-  return {
+  const result = {
     totalSprites: leaves.length,
-    limit: options.limit ?? 500,
+    limit,
     q,
     roots: tree
   };
+
+  spriteTreeCache.set(cacheKey, { createdAt: Date.now(), result });
+  if (spriteTreeCache.size > 16) {
+    const oldestKey = spriteTreeCache.keys().next().value;
+    if (oldestKey) spriteTreeCache.delete(oldestKey);
+  }
+
+  return result;
 }
 
 async function loadAncestorTaxa(env, leaves) {
@@ -4210,7 +4212,13 @@ async function loadAncestorTaxa(env, leaves) {
     for (const id of leaf.ancestorIds || []) ids.add(id);
   }
   const map = new Map();
-  for (const chunk of chunkArray([...ids], D1_ID_CHUNK_SIZE)) {
+  const missing = [];
+  for (const id of ids) {
+    const cached = spriteTreeAncestorCache.get(id);
+    if (cached) map.set(id, cached);
+    else missing.push(id);
+  }
+  for (const chunk of chunkArray(missing, D1_ID_CHUNK_SIZE)) {
     if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => "?").join(",");
     const rows = await env.DB.prepare(
@@ -4218,13 +4226,15 @@ async function loadAncestorTaxa(env, leaves) {
        FROM taxa WHERE taxon_id IN (${placeholders})`
     ).bind(...chunk).all();
     for (const r of rows.results ?? []) {
-      map.set(Number(r.taxon_id), {
+      const entry = {
         taxonId: Number(r.taxon_id),
         scientificName: r.scientific_name,
         commonName: r.common_name ?? null,
         rank: String(r.rank || "").toLowerCase(),
         iconicTaxonName: r.iconic_taxon_name || null
-      });
+      };
+      map.set(entry.taxonId, entry);
+      spriteTreeAncestorCache.set(entry.taxonId, entry);
     }
   }
   return map;
@@ -10283,6 +10293,48 @@ function renderAppHtml() {
       gap: 10px;
     }
 
+    .tree-loading {
+      min-height: 240px;
+      display: grid;
+      place-items: center;
+      padding: 30px 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+
+    .tree-loading-inner {
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+      text-align: center;
+      max-width: 520px;
+    }
+
+    .tree-spinner {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      border: 5px solid rgba(4, 124, 120, 0.16);
+      border-top-color: var(--teal);
+      animation: treeSpin 850ms linear infinite;
+    }
+
+    .tree-loading-title {
+      font-weight: 900;
+      color: var(--ink);
+    }
+
+    .tree-loading-message {
+      color: var(--muted);
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    @keyframes treeSpin {
+      to { transform: rotate(360deg); }
+    }
+
     .tree-summary {
       color: var(--muted);
       font-weight: 800;
@@ -10437,6 +10489,8 @@ function renderAppHtml() {
       padding: 8px 6px 9px;
       background: var(--surface);
       box-shadow: var(--shadow);
+      content-visibility: auto;
+      contain-intrinsic-size: 132px;
     }
 
     .tree-medallion:hover,
@@ -10472,6 +10526,7 @@ function renderAppHtml() {
 
     @media (prefers-reduced-motion: reduce) {
       .tree-card { transition: none; }
+      .tree-spinner { animation: none; }
     }
 
     .grid {
@@ -13175,6 +13230,27 @@ function renderAppHtml() {
       }
       return parts;
     }
+
+    const TREE_LOADING_MESSAGES = [
+      "Coaxing DNA to tell its evolutionary secrets...",
+      "Unraveling the tree of life, one branch at a time...",
+      "Consulting with Darwin about your taxonomy...",
+      "Politely asking species to line up in order...",
+      "Counting rings on the tree of life...",
+      "Persuading taxonomists to agree on classifications...",
+      "Gathering specimens from the digital wild...",
+      "Dusting off Linnaeus' old notebooks...",
+      "Herding taxonomic cats into hierarchical boxes...",
+      "Calculating phylogenetic distances while sipping tea...",
+      "Untangling evolutionary spaghetti...",
+      "Converting genetic code to pretty pictures...",
+      "Teaching old species new tricks...",
+      "Searching for the missing links...",
+      "Translating from Latin to Markdown...",
+      "Convincing kingdoms, phyla, and classes to cooperate..."
+    ];
+    const TREE_CLIENT_CACHE_TTL_MS = 2 * 60 * 1000;
+
     const state = {
       userId: localStorage.getItem("inatBattler:userId") || "",
       inatLogin: localStorage.getItem("inatBattler:inatLogin") || "",
@@ -13191,6 +13267,12 @@ function renderAppHtml() {
       rosterZoom: Number(localStorage.getItem("inatBattler:rosterZoom")) || 190,
       rosterMode: localStorage.getItem("inatBattler:rosterMode") === "sprites" ? "sprites" : "cards",
       spriteTree: null,
+      spriteTreeLoading: false,
+      spriteTreeError: "",
+      spriteTreeMessage: TREE_LOADING_MESSAGES[0],
+      spriteTreeMessageTimer: null,
+      spriteTreeRequestId: 0,
+      spriteTreeCache: new Map(),
       treeSearch: "",
       treeZoom: Number(localStorage.getItem("inatBattler:treeZoom")) || 58,
       recentSprites: null,
@@ -15564,19 +15646,80 @@ function renderAppHtml() {
       }
     }
 
+    function treeClientCacheKey(q) {
+      return String(q || "").trim().toLowerCase();
+    }
+
+    function pickTreeLoadingMessage() {
+      return TREE_LOADING_MESSAGES[Math.floor(Math.random() * TREE_LOADING_MESSAGES.length)];
+    }
+
+    function startSpriteTreeLoading(showStatus) {
+      if (state.spriteTreeMessageTimer) clearInterval(state.spriteTreeMessageTimer);
+      state.spriteTreeLoading = true;
+      state.spriteTreeError = "";
+      state.spriteTreeMessage = pickTreeLoadingMessage();
+      if (showStatus) setStatus("Loading sprite tree");
+      renderSpriteTree();
+      state.spriteTreeMessageTimer = setInterval(() => {
+        state.spriteTreeMessage = pickTreeLoadingMessage();
+        if (state.activeView === "tree" && state.spriteTreeLoading) renderSpriteTree();
+      }, 4000);
+    }
+
+    function stopSpriteTreeLoading() {
+      state.spriteTreeLoading = false;
+      if (state.spriteTreeMessageTimer) {
+        clearInterval(state.spriteTreeMessageTimer);
+        state.spriteTreeMessageTimer = null;
+      }
+    }
+
+    function rememberSpriteTree(cacheKey, tree) {
+      state.spriteTreeCache.set(cacheKey, { createdAt: Date.now(), tree: tree });
+      if (state.spriteTreeCache.size > 8) {
+        const oldestKey = state.spriteTreeCache.keys().next().value;
+        if (oldestKey) state.spriteTreeCache.delete(oldestKey);
+      }
+    }
+
     async function loadSpriteTree(showStatus) {
       const q = state.treeSearch || "";
-      if (showStatus) setStatus("Loading sprite tree");
+      const requestId = state.spriteTreeRequestId + 1;
+      state.spriteTreeRequestId = requestId;
+      const cacheKey = treeClientCacheKey(q);
+      const cached = state.spriteTreeCache.get(cacheKey);
+      if (cached && Date.now() - cached.createdAt < TREE_CLIENT_CACHE_TTL_MS) {
+        const previousQuery = state.spriteTree?.q || "";
+        state.spriteTree = cached.tree;
+        state.spriteTreeError = "";
+        stopSpriteTreeLoading();
+        syncTreePath(cached.tree, q, previousQuery);
+        renderSpriteTree();
+        if (showStatus) setStatus("Loaded " + Number(cached.tree.totalSprites || 0) + " ready sprites in the tree");
+        return;
+      }
+
+      startSpriteTreeLoading(showStatus);
 
       try {
         const previousQuery = state.spriteTree?.q || "";
         const res = await apiFetch("/api/sprite-tree?limit=1000&q=" + encodeURIComponent(q));
+        if (requestId !== state.spriteTreeRequestId) return;
         state.spriteTree = res;
+        state.spriteTreeError = "";
+        rememberSpriteTree(cacheKey, res);
         syncTreePath(res, q, previousQuery);
-        renderSpriteTree();
         if (showStatus) setStatus("Loaded " + Number(res.totalSprites || 0) + " ready sprites in the tree");
       } catch (error) {
-        setStatus(error.message);
+        if (requestId !== state.spriteTreeRequestId) return;
+        state.spriteTreeError = error.message || "Could not load sprite tree";
+        setStatus(state.spriteTreeError);
+      } finally {
+        if (requestId === state.spriteTreeRequestId) {
+          stopSpriteTreeLoading();
+          renderSpriteTree();
+        }
       }
     }
 
@@ -16164,6 +16307,19 @@ function renderAppHtml() {
     function renderSpriteTree() {
       const tree = state.spriteTree;
 
+      if (state.spriteTreeLoading) {
+        els.treeRefreshLabel.textContent = "Loading...";
+        els.spriteTreePanel.innerHTML = renderTreeLoading();
+        return;
+      }
+
+      if (state.spriteTreeError && !tree) {
+        els.treeRefreshLabel.textContent = "";
+        els.spriteTreePanel.innerHTML =
+          '<div class="empty">Could not load the sprite tree: ' + escapeHtml(state.spriteTreeError) + '</div>';
+        return;
+      }
+
       if (!tree) {
         els.treeRefreshLabel.textContent = "";
         els.spriteTreePanel.innerHTML = '<div class="empty">Open this tab to load the ready sprite tree.</div>';
@@ -16201,6 +16357,16 @@ function renderAppHtml() {
           (leaves.length ? renderTreeGallery(leaves) : "") +
           (!branches.length && !leaves.length ? '<div class="empty">Nothing here yet.</div>' : "") +
         '</div>';
+    }
+
+    function renderTreeLoading() {
+      return '<div class="tree-loading" role="status" aria-live="polite" aria-busy="true">' +
+        '<div class="tree-loading-inner">' +
+          '<div class="tree-spinner" aria-hidden="true"></div>' +
+          '<div class="tree-loading-title">Loading sprite tree</div>' +
+          '<div class="tree-loading-message">' + escapeHtml(state.spriteTreeMessage || TREE_LOADING_MESSAGES[0]) + '</div>' +
+        '</div>' +
+      '</div>';
     }
 
     function syncTreePath(tree, query, previousQuery) {
