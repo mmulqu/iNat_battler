@@ -442,6 +442,60 @@ export function resolveTurn(state, playerAction, npcAction, rng) {
   return next;
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic replay
+// ---------------------------------------------------------------------------
+// Rebuild every battle state from a compact replay artifact (the pristine
+// starting teams + seed + difficulty) plus the recorded sequence of player
+// actions. NPC actions and every dice roll (crits, accuracy, damage variance,
+// status procs) are re-derived through the same seeded pipeline used live
+// (`createSeededRng('${seed}:${turn}')` → chooseNpcAction → resolveTurn), so the
+// reconstruction is bit-identical to the original battle. Returns the ordered
+// list of states: [initial, afterTurn1, afterTurn2, ...]. This is what the
+// video renderer consumes.
+export function effectiveDifficulty(difficulty) {
+  return ["easy", "normal", "hard"].includes(difficulty) ? difficulty : "normal";
+}
+
+export function reconstructBattleStates(replay, actions = []) {
+  if (!replay || !replay.player || !replay.opponent) {
+    throw new Error("Replay artifact is missing pristine teams");
+  }
+
+  let current = {
+    mode: replay.mode || "npc",
+    difficulty: replay.difficulty,
+    seed: replay.seed,
+    turn: 1,
+    terrain: replay.terrain,
+    player: {
+      name: replay.player.name ?? "Your Team",
+      activeIndex: 0,
+      creatures: structuredClone(replay.player.creatures)
+    },
+    opponent: structuredClone(replay.opponent),
+    log: [],
+    status: "active"
+  };
+
+  const states = [structuredClone(current)];
+
+  for (const action of actions) {
+    if (current.status !== "active") break;
+    const difficulty = effectiveDifficulty(current.difficulty);
+    const rng = createSeededRng(`${current.seed}:${current.turn}`);
+    const npcAction = chooseNpcAction(current, difficulty, rng);
+    const playerAction =
+      action.kind === "switch"
+        ? { kind: "switch", index: action.index }
+        : { kind: "move", moveId: action.moveId };
+    current = resolveTurn(current, playerAction, npcAction, rng);
+    states.push(structuredClone(current));
+  }
+
+  return states;
+}
+
 export function hasStatus(creature, status) {
   return Array.isArray(creature.statuses) && creature.statuses.includes(status);
 }

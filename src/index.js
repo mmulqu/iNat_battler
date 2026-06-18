@@ -823,6 +823,11 @@ async function routeRequest(request, env, ctx) {
     return battle ? jsonResponse(battle) : jsonResponse({ error: "Battle not found" }, 404);
   }
 
+  const battleReplayMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/replay$/);
+  if (battleReplayMatch && request.method === "GET") {
+    return jsonResponse(await getBattleReplay(env, decodeURIComponent(battleReplayMatch[1])));
+  }
+
   const battleActionMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/action$/);
   if (battleActionMatch && request.method === "POST") {
     const payload = await readJson(request);
@@ -4715,17 +4720,32 @@ async function startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty = "
   const now = new Date().toISOString();
   const battleId = randomId("battle");
   const seed = randomId("seed");
+  const terrain = terrainForTeam(opponent);
   const state = {
     battleId,
     mode: "npc",
     difficulty,
     seed,
     turn: 1,
-    terrain: terrainForTeam(opponent),
+    terrain,
     player: { userId, name: "Your Team", activeIndex: 0, creatures },
     opponent,
     log: [{ turn: 0, text: `${opponent.name} challenges your field team. (${difficulty})` }],
-    status: "active"
+    status: "active",
+    // Deterministic-replay foundation (battle-highlights-bluesky.md): the
+    // pristine starting teams + seed snapshotted once, never mutated, plus the
+    // per-turn player actions appended in submitBattleMove. Together they let
+    // reconstructBattleStates() reproduce the battle bit-for-bit for rendering.
+    replay: {
+      v: 1,
+      mode: "npc",
+      seed,
+      difficulty,
+      terrain,
+      player: { name: "Your Team", creatures: structuredClone(creatures) },
+      opponent: structuredClone(opponent)
+    },
+    actions: []
   };
 
   await env.DB.prepare(`
@@ -4934,6 +4954,27 @@ async function getBattle(env, battleId) {
   return row?.state_json ? JSON.parse(row.state_json) : null;
 }
 
+// Returns the compact replay artifact for a battle: the pristine starting teams
+// + seed/difficulty and the recorded per-turn player actions. The video
+// renderer feeds this to reconstructBattleStates() to redraw the battle. Only
+// battles created after the replay foundation landed carry `replay`/`actions`;
+// older battles return `available: false`.
+async function getBattleReplay(env, battleId) {
+  const state = await getBattle(env, battleId);
+  if (!state) return { error: "Battle not found", available: false };
+  if (!state.replay || !Array.isArray(state.actions)) {
+    return { available: false, reason: "no_replay", battleId, status: state.status ?? null };
+  }
+  return {
+    available: true,
+    battleId,
+    status: state.status ?? null,
+    turns: state.actions.length,
+    replay: state.replay,
+    actions: state.actions
+  };
+}
+
 async function submitBattleMove(env, battleId, moveId, switchIndex = null) {
   const state = await getBattle(env, battleId);
   if (!state) throw new Error("Battle not found");
@@ -4961,6 +5002,12 @@ async function submitBattleMove(env, battleId, moveId, switchIndex = null) {
   const npcAction = chooseNpcAction(state, difficulty, rng);
   const next = resolveTurn(state, playerAction, npcAction, rng);
   const now = new Date().toISOString();
+
+  // Append this turn's player action to the replay log (NPC actions + RNG are
+  // re-derived deterministically, so only the player's choice needs storing).
+  // `state.turn` is the turn that was just resolved and matches the rng seed.
+  if (!Array.isArray(next.actions)) next.actions = [];
+  next.actions.push({ turn: state.turn, ...playerAction });
 
   if (next.status !== "active") {
     // Attach the rating change to the final state so the result overlay can
