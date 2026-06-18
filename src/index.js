@@ -353,12 +353,14 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/sprite-submissions/sync") {
-    return jsonResponse(await syncSpriteSubmissions(env, 25));
+    const session = await requireSession(request, env);
+    return jsonResponse(await syncSpriteSubmissions(env, 25, session.did));
   }
 
   const submissionSyncMatch = url.pathname.match(/^\/api\/sprite-submissions\/([^/]+)\/sync$/);
   if (request.method === "POST" && submissionSyncMatch) {
-    return jsonResponse(await syncSingleSubmission(env, decodeURIComponent(submissionSyncMatch[1])));
+    const session = await requireSession(request, env);
+    return jsonResponse(await syncSingleSubmission(env, decodeURIComponent(submissionSyncMatch[1]), session));
   }
 
   if (request.method === "GET" && url.pathname === "/api/training") {
@@ -503,6 +505,7 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/manual-sprites/upload") {
+    await requireAdminSession(request, env);
     return jsonResponse(await uploadManualSprite(request, env));
   }
 
@@ -529,6 +532,7 @@ async function routeRequest(request, env, ctx) {
 
   const queueMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/queue-missing$/);
   if (request.method === "POST" && queueMatch) {
+    await requireAdminSession(request, env);
     const userId = decodeURIComponent(queueMatch[1]);
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, maxQueueMoreLimit(env), 12);
@@ -537,6 +541,7 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/sprite-jobs") {
+    await requireAdminSession(request, env);
     const payload = await readJson(request);
     const userId = String(payload.userId ?? "");
     const limit = clampInt(payload.limit, 1, maxQueueMoreLimit(env), 12);
@@ -548,6 +553,7 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/sprite-jobs") {
+    await requireAdminSession(request, env);
     const status = url.searchParams.get("status") ?? "queued";
     const userId = url.searchParams.get("userId") ?? "";
     const limit = clampInt(url.searchParams.get("limit"), 1, maxQueueMoreLimit(env), 100);
@@ -555,27 +561,32 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/global-seed/status") {
+    await requireAdminSession(request, env);
     return jsonResponse(await getGlobalSeedStatus(env));
   }
 
   if (request.method === "GET" && url.pathname === "/api/global-seed/jobs") {
+    await requireAdminSession(request, env);
     const limit = clampInt(url.searchParams.get("limit"), 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
     return jsonResponse({ jobs: await selectQueuedSpriteJobsForBatch(env, limit, "", true) });
   }
 
   if (request.method === "POST" && url.pathname === "/api/global-seed/dev-import") {
+    await requireAdminSession(request, env);
     const payload = await readJson(request);
     const limitPerGroup = clampInt(payload.limitPerGroup, 1, 1000, GLOBAL_SEED_LIMIT_PER_GROUP);
     return jsonResponse(await importGlobalSeedTaxa(env, limitPerGroup));
   }
 
   if (request.method === "POST" && url.pathname === "/api/global-seed/dev-queue") {
+    await requireAdminSession(request, env);
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
     return jsonResponse(await queueMissingGlobalSeedSprites(env, limit));
   }
 
   if (request.method === "POST" && url.pathname === "/api/global-seed/dev-submit") {
+    await requireAdminSession(request, env);
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
     return jsonResponse(await submitDevSpriteBatch(env, request.url, {
@@ -587,6 +598,7 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-submit") {
+    await requireAdminSession(request, env);
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, maxBatchSubmitLimit(env), 2);
     const taxonIds = Array.isArray(payload.taxonIds)
@@ -601,16 +613,19 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/sprite-batches/latest") {
+    await requireAdminSession(request, env);
     return jsonResponse(await getLatestSpriteBatch(env));
   }
 
   if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-auto-sync") {
+    await requireAdminSession(request, env);
     const limit = clampInt(url.searchParams.get("limit"), 1, 10, AUTO_SPRITE_BATCH_SYNC_LIMIT);
     const maxItems = clampInt(url.searchParams.get("maxItems"), 1, 200, AUTO_SPRITE_BATCH_SYNC_ITEMS);
     return jsonResponse(await syncPendingSpriteBatches(env, limit, maxItems));
   }
 
   if (request.method === "POST" && url.pathname === "/api/move-batches/dev-submit") {
+    await requireAdminSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await submitMoveBatch(env, {
       limit: clampInt(payload.limit, 1, 60, 10),
@@ -619,26 +634,31 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/move-batches/dev-auto-sync") {
+    await requireAdminSession(request, env);
     const limit = clampInt(url.searchParams.get("limit"), 1, 20, AUTO_MOVE_BATCH_SYNC_LIMIT);
     return jsonResponse(await syncAutoMoveBatchImageSubmissions(env, limit));
   }
 
   const moveBatchSyncMatch = url.pathname.match(/^\/api\/move-batches\/([^/]+)\/sync$/);
   if (request.method === "POST" && moveBatchSyncMatch) {
+    await requireAdminSession(request, env);
     return jsonResponse(await syncMoveBatch(env, decodeURIComponent(moveBatchSyncMatch[1])));
   }
 
   const moveBatchMatch = url.pathname.match(/^\/api\/move-batches\/([^/]+)$/);
   if (request.method === "GET" && moveBatchMatch) {
+    await requireAdminSession(request, env);
     return jsonResponse(await getMoveBatch(env, decodeURIComponent(moveBatchMatch[1])));
   }
 
   if (request.method === "GET" && url.pathname === "/api/taxa/random-spriteless") {
+    await requireAdminSession(request, env);
     return jsonResponse(await getRandomSpritelessTaxon(env));
   }
 
   const movesGenerateMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/moves\/dev-generate$/);
   if (request.method === "POST" && movesGenerateMatch) {
+    await requireAdminSession(request, env);
     return jsonResponse(await generateMovesForTaxon(env, Number(movesGenerateMatch[1])));
   }
 
@@ -649,41 +669,49 @@ async function routeRequest(request, env, ctx) {
 
   const devLabMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/dev-lab$/);
   if (request.method === "GET" && devLabMatch) {
+    await requireAdminSession(request, env);
     return jsonResponse(await getTaxonDevLab(env, Number(devLabMatch[1])));
   }
 
   const spriteQueueMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-queue$/);
   if (request.method === "POST" && spriteQueueMatch) {
+    await requireAdminSession(request, env);
     return jsonResponse(await queueSpriteJobForTaxon(env, Number(spriteQueueMatch[1]), 40));
   }
 
   const spriteGenerateMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-generate$/);
   if (request.method === "POST" && spriteGenerateMatch) {
+    await requireAdminSession(request, env);
     return jsonResponse(await devGenerateSpriteForTaxon(env, Number(spriteGenerateMatch[1])));
   }
 
   const spriteSubmitBatchMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-submit-batch$/);
   if (request.method === "POST" && spriteSubmitBatchMatch) {
+    await requireAdminSession(request, env);
     return jsonResponse(await submitSpriteBatchForTaxon(env, request.url, Number(spriteSubmitBatchMatch[1])));
   }
 
   const spriteBatchSyncMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)\/sync$/);
   if (request.method === "POST" && spriteBatchSyncMatch) {
+    await requireAdminSession(request, env);
     const maxItems = clampInt(url.searchParams.get("maxItems"), 1, 200, 25);
     return jsonResponse(await syncSpriteBatch(env, decodeURIComponent(spriteBatchSyncMatch[1]), { maxItems }));
   }
 
   const spriteBatchMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)$/);
   if (request.method === "GET" && spriteBatchMatch) {
+    await requireAdminSession(request, env);
     return jsonResponse(await getSpriteBatch(env, decodeURIComponent(spriteBatchMatch[1])));
   }
 
   if (request.method === "POST" && url.pathname === "/api/sprite-jobs/dev-generate-next") {
+    await requireAdminSession(request, env);
     return jsonResponse(await devGenerateNextSpriteJob(env));
   }
 
   const devGenerateMatch = url.pathname.match(/^\/api\/sprite-jobs\/([^/]+)\/dev-generate$/);
   if (request.method === "POST" && devGenerateMatch) {
+    await requireAdminSession(request, env);
     const jobId = decodeURIComponent(devGenerateMatch[1]);
     return jsonResponse(await devGenerateSpriteForJob(env, jobId));
   }
@@ -708,11 +736,13 @@ async function routeRequest(request, env, ctx) {
   // ready-sprite taxa that are not yet stored as their own taxa rows, so the
   // backfill can fetch exactly the missing internal nodes (orders/families/...).
   if (request.method === "GET" && url.pathname === "/api/sprite-tree/dev-missing-ancestors") {
+    await requireAdminSession(request, env);
     return jsonResponse(await getMissingAncestorTaxonIds(env));
   }
 
   // Phase 0: bulk-upsert iNat taxon objects (fetched client-side) into taxa.
   if (request.method === "POST" && url.pathname === "/api/taxa/dev-bulk-upsert") {
+    await requireAdminSession(request, env);
     const payload = await readJson(request);
     const taxa = Array.isArray(payload.taxa) ? payload.taxa : [];
     return jsonResponse(await bulkUpsertTaxa(env, taxa));
@@ -5262,6 +5292,42 @@ async function requireSession(request, env) {
   return session;
 }
 
+function csvEnvValues(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeHandle(value) {
+  return String(value ?? "").trim().replace(/^@+/, "").toLowerCase();
+}
+
+function isAdminSession(env, session) {
+  if (!session) return false;
+
+  const dids = new Set(csvEnvValues(env.ADMIN_DIDS));
+  if (dids.has(String(session.did))) return true;
+
+  const handles = new Set(csvEnvValues(env.ADMIN_BSKY_HANDLES).map(normalizeHandle));
+  if (handles.has(normalizeHandle(session.handle))) return true;
+
+  const inatLogins = new Set(csvEnvValues(env.ADMIN_INAT_LOGINS).map((value) => value.toLowerCase()));
+  if (session.inat_login && inatLogins.has(String(session.inat_login).toLowerCase())) return true;
+
+  return false;
+}
+
+async function requireAdminSession(request, env) {
+  const session = await getSession(request, env);
+  if (!isAdminSession(env, session)) {
+    // Deliberately return 404 for private ops endpoints so they are not
+    // advertised as protected admin surfaces to unauthenticated probes.
+    throw httpError("Not found", 404);
+  }
+  return session;
+}
+
 function inatUserIdFor(login) {
   return `inat:${String(login).toLowerCase()}`;
 }
@@ -5543,6 +5609,7 @@ async function getMe(request, env) {
     userId: session.inat_login ? inatUserIdFor(session.inat_login) : null,
     inatPendingLogin: session.inat_pending_login,
     inatVerificationCode: session.inat_verification_code,
+    admin: isAdminSession(env, session),
     pendingChallenges: Number(pending?.pending ?? 0)
   };
 }
@@ -7703,14 +7770,20 @@ async function demoteRejectedUserSpriteAsset(env, submissionId) {
   return { promoted: false, demoted: Number(result.meta?.changes ?? 0) > 0 };
 }
 
-async function syncSpriteSubmissions(env, limit = 25) {
-  const rows = await env.DB.prepare(`
+async function syncSpriteSubmissions(env, limit = 25, did = null) {
+  const didFilter = did ? "AND did = ?" : "";
+  const query = `
     SELECT *
     FROM user_sprite_submissions
     WHERE status = 'pending'
+      ${didFilter}
     ORDER BY created_at ASC
     LIMIT ?
-  `).bind(limit).all();
+  `;
+  const statement = env.DB.prepare(query);
+  const rows = did
+    ? await statement.bind(did, limit).all()
+    : await statement.bind(limit).all();
 
   const summary = { checked: 0, approved: 0, rejected: 0, promoted: 0, reposted: 0, errors: 0 };
 
@@ -7770,11 +7843,14 @@ async function syncSpriteSubmissions(env, limit = 25) {
   return summary;
 }
 
-async function syncSingleSubmission(env, submissionId) {
+async function syncSingleSubmission(env, submissionId, session = null) {
   const row = await env.DB.prepare(
     "SELECT * FROM user_sprite_submissions WHERE submission_id = ?"
   ).bind(submissionId).first();
   if (!row) throw httpError("Submission not found", 404);
+  if (session && row.did !== session.did && !isAdminSession(env, session)) {
+    throw httpError("Submission not found", 404);
+  }
   if (!row.discord_message_id) throw httpError("Submission has no Discord QA message yet; run a full sync first", 400);
 
   // Re-evaluates regardless of current status, so changing the reaction on
@@ -9562,7 +9638,7 @@ function renderAppHtml() {
       color: var(--ink);
     }
 
-    .dev-batch {
+    .foldout-panel {
       display: grid;
       gap: 8px;
       margin-top: 12px;
@@ -9740,38 +9816,38 @@ function renderAppHtml() {
       font-size: 0.8rem;
     }
 
-    .dev-batch-head {
+    .foldout-head {
       display: flex;
       justify-content: space-between;
       gap: 8px;
       align-items: center;
     }
 
-    details.dev-batch > summary.dev-batch-head {
+    details.foldout-panel > summary.foldout-head {
       cursor: pointer;
       list-style: none;
       user-select: none;
     }
 
-    details.dev-batch > summary.dev-batch-head::-webkit-details-marker {
+    details.foldout-panel > summary.foldout-head::-webkit-details-marker {
       display: none;
     }
 
-    details.dev-batch > summary.dev-batch-head h2::before {
+    details.foldout-panel > summary.foldout-head h2::before {
       content: "▸ ";
       color: var(--teal);
       font-size: 0.8em;
     }
 
-    details.dev-batch[open] > summary.dev-batch-head h2::before {
+    details.foldout-panel[open] > summary.foldout-head h2::before {
       content: "▾ ";
     }
 
-    details.dev-batch > summary.dev-batch-head:hover h2 {
+    details.foldout-panel > summary.foldout-head:hover h2 {
       color: var(--teal);
     }
 
-    .dev-batch-hint {
+    .foldout-hint {
       margin: 0;
       color: var(--muted);
       font-size: 0.78rem;
@@ -11368,79 +11444,6 @@ function renderAppHtml() {
       align-items: center;
     }
 
-    .dev-lab-tools {
-      display: grid;
-      grid-template-columns: minmax(160px, 1fr) repeat(6, auto);
-      gap: 8px;
-      align-items: center;
-      margin-bottom: 10px;
-    }
-
-    .dev-lab-sync {
-      display: grid;
-      grid-template-columns: minmax(160px, 1fr) auto;
-      gap: 8px;
-      margin-bottom: 14px;
-    }
-
-    .dev-summary {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
-      gap: 12px;
-      align-items: start;
-    }
-
-    .dev-sprite-preview {
-      width: 100%;
-      aspect-ratio: 1;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface-2);
-      display: grid;
-      place-items: center;
-      overflow: hidden;
-    }
-
-    .dev-sprite-preview .sheet-sprite {
-      width: 96%;
-    }
-
-    .dev-meta-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-      margin-top: 8px;
-    }
-
-    .dev-meta-grid .stat {
-      min-height: auto;
-    }
-
-    .dev-output {
-      display: grid;
-      gap: 10px;
-    }
-
-    .dev-preview-controls {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 6px;
-    }
-
-    .dev-preview-controls button {
-      min-height: 32px;
-      border-radius: 6px;
-      font-size: 0.78rem;
-      font-weight: 900;
-      padding: 6px 8px;
-    }
-
-    .dev-preview-controls button.active {
-      background: var(--teal);
-      color: #fff;
-      border-color: var(--teal);
-    }
-
     .train-tools input {
       flex: 1;
       min-width: 120px;
@@ -12199,18 +12202,13 @@ function renderAppHtml() {
       /* Keep focused tabs focused: the control sidebar stacks below every view
          on mobile, so make it contextual. Self-contained views (Map, Settings,
          Leaderboard, Training, Sprite Tree) hide the whole sidebar. Battle keeps
-         only battle controls (Bluesky challenges + team picker + Battle NPC) and
-         drops the roster sprite-queue button. */
+         only battle controls (Bluesky challenges + team picker + Battle NPC). */
       body[data-view="map"] .layout > .panel,
       body[data-view="settings"] .layout > .panel,
       body[data-view="leaderboard"] .layout > .panel,
       body[data-view="training"] .layout > .panel,
       body[data-view="tree"] .layout > .panel,
       body[data-view="recent"] .layout > .panel {
-        display: none;
-      }
-
-      body[data-view="battle"] .layout > .panel > #queueMoreButton {
         display: none;
       }
     }
@@ -12298,13 +12296,6 @@ function renderAppHtml() {
       }
 
       .tree-tools {
-        grid-template-columns: 1fr;
-      }
-
-      .dev-lab-tools,
-      .dev-lab-sync,
-      .dev-summary,
-      .dev-meta-grid {
         grid-template-columns: 1fr;
       }
 
@@ -12795,8 +12786,8 @@ function renderAppHtml() {
 
     <section class="layout" id="appLayout">
       <aside class="panel">
-        <details class="dev-batch bsky-panel" id="bskyPanelDetails" open>
-          <summary class="dev-batch-head">
+        <details class="foldout-panel bsky-panel" id="bskyPanelDetails" open>
+          <summary class="foldout-head">
             <h2>Bluesky Battles</h2>
             <span class="subtle" id="bskyStateLabel">signed out</span>
           </summary>
@@ -12817,7 +12808,6 @@ function renderAppHtml() {
           </select>
           <button class="primary" id="startBattleButton" type="button" disabled>Battle NPC</button>
         </div>
-        <button class="secondary" id="queueMoreButton" type="button" disabled>Queue More</button>
         <p class="status" id="statusLine"></p>
       </aside>
 
@@ -12832,7 +12822,6 @@ function renderAppHtml() {
           <button class="view-tab" id="trainingTabButton" type="button" data-view-tab="training">Training</button>
           <button class="view-tab" id="treeTabButton" type="button" data-view-tab="tree">Sprite Tree</button>
           <button class="view-tab" id="recentTabButton" type="button" data-view-tab="recent">Recently Added</button>
-          <button class="view-tab" id="devTabButton" type="button" data-view-tab="dev">Dev Lab</button>
           <button class="view-tab" id="settingsTabButton" type="button" data-view-tab="settings">Settings</button>
         </nav>
         <section class="view-panel" id="homeView">
@@ -12987,49 +12976,6 @@ function renderAppHtml() {
             <div class="empty">Open this tab to load recently added sprites.</div>
           </div>
         </section>
-        <section class="view-panel" id="devView" hidden>
-          <div class="roster-head">
-            <h2>Dev Lab</h2>
-            <span class="subtle" id="devLabState">idle</span>
-          </div>
-          <div class="dev-lab-tools">
-            <input id="devTaxonIdInput" inputmode="numeric" placeholder="iNaturalist taxon ID">
-            <button class="secondary" id="devRandomButton" type="button" title="Pick a random taxon that has no sprite yet">&#127922; Random</button>
-            <button class="secondary" id="devInspectButton" type="button">Inspect</button>
-            <button class="secondary" id="devMovesButton" type="button">Generate Moves</button>
-            <button class="secondary" id="devQueueSpriteButton" type="button">Queue Sprite</button>
-            <button class="primary" id="devGenerateSpriteButton" type="button">Generate Sprite</button>
-            <button class="secondary" id="devGenerateSvgButton" type="button">Dev SVG</button>
-          </div>
-          <div class="dev-lab-sync">
-            <input id="devBatchIdInput" placeholder="Sprite batch ID">
-            <button class="secondary" id="devSyncBatchButton" type="button">Sync Batch</button>
-          </div>
-          <div class="batch-list" id="devLabPanel">
-            <div class="empty">Enter a taxon ID.</div>
-          </div>
-          <details class="dev-batch">
-            <summary class="dev-batch-head">
-              <h2>Dev Batch</h2>
-              <span class="subtle" id="batchQueueCount">0 queued</span>
-            </summary>
-            <p class="dev-batch-hint">Sprite generation for <strong>your roster</strong>. Queue More adds jobs for your taxa that are missing sprites; Submit Batch sends up to 100 queued jobs to OpenAI as one half-price image batch. Species without battle moves get those generated first.</p>
-            <button class="secondary" id="batchPreviewButton" type="button" disabled>Show Batch Queue</button>
-            <button class="secondary" id="batchSubmitButton" type="button" disabled>Submit Batch</button>
-            <div class="batch-list" id="batchQueueList">Load a roster, then click Queue More.</div>
-          </details>
-          <details class="dev-batch">
-            <summary class="dev-batch-head">
-              <h2>Global Seed</h2>
-              <span class="subtle" id="seedQueueCount">0 queued</span>
-            </summary>
-            <p class="dev-batch-hint">Builds the <strong>shared sprite library</strong> everyone draws from: the most-observed plant and animal species across North America and Europe. Queue 200 grabs the next 200 species that still lack a sprite (ready sprites and in-flight jobs are skipped); Submit 200 sends them to OpenAI — moves first, then sprite images. Repeat Queue &rarr; Submit to work through the pool.</p>
-            <button class="secondary" id="seedImportButton" type="button">Import Plants + Animals</button>
-            <button class="secondary" id="seedQueueButton" type="button">Queue 200</button>
-            <button class="secondary" id="seedSubmitButton" type="button" disabled>Submit 200</button>
-            <div class="batch-list" id="seedQueueList">Load seed status to start.</div>
-          </details>
-        </section>
         <section class="view-panel" id="settingsView" hidden>
           <div class="roster-head">
             <h2>Settings</h2>
@@ -13067,23 +13013,17 @@ function renderAppHtml() {
           </div>
           <div class="settings-section">
             <h3>Sprites</h3>
-            <details class="dev-batch">
-              <summary class="dev-batch-head">
-                <h2>Manual Sprite</h2>
+            <details class="foldout-panel">
+              <summary class="foldout-head">
+                <h2>Custom Sprite</h2>
                 <span class="subtle" id="manualUploadState">idle</span>
               </summary>
               <form class="manual-upload" id="manualSpriteForm">
                 <input id="manualTaxonId" name="taxonId" inputmode="numeric" placeholder="iNaturalist taxon ID">
-                <input id="manualScientificName" name="scientificName" placeholder="Scientific name">
-                <input id="manualCommonName" name="commonName" placeholder="Common name">
                 <input id="manualSpriteFile" name="sprite" type="file" accept="image/png,image/jpeg,image/webp" required>
-                <label class="manual-upload-check">
-                  <input id="manualAddToRoster" name="addToRoster" type="checkbox" checked>
-                  Add to roster
-                </label>
-                <button class="secondary" id="manualUploadButton" type="submit">Upload Sprite</button>
+                <button class="secondary" id="manualUploadButton" type="submit">Submit for QA</button>
               </form>
-              <div class="batch-list" id="manualUploadResult">No manual upload yet.</div>
+              <div class="batch-list" id="manualUploadResult">No custom sprite submitted yet.</div>
             </details>
           </div>
           <div class="settings-section">
@@ -13137,13 +13077,11 @@ function renderAppHtml() {
       <button class="mobile-sheet-item" type="button" data-mobile-nav="training" role="menuitem">📈 Training</button>
       <button class="mobile-sheet-item" type="button" data-mobile-nav="tree" role="menuitem">🌳 Sprite Tree</button>
       <button class="mobile-sheet-item" type="button" data-mobile-nav="recent" role="menuitem">✨ Recently Added</button>
-      <button class="mobile-sheet-item" type="button" data-mobile-nav="dev" role="menuitem">🛠️ Dev Lab</button>
       <button class="mobile-sheet-item" type="button" data-mobile-nav="settings" role="menuitem">⚙️ Settings</button>
     </div>
   </div>
 
   <script>
-    const LAST_BATCH_STORAGE_KEY = "inatBattler:lastBatch";
     const ROSTER_PAGE_SIZE = 100;
     ${placeholderFor.toString()}
     const TYPE_CHART = ${JSON.stringify(TYPE_CHART)};
@@ -13225,13 +13163,6 @@ function renderAppHtml() {
       }
       return parts;
     }
-    const BATCH_POLL_MS = 60000;
-    const DEV_QUEUE_MORE_LIMIT = 100;
-    const DEV_BATCH_SUBMIT_LIMIT = 100;
-    const GLOBAL_SEED_BATCH_LIMIT = 200;
-    const BATCH_SYNC_ITEM_LIMIT = 25;
-    const ACTIVE_BATCH_STATUSES = new Set(["submitted", "validating", "in_progress", "finalizing", "cancelling"]);
-
     const state = {
       userId: localStorage.getItem("inatBattler:userId") || "",
       inatLogin: localStorage.getItem("inatBattler:inatLogin") || "",
@@ -13259,12 +13190,6 @@ function renderAppHtml() {
       treePath: [],
       selectedTaxa: new Set(),
       flippedTaxa: new Set(),
-      batchJobs: [],
-      seedJobs: [],
-      seedStatus: null,
-      lastBatch: readStoredBatch(),
-      batchPolling: null,
-      batchSyncing: false,
       battle: null,
       battleAnimation: "anim-idle",
       battleBusy: false,
@@ -13293,11 +13218,6 @@ function renderAppHtml() {
       trainingFilter: "",
       trainingSelected: null,
       trainingBusy: false,
-      devLab: null,
-      devBusy: false,
-      devBatchId: "",
-      devPreviewAnimation: "anim-idle",
-      devPreviewKey: "row1",
       bskyBusy: false,
       bskyAction: "",
       bskyMessage: "",
@@ -13311,22 +13231,9 @@ function renderAppHtml() {
       publicLanding: document.getElementById("publicLanding"),
       landingAuth: document.getElementById("landingAuth"),
       appLayout: document.getElementById("appLayout"),
-      queueMoreButton: document.getElementById("queueMoreButton"),
-      batchPreviewButton: document.getElementById("batchPreviewButton"),
-      batchSubmitButton: document.getElementById("batchSubmitButton"),
-      batchQueueCount: document.getElementById("batchQueueCount"),
-      batchQueueList: document.getElementById("batchQueueList"),
-      seedImportButton: document.getElementById("seedImportButton"),
-      seedQueueButton: document.getElementById("seedQueueButton"),
-      seedSubmitButton: document.getElementById("seedSubmitButton"),
-      seedQueueCount: document.getElementById("seedQueueCount"),
-      seedQueueList: document.getElementById("seedQueueList"),
       manualSpriteForm: document.getElementById("manualSpriteForm"),
       manualTaxonId: document.getElementById("manualTaxonId"),
-      manualScientificName: document.getElementById("manualScientificName"),
-      manualCommonName: document.getElementById("manualCommonName"),
       manualSpriteFile: document.getElementById("manualSpriteFile"),
-      manualAddToRoster: document.getElementById("manualAddToRoster"),
       manualUploadButton: document.getElementById("manualUploadButton"),
       manualUploadState: document.getElementById("manualUploadState"),
       manualUploadResult: document.getElementById("manualUploadResult"),
@@ -13410,8 +13317,6 @@ function renderAppHtml() {
       trainingSplit: document.getElementById("trainingSplit"),
       trainingList: document.getElementById("trainingList"),
       trainingDetail: document.getElementById("trainingDetail"),
-      devTabButton: document.getElementById("devTabButton"),
-      devView: document.getElementById("devView"),
       settingsTabButton: document.getElementById("settingsTabButton"),
       settingsView: document.getElementById("settingsView"),
       settingsReimportButton: document.getElementById("settingsReimportButton"),
@@ -13423,17 +13328,6 @@ function renderAppHtml() {
       deleteSharedSpritesCheck: document.getElementById("deleteSharedSpritesCheck"),
       settingsDeleteCancel: document.getElementById("settingsDeleteCancel"),
       settingsDeleteConfirm: document.getElementById("settingsDeleteConfirm"),
-      devLabState: document.getElementById("devLabState"),
-      devTaxonIdInput: document.getElementById("devTaxonIdInput"),
-      devRandomButton: document.getElementById("devRandomButton"),
-      devInspectButton: document.getElementById("devInspectButton"),
-      devMovesButton: document.getElementById("devMovesButton"),
-      devQueueSpriteButton: document.getElementById("devQueueSpriteButton"),
-      devGenerateSpriteButton: document.getElementById("devGenerateSpriteButton"),
-      devGenerateSvgButton: document.getElementById("devGenerateSvgButton"),
-      devBatchIdInput: document.getElementById("devBatchIdInput"),
-      devSyncBatchButton: document.getElementById("devSyncBatchButton"),
-      devLabPanel: document.getElementById("devLabPanel"),
       bskyStateLabel: document.getElementById("bskyStateLabel"),
       bskyBody: document.getElementById("bskyBody")
     };
@@ -13499,7 +13393,6 @@ function renderAppHtml() {
     });
     els.treeTabButton.addEventListener("click", () => switchView("tree"));
     els.recentTabButton.addEventListener("click", () => switchView("recent"));
-    els.devTabButton.addEventListener("click", () => switchView("dev"));
     els.settingsTabButton.addEventListener("click", () => switchView("settings"));
     els.settingsReimportButton.addEventListener("click", () => importRoster());
     els.settingsSignOutButton.addEventListener("click", () => bskyLogout());
@@ -13608,35 +13501,6 @@ function renderAppHtml() {
       await saveNickname(event.target.getAttribute("data-train-nick-input"));
     });
 
-    els.devInspectButton.addEventListener("click", () => inspectDevLab(true));
-    els.devRandomButton.addEventListener("click", async () => {
-      try {
-        setStatus("Picking a random spriteless taxon…");
-        const res = await apiFetch("/api/taxa/random-spriteless");
-        els.devTaxonIdInput.value = String(res.taxonId);
-        await inspectDevLab(true);
-      } catch (error) {
-        setStatus(error.message);
-      }
-    });
-    els.devMovesButton.addEventListener("click", generateDevMoves);
-    els.devQueueSpriteButton.addEventListener("click", queueDevSprite);
-    els.devGenerateSpriteButton.addEventListener("click", generateDevSpriteBatch);
-    els.devGenerateSvgButton.addEventListener("click", generateDevSvg);
-    els.devSyncBatchButton.addEventListener("click", syncDevSpriteBatch);
-    els.devTaxonIdInput.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      event.preventDefault();
-      inspectDevLab(true);
-    });
-    els.devLabPanel.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-dev-preview-anim]");
-      if (!button) return;
-      state.devPreviewAnimation = button.getAttribute("data-dev-preview-anim") || "anim-idle";
-      state.devPreviewKey = button.getAttribute("data-dev-preview-key") || "row1";
-      renderDevLab();
-    });
-
     els.treeRefreshButton.addEventListener("click", async () => {
       state.treeSearch = els.treeSearchInput.value.trim();
       await loadSpriteTree(true);
@@ -13658,131 +13522,6 @@ function renderAppHtml() {
       state.recentSearch = els.recentSearchInput.value.trim();
       await loadRecentSprites(false);
     }, 250));
-
-    els.queueMoreButton.addEventListener("click", async () => {
-      if (!state.userId) return;
-      setBusy(true, "Queueing sprites");
-
-      try {
-        const res = await apiFetch("/api/sprite-jobs", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ userId: state.userId, limit: DEV_QUEUE_MORE_LIMIT })
-        });
-
-        setStatus(res.queued > 0
-          ? "Queued " + res.queued + " sprite jobs"
-          : "No new sprite jobs queued. Existing jobs may still be running, or today's queue cap may be reached.");
-        await loadRoster();
-        await loadBatchQueue();
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        setBusy(false);
-      }
-    });
-
-    els.batchPreviewButton.addEventListener("click", async () => {
-      await loadBatchQueue(true);
-    });
-
-    els.batchSubmitButton.addEventListener("click", async () => {
-      if (!state.userId || state.batchJobs.length === 0) return;
-      setBusy(true, "Submitting OpenAI batch");
-
-      try {
-        const res = await apiFetch("/api/sprite-batches/dev-submit", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            userId: state.userId,
-            limit: Math.min(DEV_BATCH_SUBMIT_LIMIT, state.batchJobs.length),
-            queueMissing: false
-          })
-        });
-
-        state.lastBatch = res.submitted ? normalizeSubmittedBatch(res) : null;
-        saveLastBatch();
-        setStatus(res.submitted
-          ? "Submitted batch " + res.batchId + " with " + res.itemCount + " sprites"
-          : (res.message || "No queued sprite jobs available for batch submission"));
-        if (res.submitted) scheduleBatchPolling(5000);
-        await loadBatchQueue();
-        await loadRoster();
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        setBusy(false);
-      }
-    });
-
-    els.seedImportButton.addEventListener("click", async () => {
-      setBusy(true, "Importing plant and animal seed taxa");
-
-      try {
-        const res = await apiFetch("/api/global-seed/dev-import", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ limitPerGroup: 1000 })
-        });
-
-        state.seedStatus = res.status || null;
-        setStatus("Imported " + Number(res.importedTaxa || 0) + " global seed taxa");
-        await loadGlobalSeedQueue();
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        setBusy(false);
-      }
-    });
-
-    els.seedQueueButton.addEventListener("click", async () => {
-      setBusy(true, "Queueing global seed sprites");
-
-      try {
-        const res = await apiFetch("/api/global-seed/dev-queue", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ limit: GLOBAL_SEED_BATCH_LIMIT })
-        });
-
-        state.seedStatus = res.status || null;
-        setStatus(res.queued > 0
-          ? "Queued " + res.queued + " global seed sprite jobs"
-          : "No new global seed jobs queued. Import seed taxa first, or wait for submitted batches to finish.");
-        await loadGlobalSeedQueue();
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        setBusy(false);
-      }
-    });
-
-    els.seedSubmitButton.addEventListener("click", async () => {
-      if (state.seedJobs.length === 0) return;
-      setBusy(true, "Submitting global seed batch");
-
-      try {
-        const res = await apiFetch("/api/global-seed/dev-submit", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ limit: Math.min(GLOBAL_SEED_BATCH_LIMIT, state.seedJobs.length) })
-        });
-
-        state.lastBatch = res.submitted ? normalizeSubmittedBatch(res) : null;
-        saveLastBatch();
-        setStatus(res.submitted
-          ? "Submitted seed batch " + res.batchId + " with " + res.itemCount + " sprites"
-          : (res.message || "No global seed jobs available for batch submission"));
-        if (res.submitted) scheduleBatchPolling(5000);
-        await loadGlobalSeedQueue();
-        await loadBatchQueue();
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        setBusy(false);
-      }
-    });
 
     els.manualSpriteForm.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -13846,8 +13585,8 @@ function renderAppHtml() {
         await switchView("training");
       } else if (action === "recent") {
         await switchView("recent");
-      } else if (action === "dev") {
-        await switchView("dev");
+      } else if (action === "tree") {
+        await switchView("tree");
       } else if (action === "start-battle") {
         await startNpcBattle();
       }
@@ -14122,9 +13861,6 @@ function renderAppHtml() {
       loadRoster();
     }
 
-    renderBatchQueue();
-    hydrateBatchTracker();
-    hydrateGlobalSeedStatus();
     initBlueskySession();
 
     // iNaturalist v2 species_counts fields the roster/training ingest needs.
@@ -15152,7 +14888,7 @@ function renderAppHtml() {
     }
 
     async function switchView(view) {
-      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "map", "training", "dev", "settings"].includes(view) ? view : "home";
+      state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "map", "training", "settings"].includes(view) ? view : "home";
       renderViewTabs();
 
       if (state.activeView === "map") {
@@ -15196,7 +14932,6 @@ function renderAppHtml() {
       els.trainingTabButton.classList.toggle("active", view === "training");
       els.treeTabButton.classList.toggle("active", view === "tree");
       els.recentTabButton.classList.toggle("active", view === "recent");
-      els.devTabButton.classList.toggle("active", view === "dev");
       els.settingsTabButton.classList.toggle("active", view === "settings");
       els.homeView.hidden = view !== "home";
       els.rosterView.hidden = view !== "roster";
@@ -15207,7 +14942,6 @@ function renderAppHtml() {
       els.trainingView.hidden = view !== "training";
       els.treeView.hidden = view !== "tree";
       els.recentView.hidden = view !== "recent";
-      els.devView.hidden = view !== "dev";
       els.settingsView.hidden = view !== "settings";
       if (view === "settings") els.settingsSoundToggle.checked = state.soundOn;
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
@@ -16039,251 +15773,6 @@ function renderAppHtml() {
       els.leaderboardPanel.innerHTML = '<div class="lb-podium">' + podium + '</div>' + table + youCard;
     }
 
-    function currentDevTaxonId() {
-      const id = Number.parseInt(String(els.devTaxonIdInput.value || "").trim(), 10);
-      if (!Number.isFinite(id) || id <= 0) throw new Error("Enter a numeric iNaturalist taxon ID.");
-      return id;
-    }
-
-    async function inspectDevLab(showStatus) {
-      const taxonId = currentDevTaxonId();
-      const previousTaxonId = Number(state.devLab?.taxon?.taxonId || 0);
-      if (previousTaxonId !== taxonId) {
-        state.devPreviewAnimation = "anim-idle";
-        state.devPreviewKey = "row1";
-      }
-      state.devBusy = true;
-      renderDevLab();
-      if (showStatus) setStatus("Loading dev taxon " + taxonId);
-
-      try {
-        state.devLab = await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/dev-lab");
-        renderDevLab();
-        if (showStatus) setStatus("Loaded " + (state.devLab.taxon?.name || "taxon " + taxonId));
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        state.devBusy = false;
-        renderDevLab();
-      }
-    }
-
-    async function generateDevMoves() {
-      const taxonId = currentDevTaxonId();
-      state.devBusy = true;
-      renderDevLab();
-      setStatus("Generating signature moves for taxon " + taxonId);
-
-      try {
-        await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/moves/dev-generate", { method: "POST" });
-        await inspectDevLab(false);
-        state.rosterStale = true;
-        setStatus("Generated signature moves for taxon " + taxonId);
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        state.devBusy = false;
-        renderDevLab();
-      }
-    }
-
-    async function queueDevSprite() {
-      const taxonId = currentDevTaxonId();
-      state.devBusy = true;
-      renderDevLab();
-      setStatus("Queueing current-prompt sprite for taxon " + taxonId);
-
-      try {
-        const res = await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/sprites/dev-queue", { method: "POST" });
-        await inspectDevLab(false);
-        setStatus(res.existingAsset ? "Current-prompt sprite already exists." : "Queued sprite job " + (res.jobId || ""));
-        await loadBatchQueue(false);
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        state.devBusy = false;
-        renderDevLab();
-      }
-    }
-
-    async function generateDevSpriteBatch() {
-      const taxonId = currentDevTaxonId();
-      state.devBusy = true;
-      renderDevLab();
-      setStatus("Submitting one-sprite OpenAI batch for taxon " + taxonId);
-
-      try {
-        const res = await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/sprites/dev-submit-batch", { method: "POST" });
-        if (res.batchId) {
-          state.devBatchId = res.batchId;
-          els.devBatchIdInput.value = res.batchId;
-          state.lastBatch = normalizeSubmittedBatch(res);
-          saveLastBatch();
-          scheduleBatchPolling();
-        }
-        await inspectDevLab(false);
-        setStatus(res.submitted ? "Submitted sprite batch " + res.batchId : (res.message || "Sprite batch was not submitted."));
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        state.devBusy = false;
-        renderDevLab();
-      }
-    }
-
-    async function generateDevSvg() {
-      const taxonId = currentDevTaxonId();
-      state.devBusy = true;
-      renderDevLab();
-      setStatus("Generating dev SVG sprite for taxon " + taxonId);
-
-      try {
-        const res = await apiFetch("/api/taxa/" + encodeURIComponent(String(taxonId)) + "/sprites/dev-generate", { method: "POST" });
-        await inspectDevLab(false);
-        state.rosterStale = true;
-        setStatus(res.generated ? "Generated dev SVG sprite." : (res.message || "Dev SVG sprite was not generated."));
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        state.devBusy = false;
-        renderDevLab();
-      }
-    }
-
-    async function syncDevSpriteBatch() {
-      const batchId = String(els.devBatchIdInput.value || state.devBatchId || "").trim();
-      if (!batchId) {
-        setStatus("Enter a sprite batch ID.");
-        return;
-      }
-
-      state.devBusy = true;
-      renderDevLab();
-      setStatus("Syncing sprite batch " + batchId);
-
-      try {
-        const res = await apiFetch("/api/sprite-batches/" + encodeURIComponent(batchId) + "/sync?maxItems=" + BATCH_SYNC_ITEM_LIMIT, { method: "POST" });
-        state.devBatchId = batchId;
-        const hydrated = await apiFetch("/api/sprite-batches/" + encodeURIComponent(batchId));
-        state.lastBatch = normalizeBatchResponse(hydrated);
-        saveLastBatch();
-        await inspectDevLab(false);
-        state.rosterStale = true;
-        setStatus("Synced sprite batch " + batchId + ": " + Number(res.ready || 0) + " ready, " + Number(res.failed || 0) + " failed.");
-      } catch (error) {
-        setStatus(error.message);
-      } finally {
-        state.devBusy = false;
-        renderDevLab();
-      }
-    }
-
-    function renderDevLab() {
-      const busy = state.devBusy;
-      els.devLabState.textContent = busy ? "busy" : "idle";
-      els.devRandomButton.disabled = busy;
-      els.devInspectButton.disabled = busy;
-      els.devMovesButton.disabled = busy;
-      els.devQueueSpriteButton.disabled = busy;
-      els.devGenerateSpriteButton.disabled = busy;
-      els.devGenerateSvgButton.disabled = busy;
-      els.devSyncBatchButton.disabled = busy;
-      els.devTaxonIdInput.disabled = busy;
-      els.devBatchIdInput.disabled = busy;
-
-      const lab = state.devLab;
-      if (!lab) {
-        els.devLabPanel.innerHTML = '<div class="empty">Enter a taxon ID.</div>';
-        return;
-      }
-
-      const taxon = lab.taxon || {};
-      const currentAsset = lab.asset || null;
-      const previewAsset = currentAsset || lab.latestAsset || null;
-      const job = lab.job || null;
-      const batchId = job?.batchId || state.devBatchId || "";
-      if (batchId && !els.devBatchIdInput.value) els.devBatchIdInput.value = batchId;
-      const previewAnimation = state.devPreviewAnimation || "anim-idle";
-
-      const spritePreview = previewAsset?.url
-        ? renderSheetSprite(previewAsset.url, previewAnimation)
-        : '<div class="placeholder-shape placeholder-' + escapeAttr(placeholderFor(taxon.iconicTaxonName)) + '"></div>';
-      const previewControls = renderDevPreviewControls(lab.moves || [], state.devPreviewKey || "row1");
-
-      const assetLabel = currentAsset
-        ? "current prompt"
-        : previewAsset
-          ? "latest sprite"
-          : "no sprite";
-
-      const movesHtml = Array.isArray(lab.moves) && lab.moves.length
-        ? renderMoveRows(lab.moves)
-        : '<div class="ability"><div><strong>No moves</strong><span>Generate moves first.</span></div></div>';
-
-      const factsHtml = Array.isArray(lab.facts) && lab.facts.length
-        ? lab.facts.map((fact) => '<div class="subtle">' + escapeHtml(fact) + '</div>').join("")
-        : '<div class="subtle">No facts stored.</div>';
-
-      els.devLabPanel.innerHTML =
-        '<div class="dev-summary">' +
-          '<div class="dev-output">' +
-            '<div class="batch-item">' +
-              '<strong>' + escapeHtml(taxon.name || "Taxon " + Number(taxon.taxonId || 0)) + '</strong>' +
-              '<span><em>' + escapeHtml(taxon.scientificName || "") + '</em></span>' +
-              '<span>taxon ' + Number(taxon.taxonId || 0) + ' / genome v' + Number(lab.genomeVersion || 0) + ' / prompt v' + Number(lab.promptVersion || 0) + '</span>' +
-              '<span>prompt ' + escapeHtml(String(lab.promptHash || "").slice(0, 16)) + '</span>' +
-            '</div>' +
-            '<div class="batch-item">' +
-              '<strong>Moves</strong>' +
-              '<div>' + movesHtml + '</div>' +
-            '</div>' +
-            '<div class="batch-item">' +
-              '<strong>Facts</strong>' +
-              '<div>' + factsHtml + '</div>' +
-            '</div>' +
-          '</div>' +
-          '<div class="dev-output">' +
-            '<div class="dev-sprite-preview">' + spritePreview + '</div>' +
-            previewControls +
-            '<div class="dev-meta-grid">' +
-              '<div class="stat"><span class="subtle">Sprite</span><strong>' + escapeHtml(assetLabel) + '</strong></div>' +
-              '<div class="stat"><span class="subtle">Job</span><strong>' + escapeHtml(job?.status || "none") + '</strong></div>' +
-              '<div class="stat"><span class="subtle">Batch</span><strong>' + escapeHtml(batchId || "none") + '</strong></div>' +
-              '<div class="stat"><span class="subtle">Source</span><strong>' + escapeHtml(previewAsset?.model || "none") + '</strong></div>' +
-            '</div>' +
-            (previewAsset?.url ? '<a class="manual-result-link" href="' + escapeAttr(previewAsset.url) + '" target="_blank" rel="noreferrer">Open Sprite</a>' : '') +
-            (job?.error ? '<div class="subtle">' + escapeHtml(job.error) + '</div>' : '') +
-          '</div>' +
-        '</div>';
-    }
-
-    function renderDevPreviewControls(moves, activeKey) {
-      const baseButtons = [
-        { key: "row1", label: "Row 1", title: "Idle loop", anim: "anim-idle" },
-        { key: "row2", label: "Row 2", title: "Movement loop", anim: "anim-move" }
-      ];
-      const moveButtons = (Array.isArray(moves) ? moves : []).slice(0, 4).map((move, index) => ({
-        key: "move" + (index + 1),
-        label: "Move " + (index + 1),
-        title: move?.name || "Move " + (index + 1),
-        anim: moveAnimationClass(move)
-      }));
-      const buttons = baseButtons.concat(moveButtons);
-
-      return '<div class="dev-preview-controls">' + buttons.map((button) => (
-        '<button class="secondary' + (button.key === activeKey ? ' active' : '') + '" type="button" ' +
-          'data-dev-preview-key="' + escapeAttr(button.key) + '" data-dev-preview-anim="' + escapeAttr(button.anim) + '" title="' + escapeAttr(button.title) + '">' +
-          escapeHtml(button.label) +
-        '</button>'
-      )).join("") + '</div>';
-    }
-
-    function moveAnimationClass(move) {
-      if (move && Number(move.animRow) === 4) return "anim-special";
-      if (move && Number(move.animRow) === 3) return "anim-attack";
-      return move && move.category === "special" ? "anim-special" : "anim-attack";
-    }
-
     function formatHomeNumber(value) {
       return Number(value || 0).toLocaleString();
     }
@@ -16441,7 +15930,7 @@ function renderAppHtml() {
             '<p>Browse the shared tree or inspect the newest global sprites added to the game.</p>' +
             '<div class="home-actions">' +
               '<button class="secondary" type="button" data-home-action="recent">Recent</button>' +
-              '<button class="secondary" type="button" data-home-action="dev">Dev Lab</button>' +
+              '<button class="secondary" type="button" data-home-action="tree">Sprite Tree</button>' +
             '</div>' +
           '</div>' +
           '<div class="home-panel">' +
@@ -16584,21 +16073,15 @@ function renderAppHtml() {
       els.teamCount.textContent = selectedCount + " / 5 selected";
       els.clearTeamButton.disabled = selectedCount === 0;
       els.startBattleButton.disabled = !state.userId || selectedCount !== 5;
-      els.queueMoreButton.disabled = !state.userId;
-      els.batchPreviewButton.disabled = !state.userId;
-      els.batchSubmitButton.disabled = !state.userId || state.batchJobs.length === 0;
       els.refreshLabel.textContent = state.rosterTotal
         ? (state.rosterTotal > ROSTER_PAGE_SIZE
           ? rosterRangeLabel() + " of " + state.rosterTotal
           : String(state.rosterTotal) + " species")
         : "";
-      renderBatchQueue();
-      renderGlobalSeedQueue();
       renderViewTabs();
       renderHome();
       renderSpriteTree();
       renderRecentSprites();
-      renderDevLab();
       renderBattle();
     }
 
@@ -16955,150 +16438,39 @@ function renderAppHtml() {
       return total + " ready sprites by taxonomic branch";
     }
 
-    async function loadBatchQueue(showStatus) {
-      if (!state.userId) return;
-
-      const res = await apiFetch(
-        "/api/sprite-jobs?status=queued&userId=" +
-          encodeURIComponent(state.userId) +
-          "&limit=" +
-          DEV_BATCH_SUBMIT_LIMIT
-      );
-      state.batchJobs = res.jobs || [];
-
-      if (showStatus) {
-        setStatus(state.batchJobs.length
-          ? state.batchJobs.length + " queued sprite jobs ready for batch"
-          : "No queued batch jobs. Click Queue More first.");
-      }
-
-      renderBatchQueue();
-    }
-
-    async function hydrateGlobalSeedStatus() {
-      try {
-        const res = await apiFetch("/api/global-seed/status");
-        state.seedStatus = res || null;
-        await loadGlobalSeedQueue();
-      } catch (error) {
-        console.warn("Could not hydrate global seed status", error);
-        renderGlobalSeedQueue();
-      }
-    }
-
-    async function loadGlobalSeedQueue() {
-      try {
-        const status = await apiFetch("/api/global-seed/status");
-        const queue = await apiFetch("/api/global-seed/jobs?limit=" + GLOBAL_SEED_BATCH_LIMIT);
-        state.seedStatus = status || null;
-        state.seedJobs = queue.jobs || [];
-        renderGlobalSeedQueue();
-      } catch (error) {
-        setStatus("Global seed status failed: " + error.message);
-        renderGlobalSeedQueue();
-      }
-    }
-
-    function renderBatchQueue() {
-      const count = state.batchJobs.length;
-      els.batchQueueCount.textContent = count + " queued";
-      els.batchSubmitButton.disabled = !state.userId || count === 0;
-
-      if (state.lastBatch) {
-        els.batchQueueList.innerHTML = '<div class="batch-item">' +
-          '<strong>Last batch</strong>' +
-          '<span>' + escapeHtml(state.lastBatch.batchId) + '</span>' +
-          '<span>' + escapeHtml(batchStatusText(state.lastBatch)) + '</span>' +
-          (state.batchSyncing ? '<span>Syncing outputs to R2...</span>' : '') +
-        '</div>' + (count
-          ? '<div class="batch-item"><strong>Pending next batch</strong><span>' + count + ' queued sprites are not in the last synced batch.</span></div>' + renderBatchJobList(state.batchJobs)
-          : "");
-        return;
-      }
-
-      if (!state.userId) {
-        els.batchQueueList.textContent = "Load a roster, then click Queue More.";
-        return;
-      }
-
-      if (count === 0) {
-        els.batchQueueList.textContent = "No queued jobs. Click Queue More to prepare sprites for batch.";
-        return;
-      }
-
-      els.batchQueueList.innerHTML = renderBatchJobList(state.batchJobs);
-    }
-
-    function renderGlobalSeedQueue() {
-      const count = state.seedJobs.length;
-      els.seedQueueCount.textContent = count + " queued";
-      els.seedSubmitButton.disabled = count === 0;
-
-      const status = state.seedStatus;
-      if (!status || Number(status.totals?.seedCount || 0) === 0) {
-        els.seedQueueList.textContent = "Click Import Plants + Animals to load the top seed taxa from iNaturalist.";
-        return;
-      }
-
-      const totals = status.totals || {};
-      const summary = '<div class="batch-item">' +
-        '<strong>Seed catalog</strong>' +
-        '<span>' + Number(totals.seedCount || 0) + ' taxa / ' +
-          Number(totals.readyCount || 0) + ' ready / ' +
-          Number(totals.batchSubmittedCount || 0) + ' submitted / ' +
-          Number(totals.queuedCount || 0) + ' queued / ' +
-          Number(totals.missingCount || 0) + ' missing</span>' +
-        renderSeedGroupStatus(status.groups || []) +
-      '</div>';
-
-      els.seedQueueList.innerHTML = summary + (count
-        ? '<div class="batch-item"><strong>Next seed batch</strong><span>' + count + ' queued sprites ready to submit.</span></div>' + renderBatchJobList(state.seedJobs)
-        : '<div class="batch-item"><strong>No queued seed jobs</strong><span>Click Queue 200 to prepare the next missing global seed sprites.</span></div>');
-    }
-
-    function renderSeedGroupStatus(groups) {
-      return groups.map((group) => (
-        '<span>' + escapeHtml(group.label || group.key) + ': ' +
-        Number(group.seedCount || 0) + ' taxa, ' +
-        Number(group.readyCount || 0) + ' ready, ' +
-        Number(group.missingCount || 0) + ' missing</span>'
-      )).join("");
-    }
-
     async function uploadManualSprite() {
       const file = els.manualSpriteFile.files && els.manualSpriteFile.files[0];
-      const hasTaxonLabel = els.manualTaxonId.value.trim() ||
-        els.manualScientificName.value.trim() ||
-        els.manualCommonName.value.trim();
+      const taxonId = els.manualTaxonId.value.trim();
 
       if (!file) {
         setStatus("Choose a sprite sheet image first.");
         return;
       }
 
-      if (!hasTaxonLabel) {
-        setStatus("Add a taxon ID, scientific name, or common name.");
+      if (!/^[0-9]+$/.test(taxonId)) {
+        setStatus("Enter a numeric iNaturalist taxon ID.");
         return;
       }
 
-      const formData = new FormData(els.manualSpriteForm);
-      formData.set("addToRoster", els.manualAddToRoster.checked ? "true" : "false");
-      if (state.userId) formData.set("userId", state.userId);
+      const formData = new FormData();
+      formData.append("taxonId", taxonId);
+      formData.append("sprite", file);
 
-      setBusy(true, "Uploading manual sprite");
+      setBusy(true, "Submitting custom sprite");
       els.manualUploadState.textContent = "uploading";
 
       try {
-        const result = await apiFetch("/api/manual-sprites/upload", {
+        const result = await apiFetch("/api/my-sprites/upload", {
           method: "POST",
           body: formData
         });
 
         els.manualUploadState.textContent = "ready";
         els.manualUploadResult.innerHTML = renderManualUploadResult(result);
-        setStatus("Uploaded manual sprite for " + (result.commonName || result.scientificName));
+        setStatus("Custom sprite submitted for " + (result.name || "taxon " + taxonId) + ". It is live for you while QA is pending.");
 
         if (state.userId) {
+          await loadMySprites();
           await loadRoster();
         }
 
@@ -17119,9 +16491,9 @@ function renderAppHtml() {
         : "size unknown";
 
       return '<div class="batch-item">' +
-        '<strong>' + escapeHtml(result.commonName || result.scientificName || "Uploaded sprite") + '</strong>' +
-        '<span><em>' + escapeHtml(result.scientificName || "") + '</em></span>' +
-        '<span>taxon ' + Number(result.taxonId || 0) + ' / ' + escapeHtml(size) + ' / ' + escapeHtml(result.contentType || "") + '</span>' +
+        '<strong>' + escapeHtml(result.name || "Custom sprite") + '</strong>' +
+        '<span>taxon ' + Number(result.taxonId || 0) + ' / ' + escapeHtml(size) + ' / ' + escapeHtml(result.status || "pending") + '</span>' +
+        (result.discordError ? '<span class="subtle">Discord QA post will retry: ' + escapeHtml(result.discordError) + '</span>' : '<span class="subtle">Submitted for Discord QA; visible to you while pending.</span>') +
         renderUploadMovesSummary(result.moves) +
         '<a class="manual-result-link" href="' + escapeAttr(result.url || "#") + '" target="_blank" rel="noreferrer">Open asset</a>' +
       '</div>';
@@ -17142,213 +16514,6 @@ function renderAppHtml() {
         (moves.imageConditioned ? "Image-conditioned moves: " : "Moves regenerated: ") +
         escapeHtml(names) +
       '</span>';
-    }
-
-    async function hydrateBatchTracker() {
-      if (state.lastBatch && state.lastBatch.batchId) {
-        renderBatchQueue();
-        await refreshBatchStatus(false);
-        return;
-      }
-
-      try {
-        const latest = await apiFetch("/api/sprite-batches/latest");
-        const summary = normalizeBatchStatus(latest);
-        if (!summary) return;
-
-        state.lastBatch = summary;
-        saveLastBatch();
-        renderBatchQueue();
-
-        if (summary.status === "completed" && !summary.synced) {
-          await syncLastBatch(false);
-        } else if (isActiveBatchStatus(summary.status)) {
-          scheduleBatchPolling(5000);
-        }
-      } catch (error) {
-        console.warn("Could not hydrate batch tracker", error);
-      }
-    }
-
-    async function refreshBatchStatus(showStatus) {
-      if (!state.lastBatch || !state.lastBatch.batchId) return;
-
-      try {
-        const res = await apiFetch("/api/sprite-batches/" + encodeURIComponent(state.lastBatch.batchId));
-        state.lastBatch = normalizeBatchStatus(res) || state.lastBatch;
-        saveLastBatch();
-        renderBatchQueue();
-
-        if (state.lastBatch.status === "completed" && !state.lastBatch.synced) {
-          await syncLastBatch(true);
-          return;
-        }
-
-        if (showStatus) {
-          setStatus(batchStatusText(state.lastBatch));
-        }
-
-        if (isActiveBatchStatus(state.lastBatch.status)) {
-          scheduleBatchPolling(BATCH_POLL_MS);
-        }
-      } catch (error) {
-        setStatus("Batch status check failed: " + error.message);
-        scheduleBatchPolling(BATCH_POLL_MS);
-      }
-    }
-
-    async function syncLastBatch(showStatus) {
-      if (!state.lastBatch || !state.lastBatch.batchId || state.batchSyncing) return;
-
-      state.batchSyncing = true;
-      renderBatchQueue();
-
-      try {
-        const res = await apiFetch(
-          "/api/sprite-batches/" +
-            encodeURIComponent(state.lastBatch.batchId) +
-            "/sync?maxItems=" +
-            BATCH_SYNC_ITEM_LIMIT,
-          {
-          method: "POST"
-          }
-        );
-
-        if (res.synced) {
-          state.lastBatch = {
-            ...state.lastBatch,
-            status: res.status || state.lastBatch.status,
-            synced: true,
-            ready: Number(res.ready ?? 0),
-            failed: Number(res.failed ?? 0),
-            itemCount: Number(res.itemCount ?? state.lastBatch.itemCount ?? 0),
-            requestCounts: res.requestCounts || state.lastBatch.requestCounts || null
-          };
-          saveLastBatch();
-          setStatus("Batch synced: " + state.lastBatch.ready + " sprites ready, " + state.lastBatch.failed + " failed");
-          await loadBatchQueue();
-          await loadRoster();
-        } else {
-          state.lastBatch = {
-            ...state.lastBatch,
-            status: res.status || state.lastBatch.status,
-            synced: false,
-            ready: Number(res.ready ?? state.lastBatch.ready ?? 0),
-            failed: Number(res.failed ?? state.lastBatch.failed ?? 0),
-            itemCount: Number(res.itemCount ?? state.lastBatch.itemCount ?? 0),
-            requestCounts: res.requestCounts || state.lastBatch.requestCounts || null
-          };
-          saveLastBatch();
-          setStatus(
-            "Batch sync in progress: " +
-              state.lastBatch.ready +
-              " ready, " +
-              state.lastBatch.failed +
-              " failed, " +
-              Number(res.remaining || 0) +
-              " remaining"
-          );
-          scheduleBatchPolling(5000);
-        }
-      } catch (error) {
-        setStatus("Batch sync failed: " + error.message);
-        scheduleBatchPolling(BATCH_POLL_MS);
-      } finally {
-        state.batchSyncing = false;
-        renderBatchQueue();
-      }
-    }
-
-    function scheduleBatchPolling(delayMs) {
-      if (state.batchPolling) clearTimeout(state.batchPolling);
-      if (!state.lastBatch || !shouldPollBatch(state.lastBatch)) return;
-
-      state.batchPolling = setTimeout(() => {
-        refreshBatchStatus(false);
-      }, delayMs || BATCH_POLL_MS);
-    }
-
-    function shouldPollBatch(batch) {
-      const status = String(batch?.status || "").toLowerCase();
-      return isActiveBatchStatus(status) || (status === "completed" && !batch.synced);
-    }
-
-    function normalizeSubmittedBatch(batch) {
-      return {
-        batchId: batch.batchId,
-        status: batch.status || "submitted",
-        itemCount: Number(batch.itemCount || 0),
-        synced: false,
-        ready: 0,
-        failed: 0,
-        requestCounts: null
-      };
-    }
-
-    function normalizeBatchStatus(response) {
-      const batch = response && response.batch;
-      if (!batch) return null;
-
-      const items = Array.isArray(response.items) ? response.items : [];
-      const ready = items.filter((item) => item.status === "ready").length;
-      const failed = items.filter((item) => item.status === "failed").length;
-      const itemCount = Number(batch.item_count ?? batch.itemCount ?? items.length ?? 0);
-
-      return {
-        batchId: batch.batch_id || batch.batchId,
-        status: batch.remoteStatus || batch.status || "submitted",
-        itemCount,
-        synced: itemCount > 0 && ready + failed >= itemCount,
-        ready,
-        failed,
-        requestCounts: batch.requestCounts || batch.request_counts || null
-      };
-    }
-
-    function batchStatusText(batch) {
-      const status = batch.status || "submitted";
-      const itemCount = Number(batch.itemCount || 0);
-      const counts = batch.requestCounts;
-      const progress = counts
-        ? " / " + Number(counts.completed || 0) + " completed, " + Number(counts.failed || 0) + " failed"
-        : "";
-      const synced = batch.synced
-        ? " / synced " + Number(batch.ready || 0) + " ready, " + Number(batch.failed || 0) + " failed"
-        : "";
-
-      return status + " / " + itemCount + " sprites" + progress + synced;
-    }
-
-    function isActiveBatchStatus(status) {
-      return ACTIVE_BATCH_STATUSES.has(String(status || "").toLowerCase());
-    }
-
-    function saveLastBatch() {
-      if (!state.lastBatch || !state.lastBatch.batchId) {
-        localStorage.removeItem(LAST_BATCH_STORAGE_KEY);
-        return;
-      }
-
-      localStorage.setItem(LAST_BATCH_STORAGE_KEY, JSON.stringify(state.lastBatch));
-    }
-
-    function readStoredBatch() {
-      try {
-        const parsed = JSON.parse(localStorage.getItem(LAST_BATCH_STORAGE_KEY) || "null");
-        return parsed && parsed.batchId ? parsed : null;
-      } catch {
-        return null;
-      }
-    }
-
-    function renderBatchJobList(jobs) {
-      return jobs.map((job) => (
-        '<div class="batch-item">' +
-          '<strong>' + escapeHtml(job.common_name || job.scientific_name || "Unnamed taxon") + '</strong>' +
-          '<span><em>' + escapeHtml(job.scientific_name || "") + '</em></span>' +
-          '<span>' + Number(job.obs_count || 0) + ' obs / taxon ' + Number(job.taxon_id || 0) + '</span>' +
-        '</div>'
-      )).join("");
     }
 
     function pruneSelectedTaxa() {
@@ -19132,31 +18297,13 @@ function renderAppHtml() {
 
     function setBusy(isBusy, message) {
       els.importButton.disabled = isBusy;
-      els.queueMoreButton.disabled = isBusy || !state.userId;
-      els.batchPreviewButton.disabled = isBusy || !state.userId;
-      els.batchSubmitButton.disabled = isBusy || !state.userId || state.batchJobs.length === 0;
-      els.seedImportButton.disabled = isBusy;
-      els.seedQueueButton.disabled = isBusy;
-      els.seedSubmitButton.disabled = isBusy || state.seedJobs.length === 0;
       els.manualUploadButton.disabled = isBusy;
       els.manualTaxonId.disabled = isBusy;
-      els.manualScientificName.disabled = isBusy;
-      els.manualCommonName.disabled = isBusy;
       els.manualSpriteFile.disabled = isBusy;
-      els.manualAddToRoster.disabled = isBusy;
       els.treeSearchInput.disabled = isBusy;
       els.treeRefreshButton.disabled = isBusy;
       els.recentSearchInput.disabled = isBusy;
       els.recentRefreshButton.disabled = isBusy;
-      els.devTaxonIdInput.disabled = isBusy;
-      els.devRandomButton.disabled = isBusy;
-      els.devInspectButton.disabled = isBusy;
-      els.devMovesButton.disabled = isBusy;
-      els.devQueueSpriteButton.disabled = isBusy;
-      els.devGenerateSpriteButton.disabled = isBusy;
-      els.devGenerateSvgButton.disabled = isBusy;
-      els.devBatchIdInput.disabled = isBusy;
-      els.devSyncBatchButton.disabled = isBusy;
       els.clearTeamButton.disabled = isBusy || state.selectedTaxa.size === 0;
       els.startBattleButton.disabled = isBusy || !state.userId || state.selectedTaxa.size !== 5;
       if (message) setStatus(message);

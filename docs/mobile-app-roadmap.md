@@ -93,29 +93,42 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
 
 - ✅ **Mobile tabs decluttered.** The desktop control sidebar stacked below every mobile
   view; made it contextual via `body[data-view]` — hidden on Map/Settings/Leaderboard/
-  Training/Sprite Tree, Battle keeps only Bluesky challenges + team picker (Queue More
-  hidden), Home/Roster keep it.
+  Training/Sprite Tree, Battle keeps only Bluesky challenges + team picker, Home/Roster
+  keep it.
 - ✅ **Settings tab** (⚙️ in the More sheet + desktop tab): relocated Account stats,
-  Sound toggle, Re-import roster, Sign out, and the Manual Sprite uploader. **Dev Batch +
-  Global Seed moved into Dev Lab.** See `settings-plan.md`.
+  Sound toggle, Re-import roster, Sign out, and the custom sprite uploader. **Dev Batch +
+  Global Seed are now private ops only, not app tabs.** See `settings-plan.md`.
 - ✅ **Dark / Light / System theme** (first pass): tokenized surfaces + `[data-theme]`
   override, no-flash init, Settings toggle persisted + OS-following. Plus contrast fixes
   (battle empty state, roster chips, card-back stats). _Polish remaining: colored tier/
   status chips, battle-arena gradients, map dark-tuning, reduce-motion toggle._
 - ✅ Fixed the **More sheet opening behind the Leaflet map** (z-index).
-- ⏳ **Sprite gap backfill** ongoing: ready ~1,734; two image batches (~268 of the
-  most-observed-roster gaps) submitted 2026-06-18 and processing. Fixed expired/cancelled
-  batch sync so partial OpenAI results are recovered.
+- ✅ **Dev Lab removed from the public frontend** (2026-06-18): desktop/mobile nav no
+  longer expose Dev Lab, Dev Batch, Global Seed, batch trackers, or Queue More. Private
+  ops endpoints remain in the Worker but are guarded by an admin session check
+  (`ADMIN_DIDS`, optional `ADMIN_BSKY_HANDLES` / `ADMIN_INAT_LOGINS`) and return 404 to
+  non-admins. This keeps the controls out of the app UI; true protection is the
+  server-side gate, not obscurity.
+- ⏳ **Sprite gap backfill** ongoing: total ready sprite assets are now **2,003**. The two
+  134-item image batches submitted 2026-06-18 both completed and synced successfully.
+  Global seed status currently reports **1,346 / 2,000** seed taxa ready, with **654**
+  still queued/submitted. There is also cleanup/requeue work for **650 submitted items**
+  attached to earlier failed batch rows. Fixed expired/cancelled batch sync so partial
+  OpenAI results are recovered.
 
 ### What's next (recommended order)
 
-1. **Real-device QA** — the OAuth round-trip on actual iOS/Android.
+1. **Finish private-ops hardening** — configure the deployed admin identity vars
+   (`ADMIN_DIDS` at minimum), verify non-admins get 404 on batch/global-seed/dev routes,
+   and keep admin tooling out of the public HTML. Endpoint names can still be known if
+   someone reads the source or guesses them; the server-side admin gate is the control.
 2. **Phase 5 cost gating** (non-negotiable before opening up) — rate-limit **your own**
    API, especially sprite generation; per-user + global ceilings with clear 429 UX.
    _(The iNat funnel is already handled — this is about your own OpenAI/generation cost.)_
-3. **Phase 2 onboarding** — the guided mobile setup flow + missing-sprite fallback state.
-4. **Phase 4 retention** — wire the Buddy list into challenges ("challenge who's online").
-5. **Sprite Tree polish (optional)** — SVG "vine" connectors + grow/idle animation, and a
+3. **Real-device QA** — the OAuth round-trip on actual iOS/Android.
+4. **Phase 2 onboarding** — the guided mobile setup flow + missing-sprite fallback state.
+5. **Phase 4 retention** — wire the Buddy list into challenges ("challenge who's online").
+6. **Sprite Tree polish (optional)** — SVG "vine" connectors + grow/idle animation, and a
    sunburst coverage minimap (doubles as a "which branches still need sprites" view).
 
 ---
@@ -174,7 +187,8 @@ the mobile-first lens plus the production gaps that plan doesn't cover.
 16. Comprehensive **error states** for auth failure, iNat import failure/rate-limit,
     sprite generation failure, challenge creation failure.
 17. **Alpha access control** — decide allowlist (Bluesky DID / iNat username / env flag)
-    vs. open, and gate Dev Lab behind admin.
+    vs. open. Dev Lab is no longer a public tab; private ops routes are admin-gated and
+    should be driven from CLI/scripts or a separate owner-only surface.
 18. **Legal/trust**: privacy policy, terms, data-deletion path (Bluesky DID + imported
     iNat data), "what we store" disclosure, visible alpha labeling. Required before
     public, and Bluesky/iNat users will expect it.

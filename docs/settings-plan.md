@@ -8,16 +8,22 @@ or buried in other screens. Pairs with the mobile sidebar-decluttering work
 Placement: a ⚙️ **Settings** item in the mobile **More** sheet, and a tab/gear on
 desktop.
 
-## Dev-tools relocation — ✅ DONE (2026-06-18)
+## Dev-tools relocation / removal — ✅ DONE (2026-06-18)
 
-The shared sidebar's dev sprite tools now live where they belong:
+The shared sidebar's dev sprite tools first moved into Dev Lab, then Dev Lab was removed
+from the public frontend entirely:
 
-- ✅ **Dev Batch** (roster sprite generation) → moved into `devView`.
-- ✅ **Global Seed** (shared sprite library generation) → moved into `devView`.
-- ✅ **Manual Sprite** (upload your own custom sprite) → moved into **Settings → Sprites**.
-- ✅ Sidebar now holds only Bluesky challenges + team picker + Queue More, and is hidden
-  on focused mobile tabs (Map/Settings/Leaderboard/Training/Sprite Tree; Queue More
-  hidden on Battle).
+- ✅ **Dev Batch** (roster sprite generation) → removed from app UI; backend route is
+  admin-only.
+- ✅ **Global Seed** (shared sprite library generation) → removed from app UI; backend
+  route is admin-only.
+- ✅ **Manual shared-library upload** → admin-only backend route.
+- ✅ **Custom player sprite upload** → **Settings → Sprites**, using the authenticated
+  per-user Discord-QA path.
+- ✅ Sidebar now holds only Bluesky challenges + team picker, and is hidden on focused
+  mobile tabs (Map/Settings/Leaderboard/Training/Sprite Tree).
+- ✅ **Queue More removed from the public sidebar** until the missing-sprite fallback gets
+  a proper player-safe UX and cost ceiling.
 
 ## What goes in Settings
 
@@ -75,13 +81,15 @@ Legend: ✅ already exists (relocate) · 🆕 new build.
 ### About / app
 - 🆕 **Install app** (PWA `beforeinstallprompt` — not currently wired).
 - 🆕 Version / build, "Alpha" label, links (GitHub, feedback).
-- 🆕 **Dev Lab access** toggle (ties into roadmap dev-gating).
+- ✅ **Dev Lab access**: no public Dev Lab tab. Private ops routes are server-gated by
+  `ADMIN_DIDS` (plus optional handle/iNat-login env fallbacks) and return 404 to
+  non-admins. Configure the deployed admin identity before relying on these routes.
 
 ## Build order
 
 1. ✅ **Cheap wins — DONE (2026-06-18).** Settings view + ⚙️ nav entry; relocated Log out,
-   Account stats, Sound toggle, Manual Sprite, Re-import roster; moved Dev Batch + Global
-   Seed into Dev Lab.
+   Account stats, Sound toggle, Custom Sprite, and Re-import roster; removed Dev Batch +
+   Global Seed from the public frontend.
 2. ✅ **Dark mode — DONE (first pass, 2026-06-18).** Light/Dark/System toggle, tokenized
    surfaces, no-flash init. Plus contrast fixes (battle empty state, roster chips,
    card-back stats). _Remaining polish: tier/status colored chips + battle-arena gradients
@@ -92,6 +100,8 @@ Legend: ✅ already exists (relocate) · 🆕 new build.
    Bluesky account — sign in, link any iNat name, import, then delete — and confirm the
    rows are actually gone across the user-scoped tables. (Privacy/terms links + data
    export still pending.)
-4. **Dev Lab access gating** — Dev Lab is consolidated but still visible to all users;
-   gate behind admin (ties into Phase 5). NOT started.
+4. ✅ **Dev Lab access gating / removal — DONE (2026-06-18).** Dev Lab is gone from the
+   frontend. Private batch/global-seed/dev endpoints are admin-gated server-side.
+   Remaining operational task: set `ADMIN_DIDS` in the deployed Worker vars and verify a
+   non-admin account gets 404.
 5. Notifications, PWA install, unlink, About — incremental.

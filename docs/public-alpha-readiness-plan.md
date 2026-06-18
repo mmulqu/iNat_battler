@@ -20,7 +20,8 @@ The site should have two clear modes:
 1. Public/logged-out mode: a landing page that explains the game, shows a fantasy battle hero image, and prompts Bluesky sign-in.
 2. Player/logged-in mode: a compact app dashboard for importing observations, managing a roster, training species, and battling.
 
-Development controls should remain available, but they should live in a clearly marked Dev Lab and be hidden or gated away from normal users.
+Development controls should remain available only as private ops endpoints or owner-only
+scripts. They should not appear in the player-facing frontend.
 
 ## Landing Page
 
@@ -74,7 +75,9 @@ Add or reshape the main logged-in navigation around these views:
 - Training: existing stat allocation and mastery work.
 - Sprite Tree: collection/progress exploration.
 - Recently Added: new global sprites.
-- Dev Lab: internal batch, seed, QA, manual upload, and sync tools.
+Dev Lab is no longer a player-facing view. Internal batch, seed, manual shared-library
+upload, and sync tools stay in the Worker as private ops endpoints, guarded by admin
+identity env vars and intended for CLI/script use or a future owner-only surface.
 
 The current left sidebar is useful, but it mixes too many workflows. Over time, move context-specific actions closer to the tab where they are used.
 
@@ -112,7 +115,8 @@ Improvements:
 - Show challenge controls and incoming challenge state.
 - Display a battle-ready checklist when no battle is active.
 - Use a battle-themed visual preview or backdrop.
-- Keep test battle controls available only in Dev Lab or dev mode.
+- Keep test battle controls out of normal player workflows unless explicitly exposed as a
+  safe demo/NPC mode.
 
 ## Visual Design
 
@@ -139,9 +143,12 @@ Keep existing development workflows.
 
 Changes:
 
-- Keep Dev Lab as the home for batch tools, global seed status, manual uploads, sync buttons, and debug actions.
-- Add a visible dev/admin badge when internal tools are available.
-- Hide or disable Dev Lab for users who are not allowed to access it.
+- Keep batch tools, global seed status, manual shared-library uploads, sync buttons, and
+  debug actions out of the public frontend.
+- Guard private ops endpoints server-side with admin identity checks; hiding frontend
+  links is not sufficient security.
+- Return not-found responses to non-admins on private ops routes to avoid advertising
+  them to probes.
 - Keep direct APIs available for trusted use.
 
 ## Public Alpha Checklist
@@ -153,7 +160,7 @@ Before inviting broader testers:
 - iNaturalist verification flow is guided and understandable.
 - Roster can handle hundreds of taxa without endless scrolling.
 - Battle tab has a useful empty state and team readiness flow.
-- Dev tools are separated from normal player workflows.
+- Dev tools are absent from normal player workflows and private ops routes are admin-gated.
 - Privacy/data explanation is visible.
 - The app clearly labels itself as pre-alpha or alpha.
 - Error states are understandable for auth, iNaturalist import, sprite generation, and challenge creation.
@@ -168,7 +175,7 @@ Before inviting broader testers:
 6. Add roster quick filters and reduce long scrolling.
 7. Add compact roster mode or pagination improvements.
 8. Improve Battle empty state and team readiness display.
-9. Move test battle and internal generation controls fully into Dev Lab.
+9. Remove internal generation controls from the public frontend.
 10. Add dev/admin gating for internal controls.
 11. Polish visual hierarchy and status messaging.
 
@@ -176,6 +183,6 @@ Before inviting broader testers:
 
 - Whether public visitors should be able to browse example sprites before signing in.
 - Whether alpha access should be allowlisted by Bluesky DID, iNaturalist username, or a simple environment flag.
-- Whether Dev Lab should be hidden entirely or visible but locked for non-dev users.
+- Dev Lab decision is made: no public Dev Lab tab; private ops routes are admin-gated.
 - Whether the first public battle experience should use real async Bluesky challenges only or also support a safe NPC/demo battle.
 - Whether custom sprite QA belongs in the sidebar, Home dashboard, or a separate account/sprites view.
