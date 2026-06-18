@@ -91,6 +91,48 @@ async function loadStates() {
 // ---------------------------------------------------------------------------
 // Sprite preloading
 // ---------------------------------------------------------------------------
+// Background removal — ported verbatim from the live battle view so videos match
+// the website. Flood-fills the light/grey backdrop inward from each 4x4 cell's
+// edges and zeroes its alpha, leaving the creature (and any interior light
+// areas not connected to the border) intact.
+function isLightCellBackground(data, offset) {
+  const alpha = data[offset + 3];
+  if (alpha === 0) return false;
+  const r = data[offset], g = data[offset + 1], b = data[offset + 2];
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  return max >= 190 && max - min <= 70 && r + g + b >= 590;
+}
+function alphaKeySpriteSheet(data, width, height) {
+  const columns = 4, rows = 4;
+  const visited = new Uint8Array(width * height);
+  for (let row = 0; row < rows; row++) {
+    for (let column = 0; column < columns; column++) {
+      const x0 = Math.floor((width * column) / columns);
+      const x1 = Math.floor((width * (column + 1)) / columns) - 1;
+      const y0 = Math.floor((height * row) / rows);
+      const y1 = Math.floor((height * (row + 1)) / rows) - 1;
+      const queue = [];
+      let cursor = 0;
+      const push = (x, y) => {
+        if (x < x0 || x > x1 || y < y0 || y > y1) return;
+        const index = y * width + x;
+        if (visited[index]) return;
+        if (!isLightCellBackground(data, index * 4)) return;
+        visited[index] = 1;
+        queue.push(index);
+      };
+      for (let x = x0; x <= x1; x++) { push(x, y0); push(x, y1); }
+      for (let y = y0 + 1; y < y1; y++) { push(x0, y); push(x1, y); }
+      while (cursor < queue.length) {
+        const index = queue[cursor++];
+        data[index * 4 + 3] = 0;
+        const x = index % width, y = Math.floor(index / width);
+        push(x + 1, y); push(x - 1, y); push(x, y + 1); push(x, y - 1);
+      }
+    }
+  }
+}
+
 const imgCache = new Map();
 function preload(url) {
   if (!url) return Promise.resolve(null);
@@ -98,7 +140,22 @@ function preload(url) {
   const p = new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = "anonymous";
-    img.onload = () => resolve(img);
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+        if (!w || !h) { resolve(img); return; }
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const cx = c.getContext("2d", { willReadFrequently: true });
+        cx.drawImage(img, 0, 0);
+        const id = cx.getImageData(0, 0, w, h);
+        alphaKeySpriteSheet(id.data, w, h);
+        cx.putImageData(id, 0, 0);
+        resolve(c); // a canvas; drawImage handles it like an image
+      } catch (_) {
+        resolve(img); // same-origin only; fall back to raw image on any error
+      }
+    };
     img.onerror = () => resolve(null);
     img.src = url;
   });
