@@ -215,8 +215,21 @@ participants opted in (a profile/settings flag) — see `docs/settings-plan.md`.
    - **TODO before going live:** set the production secret
      `wrangler secret put BSKY_BOT_APP_PASSWORD` and var `BSKY_BOT_IDENTIFIER`;
      wire the HTTP trigger in Phase 4/5 (the module is callable from the Worker as-is).
-4. **"Share as video" button** — on the battle-result overlay: render in-browser,
-   upload MP4 to a Worker endpoint, post to the brand account, confirm + link.
+4. **"Share as video" button — ✅ DONE (2026-06-18).** Battle-result overlay shows
+   "Share as video 🎥" (for finished, non-demo battles when logged in + iNat-linked)
+   → opens `/replay/<id>?share=1` → renders the MP4 in the user's browser → caption
+   box + "Share to the feed 🦋" → `POST /api/battles/:id/share-video` (auth, battle
+   ownership checked) streams the MP4 straight to Bluesky (no R2) and posts to the
+   **@wildmarch brand feed**, crediting the player via @mention. Verified: build,
+   deploy, share UI renders, endpoint 401s without a session.
+   - **Decision (2026-06-18): brand-feed only for now.** Posting to the user's *own*
+     account needs a broader OAuth scope than the current `feed.post`-only grant
+     (`getServiceAuth` + blob upload), which would force every linked user to
+     re-authorize. Deferred. The OAuth/DPoP self-post code was written then removed
+     in favor of the app-password brand path; `pdsXrpcGet` (DPoP GET) remains in
+     `atproto.js` for when we revisit. To enable own-account posting later: set
+     `OAUTH_SCOPE` to `atproto transition:generic` (or granular blob+rpc scopes) and
+     restore the self-post branch in `shareBattleVideo`.
 5. **Autonomous curator** — scoring cron + render-via-Browser-Rendering job + opt-in
    gating + dedupe + daily cap.
 

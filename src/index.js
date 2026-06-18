@@ -51,7 +51,6 @@ import {
   getAuthServerMeta,
   oauthClientConfig,
   pdsXrpcCall,
-  pdsXrpcGet,
   pkceChallengeFromVerifier,
   pushedAuthorizationRequest,
   randomToken,
@@ -59,12 +58,7 @@ import {
   resolveIdentity,
   searchActorsTypeahead
 } from "./atproto.js";
-import {
-  buildMentionFacets,
-  buildVideoPostRecord,
-  postBattleHighlight,
-  uploadVideoWithToken
-} from "./bsky-bot.js";
+import { postBattleHighlight } from "./bsky-bot.js";
 
 import landingHeroBattleImage from "./assets/landing-hero-battle.webp";
 import statusStunnedImage from "./assets/status-stunned.png";
@@ -858,7 +852,6 @@ async function routeRequest(request, env, ctx) {
     const bytes = new Uint8Array(await request.arrayBuffer());
     return jsonResponse(await shareBattleVideo(env, session, decodeURIComponent(shareVideoMatch[1]), bytes, {
       caption: url.searchParams.get("caption") || "",
-      alsoBrand: url.searchParams.get("brand") === "1",
       width: Number(url.searchParams.get("w")) || 720,
       height: Number(url.searchParams.get("h")) || 900
     }));
@@ -5393,66 +5386,38 @@ async function shareBattleToBluesky(env, session, battleId, origin) {
   return { ok: true, uri: result?.uri ?? null, webUrl: bskyPostWebUrl(session, result?.uri) };
 }
 
-// Posts a rendered highlight MP4 to the user's own Bluesky account (OAuth/DPoP),
-// and optionally cross-posts to the brand feed (app password). Video bytes are
-// uploaded straight through to Bluesky — R2 is never used.
-async function shareBattleVideo(env, session, battleId, bytes, { caption, alsoBrand, width, height }) {
+// Posts a rendered highlight MP4 to the @wildmarch brand feed (app password),
+// crediting the battle's owner via an @mention. Video bytes stream straight
+// through to Bluesky — R2 is never used. (Per-user own-account posting is
+// deferred: it needs a broader OAuth scope; see docs/battle-highlights-bluesky.md.)
+async function shareBattleVideo(env, session, battleId, bytes, { caption, width, height }) {
   const userId = requireLinkedUserId(session);
   const battle = await getBattle(env, battleId);
   if (!battle) throw httpError("Battle not found", 404);
   if (battle.player?.userId !== userId) throw httpError("This is not your battle", 403);
   if (!bytes || bytes.byteLength < 1000) throw httpError("Missing or empty video", 400);
   if (bytes.byteLength > 100 * 1024 * 1024) throw httpError("Video exceeds Bluesky's 100MB limit", 400);
+  if (!env.BSKY_BOT_APP_PASSWORD || !env.BSKY_BOT_IDENTIFIER) {
+    throw httpError("Highlight posting is not configured", 503);
+  }
 
-  const text = (caption && caption.trim()) || defaultHighlightCaption(battle);
-  const alt = `An iNat Battler highlight: ${battle.player?.name || "your team"} vs ${battle.opponent?.name || "the opponent"}.`;
+  const base = (caption && caption.trim()) || defaultHighlightCaption(battle);
+  const handle = session.handle ? `@${session.handle}` : null;
+  const text = handle ? `${base} — by ${handle}` : base;
+  const mentions = session.handle && session.did ? [{ handle: session.handle, did: session.did }] : [];
+  const alt = `An iNat Battler highlight: ${battle.player?.name || "a team"} vs ${battle.opponent?.name || "the opponent"}.`;
 
-  // --- Post to the user's own account (OAuth + DPoP) ---
-  const fresh = await ensureFreshAccessToken(env, session);
-  const dpopKey = {
-    privateJwk: JSON.parse(fresh.dpop_private_jwk),
-    publicJwk: JSON.parse(fresh.dpop_public_jwk)
+  const post = await postBattleHighlight({
+    identifier: env.BSKY_BOT_IDENTIFIER,
+    password: env.BSKY_BOT_APP_PASSWORD,
+    bytes, text, alt, width, height, mentions,
+    name: `battle-${battleId}.mp4`
+  });
+  const rkey = post?.uri ? String(post.uri).split("/").pop() : null;
+  return {
+    ok: true,
+    brand: { uri: post?.uri ?? null, webUrl: rkey ? `https://bsky.app/profile/${post.handle}/post/${rkey}` : null }
   };
-  const pdsHost = new URL(fresh.pds_url).host;
-
-  const auth = await pdsXrpcGet(
-    { pdsUrl: fresh.pds_url, accessToken: fresh.access_token, dpopKey, nonce: fresh.pds_nonce },
-    "com.atproto.server.getServiceAuth",
-    { aud: `did:web:${pdsHost}`, lxm: "com.atproto.repo.uploadBlob", exp: String(Math.floor(Date.now() / 1000) + 1800) }
-  );
-  if (auth.nonce && auth.nonce !== fresh.pds_nonce) {
-    await env.DB.prepare("UPDATE oauth_sessions SET pds_nonce = ? WHERE session_id = ?")
-      .bind(auth.nonce, fresh.session_id).run();
-  }
-  if (!auth.ok || !auth.data?.token) {
-    throw httpError(`Could not authorize video upload: ${auth.data?.message || auth.data?.error || auth.status}`, 502);
-  }
-
-  const blob = await uploadVideoWithToken(auth.data.token, fresh.did, bytes, { name: `battle-${battleId}.mp4` });
-  const record = buildVideoPostRecord({ text, blob, width, height, alt });
-  const result = await createSessionPost(env, session, record);
-  const self = { uri: result?.uri ?? null, webUrl: bskyPostWebUrl(session, result?.uri) };
-
-  // --- Optional cross-post to the brand feed, crediting the player ---
-  let brand = null;
-  if (alsoBrand && env.BSKY_BOT_APP_PASSWORD && env.BSKY_BOT_IDENTIFIER) {
-    try {
-      const handle = session.handle ? `@${session.handle}` : "a player";
-      const brandText = `${defaultHighlightCaption(battle)} — by ${handle}`;
-      const mentions = session.handle && session.did ? [{ handle: session.handle, did: session.did }] : [];
-      const post = await postBattleHighlight({
-        identifier: env.BSKY_BOT_IDENTIFIER,
-        password: env.BSKY_BOT_APP_PASSWORD,
-        bytes, text: brandText, alt, width, height, mentions,
-        name: `battle-${battleId}.mp4`
-      });
-      brand = { uri: post?.uri ?? null, webUrl: post?.uri ? `https://bsky.app/profile/${post.handle}/post/${String(post.uri).split("/").pop()}` : null };
-    } catch (error) {
-      brand = { error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-
-  return { ok: true, self, brand };
 }
 
 function defaultHighlightCaption(battle) {

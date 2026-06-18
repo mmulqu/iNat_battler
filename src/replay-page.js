@@ -832,17 +832,16 @@ function buildShareUI(data, blob) {
   ta.value = defaultCaption(data);
   ta.rows = 3; ta.maxLength = 280;
   ta.style.cssText = "width:100%;border-radius:10px;border:1px solid #2c3a36;background:#0f1416;color:#e7eef0;padding:8px;font:inherit;box-sizing:border-box";
-  const label = document.createElement("label");
-  label.style.cssText = "display:flex;gap:8px;align-items:center;font-size:0.9rem;opacity:0.9";
-  const cb = document.createElement("input"); cb.type = "checkbox";
-  label.appendChild(cb); label.appendChild(document.createTextNode("Also share to the @wildmarch feed"));
-  const post = document.createElement("button"); post.textContent = "Post to my Bluesky \\uD83E\\uDD8B";
+  const note = document.createElement("div");
+  note.className = "status";
+  note.textContent = "Shares to the iNat Battler feed (@wildmarch.bsky.social), credited to you.";
+  const post = document.createElement("button"); post.textContent = "Share to the feed \\uD83E\\uDD8B";
   const out = document.createElement("div"); out.className = "status";
 
   post.onclick = async () => {
     post.disabled = true; out.textContent = "Uploading + posting (this can take ~30s)…";
     try {
-      const params = new URLSearchParams({ caption: ta.value, brand: cb.checked ? "1" : "0", w: String(W), h: String(H) });
+      const params = new URLSearchParams({ caption: ta.value, w: String(W), h: String(H) });
       const res = await fetch("/api/battles/" + encodeURIComponent(battleId) + "/share-video?" + params, {
         method: "POST", credentials: "include",
         headers: { "content-type": "video/mp4" },
@@ -851,17 +850,21 @@ function buildShareUI(data, blob) {
       const data2 = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data2.error || ("Failed (" + res.status + ")"));
       out.innerHTML = "";
-      const mk = (text, href) => { const a = document.createElement("a"); a.href = href; a.target = "_blank"; a.textContent = text; a.style.color = "#7fe0cf"; return a; };
-      if (data2.self && data2.self.webUrl) { out.appendChild(document.createTextNode("Posted to your Bluesky: ")); out.appendChild(mk("view", data2.self.webUrl)); out.appendChild(document.createElement("br")); }
-      if (data2.brand && data2.brand.webUrl) { out.appendChild(document.createTextNode("Also on @wildmarch: ")); out.appendChild(mk("view", data2.brand.webUrl)); }
-      else if (data2.brand && data2.brand.error) { out.appendChild(document.createTextNode("(@wildmarch cross-post failed: " + data2.brand.error + ")")); }
+      if (data2.brand && data2.brand.webUrl) {
+        out.appendChild(document.createTextNode("Posted! "));
+        const a = document.createElement("a"); a.href = data2.brand.webUrl; a.target = "_blank"; a.textContent = "View on Bluesky"; a.style.color = "#7fe0cf";
+        out.appendChild(a);
+        post.textContent = "Shared \\u2713";
+      } else {
+        throw new Error((data2.brand && data2.brand.error) || "Post failed");
+      }
     } catch (err) {
       post.disabled = false;
       out.textContent = "Error: " + (err && err.message || err);
     }
   };
 
-  box.appendChild(ta); box.appendChild(label); box.appendChild(post); box.appendChild(out);
+  box.appendChild(ta); box.appendChild(note); box.appendChild(post); box.appendChild(out);
   wrap.appendChild(box);
 }
 
