@@ -269,262 +269,238 @@ export default {
   }
 };
 
-async function routeRequest(request, env, ctx) {
-  const url = new URL(request.url);
+// --- Route table -----------------------------------------------------------
+//
+// Ordered list of routes; the dispatcher returns the FIRST match, so more
+// specific patterns must precede general ones — exactly mirroring the original
+// sequential if-chain (some pairs are order-sensitive, e.g. /challenges/:id
+// /accept before /challenges/:id, and exact /sprite-batches/latest before the
+// /sprite-batches/:id regex). A route's `path` may be:
+//   - a string   -> exact pathname match
+//   - a RegExp   -> matched against pathname; capture groups arrive as params
+//   - a function -> custom predicate (url) => paramsArray | null
+// `method` is a verb, an array of verbs, or "*" for any method. Handlers receive
+// (request, env, ctx, { url, params }); params[n] are the regex captures.
+const ROUTES = [
+  { method: "GET", path: "/", handler: () => htmlResponse(renderAppHtml()) },
 
-  if (request.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders() });
-  }
-
-  if (request.method === "GET" && url.pathname === "/") {
-    return htmlResponse(renderAppHtml());
-  }
-
-  // Battle highlight video renderer (battle-highlights-bluesky.md). A standalone
+  // Battle highlight video renderer (battle-highlights-bluesky.md): a standalone
   // page that deterministically replays a battle onto a canvas and encodes an
   // MP4 in-browser via WebCodecs. Runs both in a user's browser (Share button)
-  // and in headless Chrome (the bot). `/replay/<battleId>`; battleId is read
-  // from the path client-side.
-  if (request.method === "GET" && url.pathname.startsWith("/replay/")) {
-    return htmlResponse(REPLAY_PAGE_HTML);
-  }
+  // and in headless Chrome (the bot). battleId is read from the path client-side.
+  { method: "GET", path: (url) => url.pathname.startsWith("/replay/") ? [] : null,
+    handler: () => htmlResponse(REPLAY_PAGE_HTML) },
 
-  if (request.method === "GET" && url.pathname === "/assets/landing-hero-battle.webp") {
-    return bundledImageResponse(landingHeroBattleImage, "image/webp");
-  }
+  { method: "GET", path: "/assets/landing-hero-battle.webp",
+    handler: () => bundledImageResponse(landingHeroBattleImage, "image/webp") },
+  { method: "GET", path: "/assets/icon-192.png",
+    handler: () => bundledImageResponse(iconImage192, "image/png") },
+  { method: "GET", path: "/assets/icon-512.png",
+    handler: () => bundledImageResponse(iconImage512, "image/png") },
+  { method: "GET", path: "/assets/icon-512-maskable.png",
+    handler: () => bundledImageResponse(iconImage512Maskable, "image/png") },
+  { method: "GET", path: "/assets/apple-touch-icon-180.png",
+    handler: () => bundledImageResponse(appleTouchIcon180, "image/png") },
+  { method: "GET", path: "/manifest.webmanifest", handler: () => manifestResponse() },
+  { method: "GET", path: "/sw.js", handler: () => serviceWorkerResponse() },
 
-  if (request.method === "GET" && url.pathname === "/assets/icon-192.png") {
-    return bundledImageResponse(iconImage192, "image/png");
-  }
+  // Status-effect images: only match known statuses, otherwise fall through to 404.
+  { method: "GET",
+    path: (url) => {
+      const m = url.pathname.match(/^\/assets\/status-([a-z]+)\.png$/);
+      return m && STATUS_EFFECT_IMAGES[m[1]] ? m : null;
+    },
+    handler: (request, env, ctx, { params }) =>
+      bundledImageResponse(STATUS_EFFECT_IMAGES[params[1]], "image/png") },
 
-  if (request.method === "GET" && url.pathname === "/assets/icon-512.png") {
-    return bundledImageResponse(iconImage512, "image/png");
-  }
+  { method: "GET",
+    path: (url) => (url.pathname === "/health" || url.pathname === "/api/health") ? [] : null,
+    handler: () => jsonResponse({ ok: true, service: "inat-battler" }) },
 
-  if (request.method === "GET" && url.pathname === "/assets/icon-512-maskable.png") {
-    return bundledImageResponse(iconImage512Maskable, "image/png");
-  }
+  { method: "*", path: (url) => url.pathname.startsWith("/api/assets/") ? [] : null,
+    handler: (request, env) => serveAsset(request, env) },
 
-  if (request.method === "GET" && url.pathname === "/assets/apple-touch-icon-180.png") {
-    return bundledImageResponse(appleTouchIcon180, "image/png");
-  }
+  { method: "GET", path: "/oauth/client-metadata.json",
+    handler: (request, env, ctx, { url }) => jsonResponse(clientMetadataDocument(env, url.origin)) },
 
-  if (request.method === "GET" && url.pathname === "/manifest.webmanifest") {
-    return manifestResponse();
-  }
+  { method: "GET", path: "/oauth/callback",
+    handler: (request, env) => handleOAuthCallback(request, env) },
 
-  if (request.method === "GET" && url.pathname === "/sw.js") {
-    return serviceWorkerResponse();
-  }
-
-  const statusImageMatch = url.pathname.match(/^\/assets\/status-([a-z]+)\.png$/);
-  if (request.method === "GET" && statusImageMatch && STATUS_EFFECT_IMAGES[statusImageMatch[1]]) {
-    return bundledImageResponse(STATUS_EFFECT_IMAGES[statusImageMatch[1]], "image/png");
-  }
-
-  if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/health")) {
-    return jsonResponse({ ok: true, service: "inat-battler" });
-  }
-
-  if (url.pathname.startsWith("/api/assets/")) {
-    return serveAsset(request, env);
-  }
-
-  if (request.method === "GET" && url.pathname === "/oauth/client-metadata.json") {
-    return jsonResponse(clientMetadataDocument(env, url.origin));
-  }
-
-  if (request.method === "GET" && url.pathname === "/oauth/callback") {
-    return handleOAuthCallback(request, env);
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/auth/login") {
+  { method: "POST", path: "/api/auth/login", handler: async (request, env, ctx, { url }) => {
     await enforceRateLimit(env, request, "auth-login", 12, 60);
     const payload = await readJson(request);
     return jsonResponse(await beginBlueskyLogin(env, url.origin, payload));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/auth/logout") {
-    return handleLogout(request, env);
-  }
+  { method: "POST", path: "/api/auth/logout", handler: (request, env) => handleLogout(request, env) },
 
-  if (request.method === "POST" && url.pathname === "/api/account/delete") {
+  { method: "POST", path: "/api/account/delete", handler: async (request, env) => {
     await enforceRateLimit(env, request, "account-delete", 6, 60);
     return handleAccountDelete(request, env);
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/me") {
-    return jsonResponse(await getMe(request, env));
-  }
+  { method: "GET", path: "/api/me", handler: async (request, env) => jsonResponse(await getMe(request, env)) },
 
-  if (request.method === "GET" && url.pathname === "/api/bsky/typeahead") {
+  { method: "GET", path: "/api/bsky/typeahead", handler: async (request, env, ctx, { url }) => {
     const actors = await searchActorsTypeahead(url.searchParams.get("q"), 8);
     return jsonResponse({ actors });
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/inat/link/start") {
+  { method: "POST", path: "/api/inat/link/start", handler: async (request, env) => {
     const session = await requireSession(request, env);
     await enforceRateLimit(env, request, "inat-link", 15, 60);
     const payload = await readJson(request);
     return jsonResponse(await startInatLink(env, session, payload.inatLogin));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/inat/link/confirm") {
+  { method: "POST", path: "/api/inat/link/confirm", handler: async (request, env, ctx) => {
     const session = await requireSession(request, env);
     await enforceRateLimit(env, request, "inat-link", 15, 60);
     return jsonResponse(await confirmInatLink(env, session, ctx));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/my-sprites/upload") {
+  { method: "POST", path: "/api/my-sprites/upload", handler: async (request, env) => {
     const session = await requireSession(request, env);
     return jsonResponse(await uploadUserSprite(request, env, session));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/my-sprites") {
+  { method: "GET", path: "/api/my-sprites", handler: async (request, env) => {
     const session = await requireSession(request, env);
     return jsonResponse(await listUserSprites(env, session));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/sprite-submissions/sync") {
+  { method: "POST", path: "/api/sprite-submissions/sync", handler: async (request, env) => {
     const session = await requireSession(request, env);
     return jsonResponse(await syncSpriteSubmissions(env, 25, session.did));
-  }
+  } },
 
-  const submissionSyncMatch = url.pathname.match(/^\/api\/sprite-submissions\/([^/]+)\/sync$/);
-  if (request.method === "POST" && submissionSyncMatch) {
+  { method: "POST", path: /^\/api\/sprite-submissions\/([^/]+)\/sync$/, handler: async (request, env, ctx, { params }) => {
     const session = await requireSession(request, env);
-    return jsonResponse(await syncSingleSubmission(env, decodeURIComponent(submissionSyncMatch[1]), session));
-  }
+    return jsonResponse(await syncSingleSubmission(env, decodeURIComponent(params[1]), session));
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/training") {
+  { method: "GET", path: "/api/training", handler: async (request, env) => {
     const session = await requireSession(request, env);
     return jsonResponse(await getTrainingOverview(env, session));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/training/sync") {
+  { method: "POST", path: "/api/training/sync", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     const rows = Array.isArray(payload?.speciesCounts) ? payload.speciesCounts.slice(0, 12000) : null;
     return jsonResponse(await syncTrainingData(env, session, rows));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/territory/sync") {
+  { method: "POST", path: "/api/territory/sync", handler: async (request, env) => {
     const session = await requireSession(request, env);
     return jsonResponse(await syncTerritoryObservations(env, session));
-  }
+  } },
 
   // Browser-fetch path: the user's own browser pulls their observations from
   // iNaturalist (so the iNat rate limit is per-user, not on the Worker's shared
   // egress) and POSTs the raw rows here just to be persisted. Capped to bound
   // the D1 write budget.
-  if (request.method === "POST" && url.pathname === "/api/territory/ingest") {
+  { method: "POST", path: "/api/territory/ingest", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     const rows = Array.isArray(payload?.observations) ? payload.observations.slice(0, 3000) : [];
     return jsonResponse(await ingestTerritoryObservations(env, session, rows));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/territory/tiles") {
+  { method: "GET", path: "/api/territory/tiles", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryTiles(env, session, url));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/territory/observations") {
+  { method: "GET", path: "/api/territory/observations", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryObservations(env, session, url));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/avatar") {
-    return proxyAvatar(url.searchParams.get("url") || "");
-  }
+  { method: "GET", path: "/api/avatar", handler: (request, env, ctx, { url }) =>
+    proxyAvatar(url.searchParams.get("url") || "") },
 
-  if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/tiles/biomes.pmtiles") {
-    return servePmtiles(request, env);
-  }
+  { method: ["GET", "HEAD"], path: "/tiles/biomes.pmtiles", handler: (request, env) => servePmtiles(request, env) },
 
-  if (request.method === "GET" && url.pathname === "/api/territory/cell") {
+  { method: "GET", path: "/api/territory/cell", handler: async (request, env, ctx, { url }) => {
     await requireSession(request, env);
     return jsonResponse(await getTerritoryCell(env, url));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/territory/claims") {
+  { method: "GET", path: "/api/territory/claims", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryClaims(env, session, url));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/territory/tile") {
+  { method: "GET", path: "/api/territory/tile", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryTileDetail(env, session, url.searchParams.get("h3")));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/territory/claim") {
+  { method: "POST", path: "/api/territory/claim", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await claimTerritoryTile(env, session, String(payload.h3 ?? "")));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/territory/garrison") {
+  { method: "POST", path: "/api/territory/garrison", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await assignTileGarrison(env, session, String(payload.h3 ?? ""), payload.taxonIds));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/territory/contest") {
+  { method: "POST", path: "/api/territory/contest", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await contestTerritoryTile(env, session, String(payload.h3 ?? ""), payload.taxonIds));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/training/allocate") {
+  { method: "POST", path: "/api/training/allocate", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await allocateTrainingPoints(env, session, payload));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/training/respec") {
+  { method: "POST", path: "/api/training/respec", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await respecTraining(env, session, payload.taxonId));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/training/nickname") {
+  { method: "POST", path: "/api/training/nickname", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await setTrainingNickname(env, session, payload.taxonId, payload.nickname));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/challenges") {
+  { method: "POST", path: "/api/challenges", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await createChallenge(env, url.origin, session, payload));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/challenges") {
+  { method: "GET", path: "/api/challenges", handler: async (request, env) => {
     const session = await requireSession(request, env);
     return jsonResponse(await listChallengesForSession(env, session));
-  }
+  } },
 
-  const challengeAcceptMatch = url.pathname.match(/^\/api\/challenges\/([^/]+)\/accept$/);
-  if (request.method === "POST" && challengeAcceptMatch) {
+  { method: "POST", path: /^\/api\/challenges\/([^/]+)\/accept$/, handler: async (request, env, ctx, { params }) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(
-      await acceptChallenge(env, session, decodeURIComponent(challengeAcceptMatch[1]), payload.taxonIds ?? [])
+      await acceptChallenge(env, session, decodeURIComponent(params[1]), payload.taxonIds ?? [])
     );
-  }
+  } },
 
-  const challengeDeclineMatch = url.pathname.match(/^\/api\/challenges\/([^/]+)\/decline$/);
-  if (request.method === "POST" && challengeDeclineMatch) {
+  { method: "POST", path: /^\/api\/challenges\/([^/]+)\/decline$/, handler: async (request, env, ctx, { params }) => {
     const session = await requireSession(request, env);
-    return jsonResponse(await declineChallenge(env, session, decodeURIComponent(challengeDeclineMatch[1])));
-  }
+    return jsonResponse(await declineChallenge(env, session, decodeURIComponent(params[1])));
+  } },
 
-  const challengeMatch = url.pathname.match(/^\/api\/challenges\/([^/]+)$/);
-  if (request.method === "GET" && challengeMatch) {
-    return jsonResponse(await getChallengePublic(env, decodeURIComponent(challengeMatch[1])));
-  }
+  { method: "GET", path: /^\/api\/challenges\/([^/]+)$/, handler: async (request, env, ctx, { params }) =>
+    jsonResponse(await getChallengePublic(env, decodeURIComponent(params[1]))) },
 
-  if (request.method === "POST" && url.pathname === "/api/import") {
+  { method: "POST", path: "/api/import", handler: async (request, env) => {
     // Locked to the caller's own verified iNaturalist account — a user can only
     // import the profile they proved they own (see confirmInatLink), never an
     // arbitrary login. `speciesCounts` (optional) are rows the user's browser
@@ -535,101 +511,95 @@ async function routeRequest(request, env, ctx) {
     const rows = Array.isArray(payload?.speciesCounts) ? payload.speciesCounts.slice(0, 12000) : null;
     const result = await importUserByLogin(env, session.inat_login, rows);
     return jsonResponse(result);
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/manual-sprites/upload") {
+  { method: "POST", path: "/api/manual-sprites/upload", handler: async (request, env) => {
     await requireAdminSession(request, env);
     return jsonResponse(await uploadManualSprite(request, env));
-  }
+  } },
 
-  const rosterMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/roster$/);
-  if (request.method === "GET" && rosterMatch) {
-    const userId = decodeURIComponent(rosterMatch[1]);
+  { method: "GET", path: /^\/api\/users\/([^/]+)\/roster$/, handler: async (request, env, ctx, { url, params }) => {
+    const userId = decodeURIComponent(params[1]);
     const session = await getSession(request, env);
     return jsonResponse(await getRoster(env, userId, {
       ...rosterOptionsFromUrl(url),
       viewerUserId: session?.inat_login ? inatUserIdFor(session.inat_login) : null
     }));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/roster") {
+  { method: "GET", path: "/api/roster", handler: async (request, env, ctx, { url }) => {
     const userId = url.searchParams.get("userId");
     if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
-
     const session = await getSession(request, env);
     return jsonResponse(await getRoster(env, userId, {
       ...rosterOptionsFromUrl(url),
       viewerUserId: session?.inat_login ? inatUserIdFor(session.inat_login) : null
     }));
-  }
+  } },
 
-  const spritePreferenceMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/(\d+)\/preference$/);
-  if (request.method === "POST" && spritePreferenceMatch) {
+  { method: "POST", path: /^\/api\/users\/([^/]+)\/sprites\/(\d+)\/preference$/, handler: async (request, env, ctx, { params }) => {
     // Identity comes from the session, never the path — the path :userId is
     // ignored for writes so a caller cannot set another account's preference.
     const session = await requireSession(request, env);
     const userId = requireLinkedUserId(session);
-    const taxonId = Number(spritePreferenceMatch[2]);
+    const taxonId = Number(params[2]);
     const payload = await readJson(request);
     return jsonResponse(await setUserSpritePreference(env, userId, taxonId, String(payload.assetId ?? "")));
-  }
+  } },
 
-  const queueMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/queue-missing$/);
-  if (request.method === "POST" && queueMatch) {
+  { method: "POST", path: /^\/api\/users\/([^/]+)\/sprites\/queue-missing$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    const userId = decodeURIComponent(queueMatch[1]);
+    const userId = decodeURIComponent(params[1]);
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, maxQueueMoreLimit(env), 12);
     const queued = await queueMissingSpritesForUser(env, userId, limit, 80);
     return jsonResponse({ queued });
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/sprite-jobs") {
+  { method: "POST", path: "/api/sprite-jobs", handler: async (request, env) => {
     await requireAdminSession(request, env);
     const payload = await readJson(request);
     const userId = String(payload.userId ?? "");
     const limit = clampInt(payload.limit, 1, maxQueueMoreLimit(env), 12);
-
     if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
-
     const queued = await queueMissingSpritesForUser(env, userId, limit, 80);
     return jsonResponse({ queued });
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/sprite-jobs") {
+  { method: "GET", path: "/api/sprite-jobs", handler: async (request, env, ctx, { url }) => {
     await requireAdminSession(request, env);
     const status = url.searchParams.get("status") ?? "queued";
     const userId = url.searchParams.get("userId") ?? "";
     const limit = clampInt(url.searchParams.get("limit"), 1, maxQueueMoreLimit(env), 100);
     return jsonResponse(await listSpriteJobs(env, status, userId, limit));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/global-seed/status") {
+  { method: "GET", path: "/api/global-seed/status", handler: async (request, env) => {
     await requireAdminSession(request, env);
     return jsonResponse(await getGlobalSeedStatus(env));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/global-seed/jobs") {
+  { method: "GET", path: "/api/global-seed/jobs", handler: async (request, env, ctx, { url }) => {
     await requireAdminSession(request, env);
     const limit = clampInt(url.searchParams.get("limit"), 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
     return jsonResponse({ jobs: await selectQueuedSpriteJobsForBatch(env, limit, "", true) });
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/global-seed/dev-import") {
+  { method: "POST", path: "/api/global-seed/dev-import", handler: async (request, env) => {
     await requireAdminSession(request, env);
     const payload = await readJson(request);
     const limitPerGroup = clampInt(payload.limitPerGroup, 1, 1000, GLOBAL_SEED_LIMIT_PER_GROUP);
     return jsonResponse(await importGlobalSeedTaxa(env, limitPerGroup));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/global-seed/dev-queue") {
+  { method: "POST", path: "/api/global-seed/dev-queue", handler: async (request, env) => {
     await requireAdminSession(request, env);
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
     return jsonResponse(await queueMissingGlobalSeedSprites(env, limit));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/global-seed/dev-submit") {
+  { method: "POST", path: "/api/global-seed/dev-submit", handler: async (request, env) => {
     await requireAdminSession(request, env);
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, GLOBAL_SEED_BATCH_SIZE, GLOBAL_SEED_BATCH_SIZE);
@@ -639,9 +609,9 @@ async function routeRequest(request, env, ctx) {
       queueMissing: false,
       seedOnly: true
     }));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-submit") {
+  { method: "POST", path: "/api/sprite-batches/dev-submit", handler: async (request, env) => {
     await requireAdminSession(request, env);
     const payload = await readJson(request);
     const limit = clampInt(payload.limit, 1, maxBatchSubmitLimit(env), 2);
@@ -654,157 +624,143 @@ async function routeRequest(request, env, ctx) {
     const userId = payload.userId ? String(payload.userId) : "";
     const queueMissing = payload.queueMissing !== false;
     return jsonResponse(await submitDevSpriteBatch(env, request.url, { limit, userId, queueMissing }));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/sprite-batches/latest") {
+  { method: "GET", path: "/api/sprite-batches/latest", handler: async (request, env) => {
     await requireAdminSession(request, env);
     return jsonResponse(await getLatestSpriteBatch(env));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/sprite-batches/dev-auto-sync") {
+  { method: "POST", path: "/api/sprite-batches/dev-auto-sync", handler: async (request, env, ctx, { url }) => {
     await requireAdminSession(request, env);
     const limit = clampInt(url.searchParams.get("limit"), 1, 10, AUTO_SPRITE_BATCH_SYNC_LIMIT);
     const maxItems = clampInt(url.searchParams.get("maxItems"), 1, 200, AUTO_SPRITE_BATCH_SYNC_ITEMS);
     return jsonResponse(await syncPendingSpriteBatches(env, limit, maxItems));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/move-batches/dev-submit") {
+  { method: "POST", path: "/api/move-batches/dev-submit", handler: async (request, env) => {
     await requireAdminSession(request, env);
     const payload = await readJson(request);
     return jsonResponse(await submitMoveBatch(env, {
       limit: clampInt(payload.limit, 1, 60, 10),
       userId: payload.userId ? String(payload.userId) : ""
     }));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/move-batches/dev-auto-sync") {
+  { method: "POST", path: "/api/move-batches/dev-auto-sync", handler: async (request, env, ctx, { url }) => {
     await requireAdminSession(request, env);
     const limit = clampInt(url.searchParams.get("limit"), 1, 20, AUTO_MOVE_BATCH_SYNC_LIMIT);
     return jsonResponse(await syncAutoMoveBatchImageSubmissions(env, limit));
-  }
+  } },
 
-  const moveBatchSyncMatch = url.pathname.match(/^\/api\/move-batches\/([^/]+)\/sync$/);
-  if (request.method === "POST" && moveBatchSyncMatch) {
+  { method: "POST", path: /^\/api\/move-batches\/([^/]+)\/sync$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    return jsonResponse(await syncMoveBatch(env, decodeURIComponent(moveBatchSyncMatch[1])));
-  }
+    return jsonResponse(await syncMoveBatch(env, decodeURIComponent(params[1])));
+  } },
 
-  const moveBatchMatch = url.pathname.match(/^\/api\/move-batches\/([^/]+)$/);
-  if (request.method === "GET" && moveBatchMatch) {
+  { method: "GET", path: /^\/api\/move-batches\/([^/]+)$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    return jsonResponse(await getMoveBatch(env, decodeURIComponent(moveBatchMatch[1])));
-  }
+    return jsonResponse(await getMoveBatch(env, decodeURIComponent(params[1])));
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/taxa/random-spriteless") {
+  { method: "GET", path: "/api/taxa/random-spriteless", handler: async (request, env) => {
     await requireAdminSession(request, env);
     return jsonResponse(await getRandomSpritelessTaxon(env));
-  }
+  } },
 
-  const movesGenerateMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/moves\/dev-generate$/);
-  if (request.method === "POST" && movesGenerateMatch) {
+  { method: "POST", path: /^\/api\/taxa\/(\d+)\/moves\/dev-generate$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    return jsonResponse(await generateMovesForTaxon(env, Number(movesGenerateMatch[1])));
-  }
+    return jsonResponse(await generateMovesForTaxon(env, Number(params[1])));
+  } },
 
-  const genomeMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/genome$/);
-  if (request.method === "GET" && genomeMatch) {
-    return jsonResponse(await getTaxonGenome(env, Number(genomeMatch[1])));
-  }
+  { method: "GET", path: /^\/api\/taxa\/(\d+)\/genome$/, handler: async (request, env, ctx, { params }) =>
+    jsonResponse(await getTaxonGenome(env, Number(params[1]))) },
 
-  const devLabMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/dev-lab$/);
-  if (request.method === "GET" && devLabMatch) {
+  { method: "GET", path: /^\/api\/taxa\/(\d+)\/dev-lab$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    return jsonResponse(await getTaxonDevLab(env, Number(devLabMatch[1])));
-  }
+    return jsonResponse(await getTaxonDevLab(env, Number(params[1])));
+  } },
 
-  const spriteQueueMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-queue$/);
-  if (request.method === "POST" && spriteQueueMatch) {
+  { method: "POST", path: /^\/api\/taxa\/(\d+)\/sprites\/dev-queue$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    return jsonResponse(await queueSpriteJobForTaxon(env, Number(spriteQueueMatch[1]), 40));
-  }
+    return jsonResponse(await queueSpriteJobForTaxon(env, Number(params[1]), 40));
+  } },
 
-  const spriteGenerateMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-generate$/);
-  if (request.method === "POST" && spriteGenerateMatch) {
+  { method: "POST", path: /^\/api\/taxa\/(\d+)\/sprites\/dev-generate$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    return jsonResponse(await devGenerateSpriteForTaxon(env, Number(spriteGenerateMatch[1])));
-  }
+    return jsonResponse(await devGenerateSpriteForTaxon(env, Number(params[1])));
+  } },
 
-  const spriteSubmitBatchMatch = url.pathname.match(/^\/api\/taxa\/(\d+)\/sprites\/dev-submit-batch$/);
-  if (request.method === "POST" && spriteSubmitBatchMatch) {
+  { method: "POST", path: /^\/api\/taxa\/(\d+)\/sprites\/dev-submit-batch$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    return jsonResponse(await submitSpriteBatchForTaxon(env, request.url, Number(spriteSubmitBatchMatch[1])));
-  }
+    return jsonResponse(await submitSpriteBatchForTaxon(env, request.url, Number(params[1])));
+  } },
 
-  const spriteBatchSyncMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)\/sync$/);
-  if (request.method === "POST" && spriteBatchSyncMatch) {
+  { method: "POST", path: /^\/api\/sprite-batches\/([^/]+)\/sync$/, handler: async (request, env, ctx, { url, params }) => {
     await requireAdminSession(request, env);
     const maxItems = clampInt(url.searchParams.get("maxItems"), 1, 200, 25);
-    return jsonResponse(await syncSpriteBatch(env, decodeURIComponent(spriteBatchSyncMatch[1]), { maxItems }));
-  }
+    return jsonResponse(await syncSpriteBatch(env, decodeURIComponent(params[1]), { maxItems }));
+  } },
 
-  const spriteBatchMatch = url.pathname.match(/^\/api\/sprite-batches\/([^/]+)$/);
-  if (request.method === "GET" && spriteBatchMatch) {
+  { method: "GET", path: /^\/api\/sprite-batches\/([^/]+)$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    return jsonResponse(await getSpriteBatch(env, decodeURIComponent(spriteBatchMatch[1])));
-  }
+    return jsonResponse(await getSpriteBatch(env, decodeURIComponent(params[1])));
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/sprite-jobs/dev-generate-next") {
+  { method: "POST", path: "/api/sprite-jobs/dev-generate-next", handler: async (request, env) => {
     await requireAdminSession(request, env);
     return jsonResponse(await devGenerateNextSpriteJob(env));
-  }
+  } },
 
-  const devGenerateMatch = url.pathname.match(/^\/api\/sprite-jobs\/([^/]+)\/dev-generate$/);
-  if (request.method === "POST" && devGenerateMatch) {
+  { method: "POST", path: /^\/api\/sprite-jobs\/([^/]+)\/dev-generate$/, handler: async (request, env, ctx, { params }) => {
     await requireAdminSession(request, env);
-    const jobId = decodeURIComponent(devGenerateMatch[1]);
+    const jobId = decodeURIComponent(params[1]);
     return jsonResponse(await devGenerateSpriteForJob(env, jobId));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/sprite-status") {
+  { method: "GET", path: "/api/sprite-status", handler: async (request, env, ctx, { url }) => {
     const taxonIds = (url.searchParams.get("taxonIds") ?? "")
       .split(",")
       .map((value) => Number.parseInt(value, 10))
       .filter(Number.isFinite)
       .slice(0, 100);
-
     return jsonResponse(await getSpriteStatus(env, taxonIds));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/sprite-tree") {
+  { method: "GET", path: "/api/sprite-tree", handler: async (request, env, ctx, { url }) => {
     const limit = clampInt(url.searchParams.get("limit"), 1, 1000, 500);
     const q = String(url.searchParams.get("q") ?? "");
     return jsonResponse(await getSpriteTree(env, { limit, q }));
-  }
+  } },
 
   // Phase 0 (sprite taxonomic tree): list ancestor taxon IDs referenced by
   // ready-sprite taxa that are not yet stored as their own taxa rows, so the
   // backfill can fetch exactly the missing internal nodes (orders/families/...).
-  if (request.method === "GET" && url.pathname === "/api/sprite-tree/dev-missing-ancestors") {
+  { method: "GET", path: "/api/sprite-tree/dev-missing-ancestors", handler: async (request, env) => {
     await requireAdminSession(request, env);
     return jsonResponse(await getMissingAncestorTaxonIds(env));
-  }
+  } },
 
   // Phase 0: bulk-upsert iNat taxon objects (fetched client-side) into taxa.
-  if (request.method === "POST" && url.pathname === "/api/taxa/dev-bulk-upsert") {
+  { method: "POST", path: "/api/taxa/dev-bulk-upsert", handler: async (request, env) => {
     await requireAdminSession(request, env);
     const payload = await readJson(request);
     const taxa = Array.isArray(payload.taxa) ? payload.taxa : [];
     return jsonResponse(await bulkUpsertTaxa(env, taxa));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/recent-sprites") {
+  { method: "GET", path: "/api/recent-sprites", handler: async (request, env, ctx, { url }) => {
     const limit = clampInt(url.searchParams.get("limit"), 1, 200, 80);
     const q = String(url.searchParams.get("q") ?? "");
     return jsonResponse(await getRecentSprites(env, { limit, q }));
-  }
+  } },
 
-  const teamMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/teams$/);
-  if (teamMatch && request.method === "GET") {
-    const userId = decodeURIComponent(teamMatch[1]);
+  { method: "GET", path: /^\/api\/users\/([^/]+)\/teams$/, handler: async (request, env, ctx, { params }) => {
+    const userId = decodeURIComponent(params[1]);
     return jsonResponse({ teams: await listTeams(env, userId) });
-  }
+  } },
 
-  if (teamMatch && request.method === "POST") {
+  { method: "POST", path: /^\/api\/users\/([^/]+)\/teams$/, handler: async (request, env) => {
     // Save to the signed-in account only; the path :userId is not trusted.
     const session = await requireSession(request, env);
     const userId = requireLinkedUserId(session);
@@ -812,24 +768,24 @@ async function routeRequest(request, env, ctx) {
     const name = String(payload.name ?? "Field Team");
     const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
     return jsonResponse(await saveTeam(env, userId, name, taxonIds));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/leaderboard") {
+  { method: "GET", path: "/api/leaderboard", handler: async (request, env) => {
     const session = await getSession(request, env);
     const viewerUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
     return jsonResponse(await getLeaderboard(env, viewerUserId));
-  }
+  } },
 
-  if (request.method === "GET" && url.pathname === "/api/leaderboard/territory") {
+  { method: "GET", path: "/api/leaderboard/territory", handler: async (request, env) => {
     const session = await getSession(request, env);
     const viewerUserId = session?.inat_login ? inatUserIdFor(session.inat_login) : null;
     return jsonResponse(await getTerritoryLeaderboard(env, viewerUserId));
-  }
+  } },
 
   // Admin: validate the headless render pipeline (Browser Rendering + WebCodecs).
   // ?battleId=__selftest&post=0&fps=24&max=40 — with post=1 it also posts to the
   // brand feed, exercising the full bot path end to end.
-  if (request.method === "GET" && url.pathname === "/api/highlights/render-test") {
+  { method: "GET", path: "/api/highlights/render-test", handler: async (request, env, ctx, { url }) => {
     await requireAdminSession(request, env);
     return jsonResponse(await renderHighlightTest(env, {
       battleId: url.searchParams.get("battleId") || "__selftest",
@@ -837,10 +793,10 @@ async function routeRequest(request, env, ctx) {
       fps: Number(url.searchParams.get("fps")) || 24,
       maxSeconds: Number(url.searchParams.get("max")) || 40
     }));
-  }
+  } },
 
   // Opt in/out of letting the highlight bot feature your battles on @wildmarch.
-  if (request.method === "POST" && url.pathname === "/api/settings/highlight-opt-in") {
+  { method: "POST", path: "/api/settings/highlight-opt-in", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const userId = requireLinkedUserId(session);
     const payload = await readJson(request);
@@ -848,29 +804,29 @@ async function routeRequest(request, env, ctx) {
     await env.DB.prepare("UPDATE users SET allow_highlight_bot = ?, updated_at = ? WHERE id = ?")
       .bind(enabled, new Date().toISOString(), userId).run();
     return jsonResponse({ ok: true, allowHighlightBot: enabled === 1 });
-  }
+  } },
 
   // Admin: run the curator once now (force bypasses the global flag + interval,
   // still respects opt-in + dedupe). For testing without waiting for cron.
-  if (request.method === "POST" && url.pathname === "/api/highlights/run-curator") {
+  { method: "POST", path: "/api/highlights/run-curator", handler: async (request, env) => {
     await requireAdminSession(request, env);
     return jsonResponse(await runHighlightCurator(env, { force: true }));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/share/battle") {
+  { method: "POST", path: "/api/share/battle", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     await enforceRateLimit(env, request, "share", 20, 60);
     const payload = await readJson(request);
     return jsonResponse(await shareBattleToBluesky(env, session, String(payload.battleId ?? ""), url.origin));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/share/rank") {
+  { method: "POST", path: "/api/share/rank", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     await enforceRateLimit(env, request, "share", 20, 60);
     return jsonResponse(await shareRankToBluesky(env, session, url.origin));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/battles/npc/start") {
+  { method: "POST", path: "/api/battles/npc/start", handler: async (request, env) => {
     // Battles are always started for the signed-in account; ranked ratings hang
     // off this id, so it must come from the session, not the request body.
     const session = await requireSession(request, env);
@@ -879,45 +835,39 @@ async function routeRequest(request, env, ctx) {
     const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
     const npcTemplate = String(payload.npcTemplate ?? "backyard_beginner");
     const difficulty = ["easy", "normal", "hard"].includes(payload.difficulty) ? payload.difficulty : "normal";
-
     return jsonResponse(await startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty));
-  }
+  } },
 
-  if (request.method === "POST" && url.pathname === "/api/battles/demo/start") {
-    return jsonResponse(await startDemoBattle(env));
-  }
+  { method: "POST", path: "/api/battles/demo/start", handler: async (request, env) =>
+    jsonResponse(await startDemoBattle(env)) },
 
-  const battleMatch = url.pathname.match(/^\/api\/battles\/([^/]+)$/);
-  if (battleMatch && request.method === "GET") {
-    const battle = await getBattle(env, decodeURIComponent(battleMatch[1]));
+  { method: "GET", path: /^\/api\/battles\/([^/]+)$/, handler: async (request, env, ctx, { params }) => {
+    const battle = await getBattle(env, decodeURIComponent(params[1]));
     return battle ? jsonResponse(battle) : jsonResponse({ error: "Battle not found" }, 404);
-  }
+  } },
 
-  const battleReplayMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/replay$/);
-  if (battleReplayMatch && request.method === "GET") {
+  { method: "GET", path: /^\/api\/battles\/([^/]+)\/replay$/, handler: async (request, env, ctx, { url, params }) => {
     const wantStates = url.searchParams.get("states") === "1";
     return jsonResponse(
-      await getBattleReplay(env, decodeURIComponent(battleReplayMatch[1]), { states: wantStates })
+      await getBattleReplay(env, decodeURIComponent(params[1]), { states: wantStates })
     );
-  }
+  } },
 
   // Share a rendered highlight MP4 (raw video/mp4 body). Posts to the user's own
   // Bluesky account; with ?brand=1 also cross-posts to the brand feed.
-  const shareVideoMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/share-video$/);
-  if (shareVideoMatch && request.method === "POST") {
+  { method: "POST", path: /^\/api\/battles\/([^/]+)\/share-video$/, handler: async (request, env, ctx, { url, params }) => {
     const session = await requireSession(request, env);
     await enforceRateLimit(env, request, "share-video", 10, 60);
     const bytes = new Uint8Array(await request.arrayBuffer());
-    return jsonResponse(await shareBattleVideo(env, session, decodeURIComponent(shareVideoMatch[1]), bytes, {
+    return jsonResponse(await shareBattleVideo(env, session, decodeURIComponent(params[1]), bytes, {
       caption: url.searchParams.get("caption") || "",
       width: Number(url.searchParams.get("w")) || 720,
       height: Number(url.searchParams.get("h")) || 900
     }));
-  }
+  } },
 
-  const battleActionMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/action$/);
-  if (battleActionMatch && request.method === "POST") {
-    const battleId = decodeURIComponent(battleActionMatch[1]);
+  { method: "POST", path: /^\/api\/battles\/([^/]+)\/action$/, handler: async (request, env, ctx, { params }) => {
+    const battleId = decodeURIComponent(params[1]);
     // Guest demo battles are anonymous; every other battle drives ranked ratings,
     // so the caller must own it. Verify ownership against the session before any
     // move is resolved (battle ids are handed to clients and aren't secret).
@@ -936,6 +886,35 @@ async function routeRequest(request, env, ctx) {
       String(payload.moveId ?? ""),
       payload.switchIndex
     ));
+  } }
+];
+
+// Match a route's path spec against the URL. Returns the params array (regex
+// captures, or [] for matches with none) when it matches, or null otherwise.
+function matchRoutePath(path, url) {
+  if (typeof path === "string") return url.pathname === path ? [] : null;
+  if (path instanceof RegExp) return url.pathname.match(path);
+  if (typeof path === "function") return path(url);
+  return null;
+}
+
+async function routeRequest(request, env, ctx) {
+  const url = new URL(request.url);
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders() });
+  }
+
+  for (const route of ROUTES) {
+    const methods = route.method === "*"
+      ? null
+      : (Array.isArray(route.method) ? route.method : [route.method]);
+    if (methods && !methods.includes(request.method)) continue;
+
+    const params = matchRoutePath(route.path, url);
+    if (params) {
+      return route.handler(request, env, ctx, { url, params });
+    }
   }
 
   return jsonResponse({ error: "Not found" }, 404);
