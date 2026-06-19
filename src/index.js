@@ -5,9 +5,14 @@ import {
   createGenome,
   createNpcTeam,
   createSeededRng,
+  estimateDamage,
+  getActive,
+  getTypeMultiplier,
+  moveManaCost,
   reconstructBattleStates,
   resolveTurn,
   terrainForTeam,
+  terrainMultiplier,
   territoryBuffPctForBiomeCount,
   TERRAIN_MOVE_BONUS,
   TYPE_CHART
@@ -476,6 +481,12 @@ const ROUTES = [
     return jsonResponse(await getTerritoryClaims(env, session, url));
   } },
 
+  // Ranked, eligible tiles to claim or contest (agent-friendly target discovery).
+  { method: "GET", path: "/api/territory/candidates", handler: async (request, env, ctx, { url }) => {
+    const session = await requireSession(request, env);
+    return jsonResponse(await getTerritoryCandidates(env, session, url.searchParams.get("kind")));
+  } },
+
   { method: "GET", path: "/api/territory/tile", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryTileDetail(env, session, url.searchParams.get("h3")));
@@ -888,6 +899,19 @@ const ROUTES = [
   { method: "GET", path: /^\/api\/battles\/([^/]+)$/, handler: async (request, env, ctx, { params }) => {
     const battle = await getBattle(env, decodeURIComponent(params[1]));
     return battle ? jsonResponse(battle) : jsonResponse({ error: "Battle not found" }, 404);
+  } },
+
+  // Legal actions + damage estimates for your side of a battle (agent-friendly).
+  { method: "GET", path: /^\/api\/battles\/([^/]+)\/actions$/, handler: async (request, env, ctx, { params }) => {
+    const battle = await getBattle(env, decodeURIComponent(params[1]));
+    if (!battle) return jsonResponse({ error: "Battle not found" }, 404);
+    if (battle.player?.userId !== DEMO_USER_ID) {
+      const session = await requireSession(request, env);
+      if (battle.player?.userId !== requireLinkedUserId(session)) {
+        throw httpError("This is not your battle", 403);
+      }
+    }
+    return jsonResponse(getBattleActions(battle));
   } },
 
   { method: "GET", path: /^\/api\/battles\/([^/]+)\/replay$/, handler: async (request, env, ctx, { url, params }) => {
@@ -6235,13 +6259,16 @@ async function getPlayerSnapshot(env, session) {
     };
   }
 
-  const [summary, teams, challengesRes, used, holdingsRows] = await Promise.all([
+  const need = intEnv(env, "TERRITORY_MIN_LOCAL_SPECIES", TERRITORY_MIN_LOCAL_SPECIES);
+  const [summary, teams, challengesRes, used, holdingsRows, candidateCounts, obsRow] = await Promise.all([
     getRosterSummary(env, userId, true).catch(() => null),
     listTeams(env, userId).catch(() => []),
     listChallengesForSession(env, session).catch(() => ({ challenges: [] })),
     territoryActionsToday(env, userId).catch(() => 0),
     env.DB.prepare("SELECT biome_type AS biome, COUNT(*) AS n FROM tiles WHERE owner_id = ? GROUP BY biome_type")
-      .bind(userId).all().catch(() => ({ results: [] }))
+      .bind(userId).all().catch(() => ({ results: [] })),
+    countTerritoryCandidates(env, userId, need).catch(() => ({ eligibleCells: 0, claimable: 0, contestable: 0 })),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM tile_observations WHERE user_id = ?").bind(userId).first().catch(() => ({ n: 0 }))
   ]);
 
   const challenges = challengesRes.challenges || [];
@@ -6252,6 +6279,7 @@ async function getPlayerSnapshot(env, session) {
   const heldTilesByBiome = {};
   for (const row of (holdingsRows.results ?? [])) heldTilesByBiome[row.biome] = Number(row.n);
   const heldTilesTotal = Object.values(heldTilesByBiome).reduce((a, b) => a + b, 0);
+  const territoryNeedsSync = Number(obsRow?.n ?? 0) === 0;
 
   const savedTeam = Array.isArray(teams) && teams.length
     ? { name: teams[0].name, taxonIds: teams[0].taxonIds || [], updatedAt: teams[0].updatedAt }
@@ -6272,20 +6300,26 @@ async function getPlayerSnapshot(env, session) {
       actionsUsedToday: used,
       actionsLeftToday: Math.max(0, cap - used),
       heldTilesTotal,
-      heldTilesByBiome
+      heldTilesByBiome,
+      claimableCount: candidateCounts.claimable,
+      contestableCount: candidateCounts.contestable,
+      needsSync: territoryNeedsSync
     },
-    nextSteps: buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap }),
+    staleFlags: { territory: territoryNeedsSync },
+    nextSteps: buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap, candidateCounts, territoryNeedsSync }),
     docs: {
       rules: "/api/rules",
       startNpcBattle: "POST /api/battles/npc/start",
+      battleActions: "GET /api/battles/:battleId/actions",
       challenges: "GET /api/challenges",
       territoryClaims: "GET /api/territory/claims",
+      territoryCandidates: "GET /api/territory/candidates?kind=claim|contest",
       skill: "/llms.txt"
     }
   };
 }
 
-function buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap }) {
+function buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap, candidateCounts, territoryNeedsSync }) {
   const steps = [];
   if (summary && summary.totalCount === 0) {
     steps.push("Roster is empty — POST /api/import to pull your research-grade species.");
@@ -6302,10 +6336,18 @@ function buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap }) {
   if (savedTeam && summary && summary.readyCount >= 5) {
     steps.push("Team is ready — POST /api/battles/npc/start to battle an NPC and earn rating.");
   }
-  if ((cap - used) > 0) {
-    steps.push(`${Math.max(0, cap - used)} territory actions left today — GET /api/territory/claims for opportunities.`);
+  const actionsLeft = Math.max(0, cap - used);
+  if (territoryNeedsSync) {
+    steps.push("No territory observations yet — POST /api/territory/sync before claiming or contesting tiles.");
+  } else if (actionsLeft > 0 && candidateCounts) {
+    if (candidateCounts.claimable > 0) {
+      steps.push(`${candidateCounts.claimable} claimable tile(s) and ${actionsLeft} actions left — GET /api/territory/candidates?kind=claim, then POST /api/territory/claim.`);
+    }
+    if (candidateCounts.contestable > 0) {
+      steps.push(`${candidateCounts.contestable} contestable tile(s) — GET /api/territory/candidates?kind=contest (contesting starts a battle you then play).`);
+    }
   }
-  if (!steps.length) steps.push("Nothing urgent. Consider training favored species or contesting tiles.");
+  if (!steps.length) steps.push("Nothing urgent. Consider training favored species or garrisoning held tiles.");
   return steps;
 }
 
@@ -6339,12 +6381,265 @@ function getGameRules(env) {
       roster: "GET /api/roster?userId=<id>",
       saveTeam: "POST /api/users/:userId/teams",
       npcBattle: "POST /api/battles/npc/start",
-      battle: "GET /api/battles/:battleId, POST /api/battles/:battleId/action",
+      battle: "GET /api/battles/:battleId, GET /api/battles/:battleId/actions, POST /api/battles/:battleId/action",
       challenges: "GET /api/challenges, POST /api/challenges/:id/accept",
-      territory: "GET /api/territory/claims, POST /api/territory/claim"
+      territory: "GET /api/territory/candidates?kind=claim|contest, GET /api/territory/claims, POST /api/territory/claim, POST /api/territory/garrison, POST /api/territory/contest"
     },
     docs: "See https://github.com/mmulqu/inat_battler/blob/main/docs/agent-player-integration-plan.md"
   };
+}
+
+// Legal battle actions + estimates for the player's side, so an agent never has
+// to reverse-engineer the battle state. See docs/agent-player-integration-plan.md.
+function getBattleActions(state) {
+  const side = "player";
+  const status = state.status || "active";
+  const active = getActive(state.player);
+  const oppActive = state.opponent ? getActive(state.opponent) : null;
+
+  const base = {
+    battleId: state.battleId,
+    mode: state.mode || "npc",
+    side,
+    status,
+    turn: state.turn ?? null,
+    terrain: state.terrain ?? null,
+    active: active ? battleCreatureBrief(active) : null,
+    opponent: oppActive ? battleCreatureBrief(oppActive) : null
+  };
+
+  if (status !== "active" || !active || !oppActive) {
+    return { ...base, moves: [], switches: [], note: status !== "active" ? "Battle is over." : "No active creature to act with." };
+  }
+
+  const oppMaxHp = Math.max(1, Number(oppActive.maxHp) || 1);
+  const moves = (active.moves || []).map((move) => {
+    const manaCost = moveManaCost(move);
+    const affordable = (Number(active.mana) || 0) >= manaCost;
+    const isStatus = move.category === "status";
+    const est = isStatus ? 0 : estimateDamage(active, oppActive, move, state.terrain);
+    const typeMult = isStatus ? 1 : getTypeMultiplier(move.type, oppActive.types);
+    const terrainFavored = terrainMultiplier(move, state.terrain) > 1;
+    const stab = Array.isArray(active.types) && active.types.includes(move.type);
+
+    const notes = [];
+    if (!isStatus && est >= (Number(oppActive.hp) || 0)) notes.push("can KO");
+    if (stab) notes.push("STAB");
+    if (typeMult > 1) notes.push("super effective");
+    else if (typeMult > 0 && typeMult < 1) notes.push("resisted");
+    else if (typeMult === 0) notes.push("no effect");
+    if (terrainFavored) notes.push("terrain favored");
+    if (!affordable) notes.push("not enough mana");
+
+    return {
+      moveId: move.id,
+      name: move.name,
+      type: move.type ?? null,
+      category: move.category ?? null,
+      power: move.power ?? 0,
+      accuracy: move.accuracy ?? 100,
+      manaCost,
+      affordable,
+      estimatedDamage: isStatus ? null : est,
+      estimatedDamagePct: isStatus ? null : Number(Math.min(1, est / oppMaxHp).toFixed(2)),
+      typeMultiplier: typeMult,
+      terrainFavored,
+      stab,
+      notes
+    };
+  });
+
+  const switches = (state.player.creatures || [])
+    .map((creature, index) => ({ creature, index }))
+    .filter(({ creature, index }) => index !== state.player.activeIndex && !creature.fainted)
+    .map(({ creature, index }) => {
+      let bestOffense = 0;
+      for (const move of (creature.moves || [])) {
+        if (move.category === "status") continue;
+        bestOffense = Math.max(bestOffense, getTypeMultiplier(move.type, oppActive.types));
+      }
+      let worstDefense = 1;
+      for (const move of (oppActive.moves || [])) {
+        if (move.category === "status" || !oppActive.types.includes(move.type)) continue;
+        worstDefense = Math.max(worstDefense, getTypeMultiplier(move.type, creature.types));
+      }
+      let matchupHint = "neutral matchup";
+      if (bestOffense > 1 && worstDefense <= 1) matchupHint = "strong matchup";
+      else if (worstDefense < 1) matchupHint = "resists opponent";
+      else if (worstDefense > 1) matchupHint = "weak to opponent";
+      else if (bestOffense > 1) matchupHint = "hits hard but no defensive edge";
+
+      return {
+        switchIndex: index,
+        taxonId: creature.taxonId,
+        name: creature.name,
+        types: creature.types,
+        hpPct: Number(((Number(creature.hp) || 0) / Math.max(1, Number(creature.maxHp) || 1)).toFixed(2)),
+        matchupHint
+      };
+    });
+
+  // Struggle is the always-legal fallback when no damaging move is affordable.
+  if (!moves.some((move) => move.category !== "status" && move.affordable)) {
+    moves.push({
+      moveId: "struggle",
+      name: "Struggle",
+      type: null,
+      category: "physical",
+      power: null,
+      accuracy: 100,
+      manaCost: 0,
+      affordable: true,
+      estimatedDamage: null,
+      estimatedDamagePct: null,
+      typeMultiplier: 1,
+      terrainFavored: false,
+      stab: false,
+      notes: ["fallback when out of mana"]
+    });
+  }
+
+  return { ...base, moves, switches };
+}
+
+function battleCreatureBrief(creature) {
+  return {
+    taxonId: creature.taxonId,
+    name: creature.name,
+    types: creature.types,
+    hp: creature.hp,
+    maxHp: creature.maxHp,
+    hpPct: Number(((Number(creature.hp) || 0) / Math.max(1, Number(creature.maxHp) || 1)).toFixed(2)),
+    mana: creature.mana,
+    statuses: creature.statuses ?? []
+  };
+}
+
+// Ranked, eligible territory targets so an agent does not have to derive H3 cells
+// from observations and probe tiles one by one. kind is "claim" or "contest".
+async function getTerritoryCandidates(env, session, kind) {
+  const userId = requireLinkedUserId(session);
+  const wantKind = kind === "contest" ? "contest" : "claim";
+  const need = intEnv(env, "TERRITORY_MIN_LOCAL_SPECIES", TERRITORY_MIN_LOCAL_SPECIES);
+  const cap = intEnv(env, "TERRITORY_DAILY_ACTION_CAP", TERRITORY_DAILY_ACTION_CAP_DEFAULT);
+  const actionsLeft = Math.max(0, cap - await territoryActionsToday(env, userId));
+
+  // Cells where the user has enough research-grade species to act at all.
+  const eligible = (await env.DB.prepare(`
+    SELECT h3_index, COUNT(DISTINCT taxon_id) AS local_species
+    FROM tile_observations
+    WHERE user_id = ? AND taxon_id IS NOT NULL
+    GROUP BY h3_index
+    HAVING local_species >= ?
+    ORDER BY local_species DESC
+    LIMIT 100
+  `).bind(userId, need).all()).results ?? [];
+
+  if (!eligible.length) {
+    return { kind: wantKind, actionsLeftToday: actionsLeft, candidates: [], note: "No eligible cells — POST /api/territory/sync, or you need more research-grade species observed locally." };
+  }
+
+  const cells = eligible.map((row) => row.h3_index);
+  const localByCell = new Map(eligible.map((row) => [row.h3_index, Number(row.local_species)]));
+  const placeholders = cells.map(() => "?").join(",");
+
+  const [tileRows, biomeRows, garrisonRows, holdingRows] = await Promise.all([
+    env.DB.prepare(`SELECT h3_index, owner_id, biome_type, defense_strength, garrison_deadline FROM tiles WHERE h3_index IN (${placeholders})`).bind(...cells).all().catch(() => ({ results: [] })),
+    env.DB.prepare(`SELECT h3_index, biome_type FROM tile_biomes WHERE h3_index IN (${placeholders})`).bind(...cells).all().catch(() => ({ results: [] })),
+    env.DB.prepare(`SELECT h3_index, COUNT(*) AS n FROM tile_garrison WHERE h3_index IN (${placeholders}) GROUP BY h3_index`).bind(...cells).all().catch(() => ({ results: [] })),
+    env.DB.prepare("SELECT biome_type AS biome, COUNT(*) AS n FROM tiles WHERE owner_id = ? GROUP BY biome_type").bind(userId).all().catch(() => ({ results: [] }))
+  ]);
+
+  const tileByCell = new Map((tileRows.results ?? []).map((row) => [row.h3_index, row]));
+  const biomeByCell = new Map((biomeRows.results ?? []).map((row) => [row.h3_index, row.biome_type]));
+  const garrisonByCell = new Map((garrisonRows.results ?? []).map((row) => [row.h3_index, Number(row.n)]));
+  const holdingsByBiome = new Map((holdingRows.results ?? []).map((row) => [row.biome, Number(row.n)]));
+
+  const candidates = [];
+  for (const h3 of cells) {
+    const tile = tileByCell.get(h3);
+    const owner = tile?.owner_id || null;
+    const biome = tile?.biome_type || biomeByCell.get(h3) || "neutral";
+    const localSpecies = localByCell.get(h3) || 0;
+    const defenders = garrisonByCell.get(h3) || 0;
+    const defenseStrength = Number(tile?.defense_strength ?? 0);
+    const biomeHoldings = holdingsByBiome.get(biome) || 0;
+
+    if (wantKind === "claim") {
+      if (owner) continue; // already owned -> not claimable
+      // Reward biome diversity (a biome you don't yet hold) and species depth.
+      const score = localSpecies + (biomeHoldings === 0 ? 8 : 0);
+      candidates.push({
+        h3, biome,
+        favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
+        ownership: "unowned",
+        localSpecies,
+        biomeHoldings,
+        canActToday: actionsLeft > 0,
+        score
+      });
+    } else {
+      if (!owner || owner === userId) continue;        // must be someone else's
+      if (defenders <= 0) continue;                    // nothing to fight
+      if (tile?.garrison_deadline) continue;           // defenses still being set up
+      // Easier (weaker defense) and species-rich tiles score higher.
+      const score = localSpecies + Math.max(0, 12 - defenseStrength) + (biomeHoldings === 0 ? 4 : 0);
+      candidates.push({
+        h3, biome,
+        favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
+        ownership: "owned_by_other",
+        owner: ownerDisplayName(owner),
+        localSpecies,
+        defenders,
+        defenseStrength,
+        biomeHoldings,
+        canActToday: actionsLeft > 0,
+        score
+      });
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return {
+    kind: wantKind,
+    actionsLeftToday: actionsLeft,
+    minLocalSpeciesToAct: need,
+    candidates: candidates.slice(0, 50),
+    note: wantKind === "contest"
+      ? "Contesting starts a battle: POST /api/territory/contest {h3, taxonIds:[5]} returns a battle, then play it via /api/battles/:id/action until it resolves."
+      : "Claim with POST /api/territory/claim {h3}, then garrison it with POST /api/territory/garrison {h3, taxonIds:[5]}."
+  };
+}
+
+// Lightweight claimable/contestable counts for the snapshot (no per-tile probing).
+async function countTerritoryCandidates(env, userId, need) {
+  const eligible = (await env.DB.prepare(`
+    SELECT h3_index FROM tile_observations
+    WHERE user_id = ? AND taxon_id IS NOT NULL
+    GROUP BY h3_index HAVING COUNT(DISTINCT taxon_id) >= ?
+    LIMIT 100
+  `).bind(userId, need).all()).results ?? [];
+
+  if (!eligible.length) return { eligibleCells: 0, claimable: 0, contestable: 0 };
+
+  const cells = eligible.map((row) => row.h3_index);
+  const placeholders = cells.map(() => "?").join(",");
+  const [tileRows, garrisonRows] = await Promise.all([
+    env.DB.prepare(`SELECT h3_index, owner_id, garrison_deadline FROM tiles WHERE h3_index IN (${placeholders})`).bind(...cells).all().catch(() => ({ results: [] })),
+    env.DB.prepare(`SELECT h3_index, COUNT(*) AS n FROM tile_garrison WHERE h3_index IN (${placeholders}) GROUP BY h3_index`).bind(...cells).all().catch(() => ({ results: [] }))
+  ]);
+  const tileByCell = new Map((tileRows.results ?? []).map((row) => [row.h3_index, row]));
+  const garrisonByCell = new Map((garrisonRows.results ?? []).map((row) => [row.h3_index, Number(row.n)]));
+
+  let claimable = 0;
+  let contestable = 0;
+  for (const h3 of cells) {
+    const tile = tileByCell.get(h3);
+    const owner = tile?.owner_id || null;
+    if (!owner) { claimable += 1; continue; }
+    if (owner !== userId && (garrisonByCell.get(h3) || 0) > 0 && !tile?.garrison_deadline) contestable += 1;
+  }
+  return { eligibleCells: cells.length, claimable, contestable };
 }
 
 const SKILL_REPO_URL = "https://github.com/mmulqu/inat_battler/tree/main/skills/inat-battler-player";
