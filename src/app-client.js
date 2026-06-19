@@ -3979,11 +3979,11 @@
 
       return '<article class="card ' + (isFlipped ? "flipped " : "") + (isSelected ? "selected " : "") + (!isReady ? "unselectable" : "") + '" data-taxon-card data-taxon-id="' + escapeAttr(taxonId) + '" tabindex="0" role="button" aria-pressed="' + String(isSelected) + '" aria-label="' + escapeAttr((taxon.name || taxon.scientificName || "Taxon") + " combat selection") + '">' +
         '<div class="card-inner">' +
+          '<span class="badge">' + escapeHtml(badge) + '</span>' +
           '<div class="select-mark" aria-hidden="true">' + (isSelected ? "OK" : "") + '</div>' +
           '<div class="card-face card-front">' +
             '<div class="sprite ' + (isReady ? "ready" : "") + '">' +
               image +
-              '<span class="badge">' + escapeHtml(badge) + '</span>' +
               renderSpritePicker(taxon) +
             '</div>' +
             '<div class="meta">' +
