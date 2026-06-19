@@ -86,6 +86,51 @@ Deploy:
 npm run deploy
 ```
 
+## Configuration
+
+### Secrets
+
+Secrets hold credentials and must **never** be committed. Set each one with
+`wrangler secret put <NAME>` (and re-run per environment). Only the name and
+purpose live in the repo — the values stay in Cloudflare.
+
+| Secret | Required for | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | Sprite + move generation | OpenAI Images/text API key. Without it the app still runs (placeholders/default photos) but can't generate. |
+| `DISCORD_BOT_TOKEN` | Custom-sprite QA | Lets the Worker post upload submissions to the Discord QA channel and read approval reactions. |
+| `BSKY_BOT_APP_PASSWORD` | Highlight bot + brand share | App password (not the account password) for the brand Bluesky account that posts battle highlights. Pair with the `BSKY_BOT_IDENTIFIER` var. |
+
+```sh
+npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put DISCORD_BOT_TOKEN
+npx wrangler secret put BSKY_BOT_APP_PASSWORD
+npx wrangler secret list   # verify what's set per environment
+```
+
+### Admin access
+
+These grant access to the admin/dev endpoints (sprite/move batch tooling, the
+global-seed panel, highlight render-test, force-run curator). They are
+**identifiers, not secrets** — anyone listed here is an admin — so they live as
+plain `vars` in `wrangler.jsonc`. A session is treated as admin if it matches
+**any** of them. Set at least one to your own account before relying on the
+admin tools; leave them empty on an untrusted deploy to lock the admin surface.
+
+| Var | Matches on |
+| --- | --- |
+| `ADMIN_DIDS` | Comma-separated Bluesky DIDs (`did:plc:...`). |
+| `ADMIN_BSKY_HANDLES` | Comma-separated Bluesky handles (`you.bsky.social`). |
+| `ADMIN_INAT_LOGINS` | Comma-separated linked iNaturalist logins. |
+
+### Highlight bot vars
+
+| Var | Purpose |
+| --- | --- |
+| `BSKY_BOT_IDENTIFIER` | Handle of the brand Bluesky account (e.g. `wildmarch.bsky.social`); used with `BSKY_BOT_APP_PASSWORD`. |
+| `HIGHLIGHT_BOT_ENABLED` | `"false"` (default) makes the cron curator a no-op. Set `"true"` to let it autonomously render and post opted-in battle highlights. |
+
+See `docs/battle-highlights-bluesky.md` for the full highlight pipeline.
+
 ## Cost Controls
 
 The defaults in `wrangler.jsonc` are intentionally conservative:
@@ -95,7 +140,7 @@ The defaults in `wrangler.jsonc` are intentionally conservative:
 - `MAX_GLOBAL_DAILY_GENERATIONS=250`
 - `MAX_OPENAI_ATTEMPTS=3`
 
-During development, `DISABLE_GENERATION_LIMITS=true` bypasses the per-user and global daily caps while still recording generated-count and estimated-cost metadata. Turn it off before live play.
+`DISABLE_GENERATION_LIMITS` defaults to `"false"` so a public deploy can't run the OpenAI bill up — the per-user and global daily caps are enforced. For a large admin seed run you can temporarily set it to `"true"` (it still records generated-count and estimated-cost metadata) or raise the caps above; flip it back to `"false"` before live play.
 
 Sprite assets are global by `taxon_id + asset_kind + asset_version + prompt_hash`, so once a species sprite exists every user reuses it.
 
