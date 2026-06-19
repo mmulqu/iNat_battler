@@ -9352,7 +9352,7 @@ ${APP_CSS}
     <section class="landing" id="publicLanding">
       <section class="landing-hero" aria-label="Fantasy biodiversity battle">
         <div class="landing-copy">
-          <div class="landing-kicker">Pre-alpha creature battles from real observations</div>
+          <div class="landing-kicker">Creature battles from real observations</div>
           <h2>iNat Battler</h2>
           <p class="landing-lede">Turn your iNaturalist observations into a roster of species battlers, link them to your Bluesky identity, and challenge friends with creatures you actually found.</p>
           <div class="landing-actions">
@@ -9397,8 +9397,8 @@ ${APP_CSS}
 
       <section class="landing-section">
         <div class="landing-section-head">
-          <h3>Alpha Notes</h3>
-          <p>The core systems are working, but broader public testing is still being prepared.</p>
+          <h3>Privacy &amp; trust</h3>
+          <p>What the app uses, and what it never touches.</p>
         </div>
         <div class="landing-trust">
           <div class="landing-trust-item">
@@ -9412,10 +9412,6 @@ ${APP_CSS}
           <div class="landing-trust-item">
             <strong>Bluesky identity</strong>
             <span>Challenges are tied to your Bluesky account.</span>
-          </div>
-          <div class="landing-trust-item">
-            <strong>Still pre-alpha</strong>
-            <span>Expect rough edges while sprite generation and battles mature.</span>
           </div>
         </div>
       </section>
