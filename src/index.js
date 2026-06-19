@@ -188,12 +188,16 @@ const DEMO_DUMMY_TAXA = [
 export default {
   async fetch(request, env, ctx) {
     try {
-      return await routeRequest(request, env, ctx);
+      return applyCors(await routeRequest(request, env, ctx), env, request);
     } catch (error) {
       console.error(error);
-      return jsonResponse(
-        { error: error instanceof Error ? error.message : "Unexpected error" },
-        Number.isInteger(error?.status) ? error.status : 500
+      return applyCors(
+        jsonResponse(
+          { error: error instanceof Error ? error.message : "Unexpected error" },
+          Number.isInteger(error?.status) ? error.status : 500
+        ),
+        env,
+        request
       );
     }
   },
@@ -333,6 +337,7 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/auth/login") {
+    await enforceRateLimit(env, request, "auth-login", 12, 60);
     const payload = await readJson(request);
     return jsonResponse(await beginBlueskyLogin(env, url.origin, payload));
   }
@@ -342,6 +347,7 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/account/delete") {
+    await enforceRateLimit(env, request, "account-delete", 6, 60);
     return handleAccountDelete(request, env);
   }
 
@@ -356,12 +362,14 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "POST" && url.pathname === "/api/inat/link/start") {
     const session = await requireSession(request, env);
+    await enforceRateLimit(env, request, "inat-link", 15, 60);
     const payload = await readJson(request);
     return jsonResponse(await startInatLink(env, session, payload.inatLogin));
   }
 
   if (request.method === "POST" && url.pathname === "/api/inat/link/confirm") {
     const session = await requireSession(request, env);
+    await enforceRateLimit(env, request, "inat-link", 15, 60);
     return jsonResponse(await confirmInatLink(env, session, ctx));
   }
 
@@ -555,7 +563,10 @@ async function routeRequest(request, env, ctx) {
 
   const spritePreferenceMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/sprites\/(\d+)\/preference$/);
   if (request.method === "POST" && spritePreferenceMatch) {
-    const userId = decodeURIComponent(spritePreferenceMatch[1]);
+    // Identity comes from the session, never the path — the path :userId is
+    // ignored for writes so a caller cannot set another account's preference.
+    const session = await requireSession(request, env);
+    const userId = requireLinkedUserId(session);
     const taxonId = Number(spritePreferenceMatch[2]);
     const payload = await readJson(request);
     return jsonResponse(await setUserSpritePreference(env, userId, taxonId, String(payload.assetId ?? "")));
@@ -792,7 +803,9 @@ async function routeRequest(request, env, ctx) {
   }
 
   if (teamMatch && request.method === "POST") {
-    const userId = decodeURIComponent(teamMatch[1]);
+    // Save to the signed-in account only; the path :userId is not trusted.
+    const session = await requireSession(request, env);
+    const userId = requireLinkedUserId(session);
     const payload = await readJson(request);
     const name = String(payload.name ?? "Field Team");
     const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
@@ -844,23 +857,27 @@ async function routeRequest(request, env, ctx) {
 
   if (request.method === "POST" && url.pathname === "/api/share/battle") {
     const session = await requireSession(request, env);
+    await enforceRateLimit(env, request, "share", 20, 60);
     const payload = await readJson(request);
     return jsonResponse(await shareBattleToBluesky(env, session, String(payload.battleId ?? ""), url.origin));
   }
 
   if (request.method === "POST" && url.pathname === "/api/share/rank") {
     const session = await requireSession(request, env);
+    await enforceRateLimit(env, request, "share", 20, 60);
     return jsonResponse(await shareRankToBluesky(env, session, url.origin));
   }
 
   if (request.method === "POST" && url.pathname === "/api/battles/npc/start") {
+    // Battles are always started for the signed-in account; ranked ratings hang
+    // off this id, so it must come from the session, not the request body.
+    const session = await requireSession(request, env);
+    const userId = requireLinkedUserId(session);
     const payload = await readJson(request);
-    const userId = String(payload.userId ?? "");
     const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
     const npcTemplate = String(payload.npcTemplate ?? "backyard_beginner");
     const difficulty = ["easy", "normal", "hard"].includes(payload.difficulty) ? payload.difficulty : "normal";
 
-    if (!userId) return jsonResponse({ error: "Missing userId" }, 400);
     return jsonResponse(await startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty));
   }
 
@@ -887,6 +904,7 @@ async function routeRequest(request, env, ctx) {
   const shareVideoMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/share-video$/);
   if (shareVideoMatch && request.method === "POST") {
     const session = await requireSession(request, env);
+    await enforceRateLimit(env, request, "share-video", 10, 60);
     const bytes = new Uint8Array(await request.arrayBuffer());
     return jsonResponse(await shareBattleVideo(env, session, decodeURIComponent(shareVideoMatch[1]), bytes, {
       caption: url.searchParams.get("caption") || "",
@@ -897,10 +915,22 @@ async function routeRequest(request, env, ctx) {
 
   const battleActionMatch = url.pathname.match(/^\/api\/battles\/([^/]+)\/action$/);
   if (battleActionMatch && request.method === "POST") {
+    const battleId = decodeURIComponent(battleActionMatch[1]);
+    // Guest demo battles are anonymous; every other battle drives ranked ratings,
+    // so the caller must own it. Verify ownership against the session before any
+    // move is resolved (battle ids are handed to clients and aren't secret).
+    const existing = await getBattle(env, battleId);
+    if (!existing) return jsonResponse({ error: "Battle not found" }, 404);
+    if (existing.player?.userId !== DEMO_USER_ID) {
+      const session = await requireSession(request, env);
+      if (existing.player?.userId !== requireLinkedUserId(session)) {
+        throw httpError("This is not your battle", 403);
+      }
+    }
     const payload = await readJson(request);
     return jsonResponse(await submitBattleMove(
       env,
-      decodeURIComponent(battleActionMatch[1]),
+      battleId,
       String(payload.moveId ?? ""),
       payload.switchIndex
     ));
@@ -9187,12 +9217,67 @@ self.addEventListener("fetch", (event) => {
   });
 }
 
+// Best-effort fixed-window rate limiter backed by KV, keyed by client IP. Used
+// to shield the expensive unauthenticated / external-call endpoints (Bluesky
+// login PAR + PDS resolution, account delete, share-to-Bluesky) from abuse and
+// runaway cost. Eventually consistent, so it may slightly under-count under a
+// burst — that is an acceptable trade for a free, low-latency guard. Limiter
+// infra failures never block the request.
+async function enforceRateLimit(env, request, bucket, limit, windowSeconds) {
+  if (!env.CACHE) return;
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  const window = Math.floor(Date.now() / 1000 / windowSeconds);
+  const key = `rl:${bucket}:${ip}:${window}`;
+  try {
+    const current = Number(await env.CACHE.get(key)) || 0;
+    if (current >= limit) {
+      throw httpError("Too many requests — please slow down and try again shortly.", 429);
+    }
+    await env.CACHE.put(key, String(current + 1), { expirationTtl: Math.max(60, windowSeconds * 2) });
+  } catch (err) {
+    if (err?.status === 429) throw err;
+    console.error("rate limit error", err);
+  }
+}
+
 function corsHeaders() {
+  // Origin is decided centrally in applyCors() (the fetch wrapper) against an
+  // allowlist; these are the method/header parts that are origin-independent.
   return {
-    "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,HEAD,OPTIONS",
     "access-control-allow-headers": "content-type"
   };
+}
+
+// The app is same-origin (this Worker serves both the HTML and the API), so we
+// only ever echo CORS for an allowlisted origin instead of reflecting "*".
+function allowedCorsOrigin(env, request) {
+  const origin = request.headers.get("Origin");
+  if (!origin) return null;
+  const allow = new Set();
+  try { allow.add(new URL(request.url).origin); } catch {}
+  if (env.PUBLIC_BASE_URL) {
+    try { allow.add(new URL(env.PUBLIC_BASE_URL).origin); } catch {}
+  }
+  return allow.has(origin) ? origin : null;
+}
+
+// Re-emit a response with the correct, allowlisted CORS origin. Disallowed
+// cross-origin browsers get no access-control-allow-origin header at all.
+function applyCors(response, env, request) {
+  const origin = allowedCorsOrigin(env, request);
+  const headers = new Headers(response.headers);
+  if (origin) {
+    headers.set("access-control-allow-origin", origin);
+    headers.append("vary", "Origin");
+  } else {
+    headers.delete("access-control-allow-origin");
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 function renderAppHtml() {

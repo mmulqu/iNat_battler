@@ -26,7 +26,10 @@
     "IMAGE_REFERENCE_MODE": "default_photo",
     "IMAGE_STYLE_REFERENCE_R2_KEY": "species/v1/13858/manual/sprite_sheet.png",
     "SPRITE_GENERATION_MODE": "batch",
-    "DISABLE_GENERATION_LIMITS": "true",
+    // Spend guard ON by default so a public deploy can't run the OpenAI bill up.
+    // Caps: MAX_GLOBAL_DAILY_GENERATIONS + per-user MAX_USER_DAILY_QUEUED_JOBS.
+    // For a big admin seed run, temporarily set "true" (or raise the caps).
+    "DISABLE_GENERATION_LIMITS": "false",
     "MAX_REFERENCE_IMAGE_BYTES": "8000000",
     "MAX_MANUAL_UPLOAD_BYTES": "12000000",
     "MAX_IMPORT_PAGES": "20",
