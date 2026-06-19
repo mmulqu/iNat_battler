@@ -154,6 +154,7 @@
       challenges: [],
       challengeInfo: null,
       inatLinkPending: null,
+      inatChangeOpen: false,
       mySprites: [],
       training: null,
       trainingFilter: "",
@@ -818,6 +819,20 @@
       const button = event.target.closest("[data-bsky-action]");
       if (!button) return;
       const action = button.getAttribute("data-bsky-action");
+
+      // Instant UI toggles for the iNaturalist swap form — no network, no busy state.
+      if (action === "inat-change") {
+        state.inatChangeOpen = true;
+        renderBsky();
+        document.getElementById("inatLinkInput")?.focus();
+        return;
+      }
+      if (action === "inat-change-cancel") {
+        state.inatChangeOpen = false;
+        renderBsky();
+        return;
+      }
+
       button.disabled = true;
       button.textContent = bskyBusyButtonText(action);
       handleBskyAction(action, button.getAttribute("data-challenge-id"));
@@ -1023,6 +1038,7 @@
         else if (action === "logout") await bskyLogout();
         else if (action === "inat-start") await inatLinkStart();
         else if (action === "inat-confirm") await inatLinkConfirm();
+        else if (action === "inat-unlink") await inatUnlink();
         else if (action === "challenge-send") await sendChallenge();
         else if (action === "challenge-accept") await acceptChallengeAction(challengeId);
         else if (action === "challenge-decline") await declineChallengeAction(challengeId);
@@ -1045,6 +1061,7 @@
     function bskyProgressMessage(action) {
       if (action === "inat-confirm") return "Checking your iNaturalist profile for the verification code.";
       if (action === "inat-start") return "Creating a new iNaturalist verification code.";
+      if (action === "inat-unlink") return "Unlinking your iNaturalist account.";
       if (action === "login") return "Contacting your Bluesky host.";
       if (action === "challenge-send") return "Creating and posting the Bluesky challenge.";
       if (action === "challenge-accept") return "Accepting the challenge and opening battle.";
@@ -1057,6 +1074,7 @@
     function bskyBusyButtonText(action) {
       if (action === "inat-confirm") return "Verifying...";
       if (action === "inat-start") return "Creating code...";
+      if (action === "inat-unlink") return "Unlinking...";
       if (action === "login") return "Signing in...";
       if (action === "challenge-send") return "Sending...";
       if (action === "challenge-accept") return "Accepting...";
@@ -1136,6 +1154,7 @@
       // Show the first-import welcome summary on the Home dashboard once setup
       // completes (plan step 7). Cleared when the user dismisses it.
       state.showImportSummary = true;
+      state.inatChangeOpen = false;
       state.me = {
         ...(state.me || {}),
         loggedIn: true,
@@ -1159,6 +1178,28 @@
           loadRoster().catch((error) => setStatus(error.message));
         }, 8000);
       }
+    }
+
+    async function inatUnlink() {
+      await apiFetch("/api/inat/unlink", { method: "POST" });
+      state.inatChangeOpen = false;
+      // Detach the iNat identity locally too; the roster rows stay in D1 and are
+      // restored by re-linking the same username. Mirrors refreshMe's clearing.
+      state.userId = null;
+      state.inatLogin = null;
+      localStorage.removeItem("inatBattler:userId");
+      localStorage.removeItem("inatBattler:inatLogin");
+      if (state.me) {
+        state.me.inatLogin = null;
+        state.me.inatUserId = null;
+        state.me.userId = null;
+        state.me.inatPendingLogin = null;
+        state.me.inatVerificationCode = null;
+      }
+      state.bskyMessage = "iNaturalist account unlinked. Your roster is saved — re-link the same username anytime to restore it.";
+      state.bskyMessageKind = "success";
+      setStatus("iNaturalist account unlinked.");
+      await refreshMe();
     }
 
     async function sendChallenge() {
@@ -1824,7 +1865,7 @@
           '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
           '</button>' +
-          '<div class="subtle">Uses Bluesky OAuth and only asks for permission to create posts.</div>';
+          '<div class="subtle">Uses AT Protocol OAuth (Bluesky and any compatible PDS) and only asks for permission to create posts.</div>';
         return;
       }
 
@@ -1836,10 +1877,28 @@
         '<button class="secondary" type="button" data-bsky-action="logout"' + busyAttr + '>Sign out</button>' +
       '</div>';
 
+      // Show the verify form when not linked, when the user is mid-swap
+      // (a pending login exists), or when they explicitly chose to change it.
+      const showInatForm = !me.inatLogin || state.inatChangeOpen || Boolean(me.inatPendingLogin);
+
       if (me.inatLogin) {
-        html += '<div class="subtle">iNaturalist: <strong>' + escapeHtml(me.inatLogin) + '</strong> (verified)</div>';
-      } else {
-        html += '<div class="subtle">Link your iNaturalist account by proving ownership &mdash; no iNat OAuth, no write access:</div>' +
+        html += '<div class="bsky-row">' +
+          '<div class="subtle">iNaturalist: <strong>' + escapeHtml(me.inatLogin) + '</strong> (verified)</div>' +
+          '<span class="bsky-row-actions">' +
+            '<button class="secondary" type="button" data-bsky-action="inat-change"' + busyAttr + '>Change</button>' +
+            '<button class="secondary" type="button" data-bsky-action="inat-unlink"' + busyAttr + '>' +
+              (state.bskyBusy && state.bskyAction === "inat-unlink" ? "Unlinking..." : "Unlink") +
+            '</button>' +
+          '</span>' +
+        '</div>';
+      }
+
+      if (showInatForm) {
+        html += '<div class="subtle">' +
+          (me.inatLogin
+            ? 'Switch to a different iNaturalist account by proving ownership (your current roster stays saved):'
+            : 'Link your iNaturalist account by proving ownership &mdash; no iNat OAuth, no write access:') +
+          '</div>' +
           '<input id="inatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="iNaturalist username" value="' + escapeAttr(me.inatPendingLogin || "") + '">' +
           '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : "Get verification code") +
@@ -1852,6 +1911,10 @@
             '<button class="primary" type="button" data-bsky-action="inat-confirm"' + busyAttr + '>' +
               (state.bskyBusy && state.bskyAction === "inat-confirm" ? "Verifying..." : "Verify Link") +
             '</button>';
+        }
+
+        if (me.inatLogin) {
+          html += '<button class="secondary" type="button" data-bsky-action="inat-change-cancel"' + busyAttr + '>Cancel</button>';
         }
       }
 

@@ -1070,6 +1070,12 @@
       white-space: nowrap;
     }
 
+    .bsky-row-actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
     .bsky-section {
       display: grid;
       gap: 8px;

@@ -359,6 +359,12 @@ const ROUTES = [
     return jsonResponse(await confirmInatLink(env, session, ctx));
   } },
 
+  { method: "POST", path: "/api/inat/unlink", handler: async (request, env) => {
+    const session = await requireSession(request, env);
+    await enforceRateLimit(env, request, "inat-link", 15, 60);
+    return jsonResponse(await handleInatUnlink(env, session));
+  } },
+
   { method: "POST", path: "/api/my-sprites/upload", handler: async (request, env) => {
     const session = await requireSession(request, env);
     return jsonResponse(await uploadUserSprite(request, env, session));
@@ -6228,6 +6234,22 @@ async function confirmInatLink(env, session, ctx) {
     queuedSprites: importResult.queuedSprites,
     warning: importResult.warning ?? null
   };
+}
+
+// Detach the iNaturalist link from this Bluesky identity WITHOUT deleting any
+// imported data. Roster, training, teams, ratings, and territory rows are keyed
+// by the iNat user id (inat:<login>), so re-linking the same profile restores
+// everything, and linking a different profile starts a separate roster. To
+// erase data, use /api/account/delete instead.
+async function handleInatUnlink(env, session) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    UPDATE accounts
+    SET inat_login = NULL, inat_user_id = NULL, inat_verified_at = NULL,
+        inat_pending_login = NULL, inat_verification_code = NULL, updated_at = ?
+    WHERE did = ?
+  `).bind(now, session.did).run();
+  return { ok: true, unlinked: true };
 }
 
 function sanitizeChallengeMessage(rawMessage) {
