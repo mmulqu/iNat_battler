@@ -267,7 +267,7 @@ Return:
 
 This keeps agents from needing to crawl five tabs worth of state.
 
-## Legal Battle Actions
+## Legal Battle Actions — IMPLEMENTED
 
 ```text
 GET /api/battles/:battleId/actions
@@ -302,7 +302,7 @@ Return only legal actions and useful estimates:
 Agents should not have to parse the SPA or reverse-engineer internal state. The server
 already knows what actions are legal.
 
-## Territory Candidate Endpoints
+## Territory Candidate Endpoints — IMPLEMENTED
 
 ```text
 GET /api/territory/candidates?kind=claim

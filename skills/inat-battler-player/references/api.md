@@ -42,8 +42,13 @@ All examples below omit the host. Replace `:userId` with your own `userId`
 
 - `POST /api/battles/npc/start` — start an NPC battle with your selected/saved 5.
 - `GET /api/battles/:battleId` — full battle state.
-- `POST /api/battles/:battleId/action` — submit a move or switch. You may only
-  act in a battle you own.
+- `GET /api/battles/:battleId/actions` — legal actions for your side with
+  estimates: `moves[]` (`moveId`, `type`, `category`, `accuracy`, `manaCost`,
+  `affordable`, `estimatedDamagePct`, `typeMultiplier`, `terrainFavored`, `stab`,
+  `notes`) and `switches[]` (`switchIndex`, `hpPct`, `matchupHint`). Prefer this
+  over parsing raw state.
+- `POST /api/battles/:battleId/action` — body `{ "moveId": "..." }` or
+  `{ "switchIndex": N }`. You may only act in a battle you own.
 
 ## Challenges (write: challenge / share)
 
@@ -53,13 +58,19 @@ All examples below omit the host. Replace `:userId` with your own `userId`
 
 ## Territory (write: territory)
 
-- `POST /api/territory/sync` — refresh your observations for tile eligibility.
-- `GET /api/territory/claims` — your claimable/contestable tiles.
+- `POST /api/territory/sync` — refresh your observations for tile eligibility
+  (server-side fetch; no browser needed).
+- `GET /api/territory/candidates?kind=claim|contest` — ranked, eligible targets
+  with `h3`, `biome`, `favoredTypes`, `localSpecies`, `defenders`/`defenseStrength`
+  (contest), `biomeHoldings`, `canActToday`, and a `score`. Use this to find
+  targets — `/api/territory/claims` only shows who already owns what.
 - `GET /api/territory/tile?h3=<cell>` — one tile's detail, including
   `canClaim`, `canContest`, `canGarrison`, `actionsLeftToday`, `favoredTypes`.
 - `POST /api/territory/claim` — body `{ "h3": "<cell>" }`.
 - `POST /api/territory/garrison` — body `{ "h3": "<cell>", "taxonIds": [...] }`.
 - `POST /api/territory/contest` — body `{ "h3": "<cell>", "taxonIds": [...] }`.
+  Returns a `territory_contest` **battle**; play it via `/api/battles/:id/action`
+  until it resolves. Winning captures the tile.
 
 Daily territory actions are capped server-side; over-limit calls return 429.
 

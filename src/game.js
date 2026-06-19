@@ -193,7 +193,7 @@ export function createGenome(taxon) {
 }
 
 export const MOVE_TYPES = Object.keys(TYPE_CHART);
-export { TYPE_CHART, TERRAIN_MOVE_BONUS };
+export { TYPE_CHART, TERRAIN_MOVE_BONUS, estimateDamage, getTypeMultiplier, terrainMultiplier };
 
 export function createBattleCreature(taxon, instanceSuffix = "a", training = null, speciesMoves = null, territoryBuffByBiome = null, localBuffPct = 0) {
   const genome = createGenome(taxon);

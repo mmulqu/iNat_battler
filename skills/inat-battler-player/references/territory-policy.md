@@ -8,14 +8,24 @@ daily actions (`dailyActionCap`).
 
 ## Daily routine
 
-1. If observations are stale, `POST /api/territory/sync`.
-2. `GET /api/territory/claims` to see claimable and contestable tiles.
-3. Claim high-value unowned tiles first (`POST /api/territory/claim`).
-4. Garrison your claims with biome-appropriate teams
-   (`POST /api/territory/garrison`).
-5. Contest weak or strategically valuable defended tiles
-   (`POST /api/territory/contest`).
-6. Stop when `actionsLeftToday` (from the snapshot or tile detail) hits 0.
+1. If observations are stale (`snapshot.territory.needsSync` is true, or you have
+   not synced today), `POST /api/territory/sync`. The server fetches your
+   observations itself — no browser needed.
+2. Get ranked, eligible targets:
+   - `GET /api/territory/candidates?kind=claim`
+   - `GET /api/territory/candidates?kind=contest`
+   Each candidate includes `h3`, `biome`, `favoredTypes`, `localSpecies`,
+   `defenders`/`defenseStrength` (for contests), `biomeHoldings`, `canActToday`,
+   and a `score` you can re-rank. (`GET /api/territory/claims` is only a map of
+   who already owns what.)
+3. Claim high-value unowned tiles first: `POST /api/territory/claim {h3}`.
+4. Garrison your claims with biome-appropriate teams:
+   `POST /api/territory/garrison {h3, taxonIds:[5]}`.
+5. Contest weak or strategically valuable defended tiles:
+   `POST /api/territory/contest {h3, taxonIds:[5]}`. **This starts a battle** —
+   it returns a `territory_contest` battle that you must play to completion via
+   `/api/battles/:id/action` (see battle-policy.md). Winning takes the tile.
+6. Stop when `actionsLeftToday` (from the snapshot or a candidate) hits 0.
 
 ## Value signals
 
