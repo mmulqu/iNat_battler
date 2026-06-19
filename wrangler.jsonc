@@ -16,6 +16,7 @@
     "OAUTH_SCOPE": "atproto repo:app.bsky.feed.post?action=create",
     "ADMIN_INAT_LOGINS": "mmulqueen",
     "BSKY_BOT_IDENTIFIER": "wildmarch.bsky.social",
+    "HIGHLIGHT_BOT_ENABLED": "false",
     "DISCORD_QA_CHANNEL_ID": "1514221998077902870",
     "IMAGE_MODEL": "gpt-image-2",
     "IMAGE_QUALITY": "medium",

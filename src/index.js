@@ -222,6 +222,12 @@ export default {
     } catch (error) {
       console.error(error);
     }
+
+    try {
+      await runHighlightCurator(env); // self-throttled; no-op unless HIGHLIGHT_BOT_ENABLED
+    } catch (error) {
+      console.error(error);
+    }
   },
 
   async queue(batch, env) {
@@ -816,6 +822,24 @@ async function routeRequest(request, env, ctx) {
       fps: Number(url.searchParams.get("fps")) || 24,
       maxSeconds: Number(url.searchParams.get("max")) || 40
     }));
+  }
+
+  // Opt in/out of letting the highlight bot feature your battles on @wildmarch.
+  if (request.method === "POST" && url.pathname === "/api/settings/highlight-opt-in") {
+    const session = await requireSession(request, env);
+    const userId = requireLinkedUserId(session);
+    const payload = await readJson(request);
+    const enabled = payload.enabled ? 1 : 0;
+    await env.DB.prepare("UPDATE users SET allow_highlight_bot = ?, updated_at = ? WHERE id = ?")
+      .bind(enabled, new Date().toISOString(), userId).run();
+    return jsonResponse({ ok: true, allowHighlightBot: enabled === 1 });
+  }
+
+  // Admin: run the curator once now (force bypasses the global flag + interval,
+  // still respects opt-in + dedupe). For testing without waiting for cron.
+  if (request.method === "POST" && url.pathname === "/api/highlights/run-curator") {
+    await requireAdminSession(request, env);
+    return jsonResponse(await runHighlightCurator(env, { force: true }));
   }
 
   if (request.method === "POST" && url.pathname === "/api/share/battle") {
@@ -5473,6 +5497,118 @@ async function renderHighlightTest(env, { battleId, post, fps, maxSeconds }) {
   return out;
 }
 
+// --- Autonomous highlight curator ------------------------------------------
+const HIGHLIGHT_MAX_PER_DAY = 2;
+const HIGHLIGHT_RUN_INTERVAL_MS = 30 * 60 * 1000; // don't scan more than this often
+const HIGHLIGHT_CANDIDATE_WINDOW_HOURS = 72;      // only feature fresh battles
+const HIGHLIGHT_MIN_SCORE = 4;
+
+// Scores a finished battle for "highlight-worthiness" (player victories only).
+// Rewards clean sweeps, comebacks (won despite losing creatures), fast wins,
+// and crit drama. Returns 0 for anything not worth posting.
+function scoreBattleForHighlight(state) {
+  if (!state || state.status !== "won") return 0;
+  const turns = Math.max(1, Number(state.turn ?? 1) - 1);
+  const playerCreatures = state.player?.creatures ?? [];
+  const oppCreatures = state.opponent?.creatures ?? [];
+  const playerFaints = playerCreatures.filter((c) => c.fainted).length;
+  const oppFaints = oppCreatures.filter((c) => c.fainted).length;
+  const crits = (state.log ?? []).filter((e) => e?.data?.crit).length;
+  const survivor = playerCreatures.find((c) => !c.fainted);
+  const survivorLowHp = survivor && survivor.maxHp && survivor.hp / survivor.maxHp <= 0.25;
+
+  let score = oppFaints * 1.5 + crits * 1.5;
+  if (playerFaints === 0 && oppFaints >= 3) score += 4;        // flawless sweep
+  if (playerFaints >= 2) score += 3;                            // comeback
+  if (survivorLowHp) score += 3;                               // clutch finish
+  if (turns <= 8) score += 3; else if (turns <= 14) score += 1; // fast win
+  return score;
+}
+
+// Runs in the cron. Picks the single best un-posted, opted-in, recent victory,
+// renders it headlessly, and posts to the brand feed — capped per day and
+// throttled. `force` (admin) bypasses the global flag + interval.
+async function runHighlightCurator(env, { force = false } = {}) {
+  const enabled = String(env.HIGHLIGHT_BOT_ENABLED ?? "").toLowerCase() === "true";
+  if (!enabled && !force) return { ran: false, reason: "disabled" };
+  if (!env.BSKY_BOT_APP_PASSWORD || !env.BSKY_BOT_IDENTIFIER) return { ran: false, reason: "not_configured" };
+
+  // Throttle scans (skip the KV check when forced).
+  const now = Date.now();
+  if (!force) {
+    const last = Number((await env.CACHE.get("highlight:last_run")) ?? 0);
+    if (now - last < HIGHLIGHT_RUN_INTERVAL_MS) return { ran: false, reason: "throttled" };
+    await env.CACHE.put("highlight:last_run", String(now));
+  }
+
+  // Daily cap.
+  const dayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+  const postedToday = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM battle_highlights WHERE status = 'posted' AND created_at >= ?"
+  ).bind(dayAgo).first();
+  if (Number(postedToday?.n ?? 0) >= HIGHLIGHT_MAX_PER_DAY) return { ran: false, reason: "daily_cap" };
+
+  // Eligible: opted-in owners, recent victories, not already acted on.
+  const windowStart = new Date(now - HIGHLIGHT_CANDIDATE_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
+  const rows = await env.DB.prepare(`
+    SELECT bi.battle_id, bi.attacker_user_id, bi.state_json
+    FROM battle_instances bi
+    JOIN users u ON u.id = bi.attacker_user_id AND u.allow_highlight_bot = 1
+    LEFT JOIN battle_highlights bh ON bh.battle_id = bi.battle_id
+    WHERE bi.status = 'won' AND bi.created_at >= ? AND bh.battle_id IS NULL
+    ORDER BY bi.created_at DESC
+    LIMIT 40
+  `).bind(windowStart).all();
+
+  let best = null;
+  for (const row of rows.results ?? []) {
+    let state;
+    try { state = JSON.parse(row.state_json); } catch { continue; }
+    const score = scoreBattleForHighlight(state);
+    if (score >= HIGHLIGHT_MIN_SCORE && (!best || score > best.score)) {
+      best = { battleId: row.battle_id, userId: row.attacker_user_id, score, state };
+    }
+  }
+  if (!best) return { ran: true, posted: false, reason: "no_candidate", scanned: (rows.results ?? []).length };
+
+  // Resolve the player's Bluesky handle/DID to credit them.
+  const acct = await env.DB.prepare(`
+    SELECT a.handle, a.did FROM users u
+    JOIN accounts a ON a.inat_login = u.inat_login
+    WHERE u.id = ? ORDER BY a.updated_at DESC LIMIT 1
+  `).bind(best.userId).first();
+
+  const nowIso = new Date().toISOString();
+  try {
+    const render = await renderHighlightHeadless(env, best.battleId, { fps: 24, maxSeconds: 60 });
+    const handle = acct?.handle ? `@${acct.handle}` : null;
+    const text = handle
+      ? `${defaultHighlightCaption(best.state)} — by ${handle}`
+      : defaultHighlightCaption(best.state);
+    const mentions = acct?.handle && acct?.did ? [{ handle: acct.handle, did: acct.did }] : [];
+    const post = await postBattleHighlight({
+      identifier: env.BSKY_BOT_IDENTIFIER,
+      password: env.BSKY_BOT_APP_PASSWORD,
+      bytes: render.bytes,
+      text,
+      alt: `An iNat Battler highlight: ${best.state.player?.name || "a team"} vs ${best.state.opponent?.name || "the opponent"}.`,
+      width: render.width, height: render.height,
+      mentions, name: `battle-${best.battleId}.mp4`
+    });
+    await env.DB.prepare(
+      "INSERT INTO battle_highlights (battle_id, user_id, status, score, post_uri, created_at) VALUES (?, ?, 'posted', ?, ?, ?)"
+    ).bind(best.battleId, best.userId, best.score, post?.uri ?? null, nowIso).run();
+    return { ran: true, posted: true, battleId: best.battleId, score: best.score, uri: post?.uri ?? null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Record the failure so we don't retry the same battle forever.
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO battle_highlights (battle_id, user_id, status, score, error, created_at) VALUES (?, ?, 'failed', ?, ?, ?)"
+    ).bind(best.battleId, best.userId, best.score, message, nowIso).run();
+    return { ran: true, posted: false, battleId: best.battleId, error: message };
+  }
+}
+
 function defaultHighlightCaption(battle) {
   const turns = Math.max(1, Number(battle.turn ?? 1) - 1);
   const outcome =
@@ -5835,6 +5971,7 @@ async function handleAccountDelete(request, env) {
     statements.push(env.DB.prepare(
       "DELETE FROM battle_results WHERE winner_user_id = ? OR loser_user_id = ?"
     ).bind(userId, userId));
+    statements.push(env.DB.prepare("DELETE FROM battle_highlights WHERE user_id = ?").bind(userId));
     statements.push(env.DB.prepare("DELETE FROM users WHERE id = ?").bind(userId));
   }
   statements.push(env.DB.prepare(
@@ -5868,6 +6005,13 @@ async function getMe(request, env) {
     WHERE opponent_did = ? AND status = 'pending'
   `).bind(session.did).first();
 
+  const userId = session.inat_login ? inatUserIdFor(session.inat_login) : null;
+  let allowHighlightBot = false;
+  if (userId) {
+    const row = await env.DB.prepare("SELECT allow_highlight_bot FROM users WHERE id = ?").bind(userId).first();
+    allowHighlightBot = Number(row?.allow_highlight_bot ?? 0) === 1;
+  }
+
   return {
     loggedIn: true,
     did: session.did,
@@ -5876,10 +6020,11 @@ async function getMe(request, env) {
     avatarUrl: session.avatar_url,
     inatLogin: session.inat_login,
     inatUserId: session.inat_user_id,
-    userId: session.inat_login ? inatUserIdFor(session.inat_login) : null,
+    userId,
     inatPendingLogin: session.inat_pending_login,
     inatVerificationCode: session.inat_verification_code,
     admin: isAdminSession(env, session),
+    allowHighlightBot,
     pendingChallenges: Number(pending?.pending ?? 0)
   };
 }
@@ -13385,6 +13530,14 @@ function renderAppHtml() {
             </details>
           </div>
           <div class="settings-section">
+            <h3>Highlight videos</h3>
+            <p class="subtle">When enabled, the iNat Battler bot may turn your best victories into short videos and post them to the <strong>@wildmarch.bsky.social</strong> feed, credited to you. You can always share a battle yourself with the “Share as video” button on the results screen.</p>
+            <label class="settings-toggle">
+              <input type="checkbox" id="settingsHighlightOptIn">
+              <span>Let the bot feature my best battles</span>
+            </label>
+          </div>
+          <div class="settings-section">
             <h3>Privacy &amp; data</h3>
             <p class="subtle settings-disclosure">We store: your Bluesky handle &amp; DID and login session; your linked iNaturalist username; your imported <strong>research-grade</strong> species roster and observation summaries (public iNaturalist data only — never your iNat password); your team, training, and territory choices; any sprites you upload; and battle/challenge records. Per-user iNaturalist fetches happen in your own browser.</p>
             <div class="settings-actions">
@@ -13707,6 +13860,7 @@ function renderAppHtml() {
       trainingDetail: document.getElementById("trainingDetail"),
       settingsTabButton: document.getElementById("settingsTabButton"),
       settingsView: document.getElementById("settingsView"),
+      settingsHighlightOptIn: document.getElementById("settingsHighlightOptIn"),
       settingsReimportButton: document.getElementById("settingsReimportButton"),
       settingsSignOutButton: document.getElementById("settingsSignOutButton"),
       settingsSoundToggle: document.getElementById("settingsSoundToggle"),
@@ -13788,6 +13942,25 @@ function renderAppHtml() {
       const btn = event.target.closest("[data-theme-pref]");
       if (btn) setThemePreference(btn.getAttribute("data-theme-pref"));
     });
+    els.settingsHighlightOptIn.addEventListener("change", async () => {
+      const enabled = els.settingsHighlightOptIn.checked;
+      els.settingsHighlightOptIn.disabled = true;
+      try {
+        const res = await apiFetch("/api/settings/highlight-opt-in", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ enabled })
+        });
+        if (state.me) state.me.allowHighlightBot = res.allowHighlightBot;
+        setStatus(res.allowHighlightBot ? "The bot may now feature your battles." : "Highlight bot disabled for your battles.");
+      } catch (error) {
+        els.settingsHighlightOptIn.checked = !enabled; // revert
+        setStatus(error.message || "Could not update setting");
+      } finally {
+        els.settingsHighlightOptIn.disabled = false;
+      }
+    });
+
     const closeDeleteModal = () => {
       els.settingsDeletePanel.hidden = true;
       els.deleteSharedSpritesCheck.checked = false;
@@ -15348,7 +15521,12 @@ function renderAppHtml() {
       els.treeView.hidden = view !== "tree";
       els.recentView.hidden = view !== "recent";
       els.settingsView.hidden = view !== "settings";
-      if (view === "settings") els.settingsSoundToggle.checked = state.soundOn;
+      if (view === "settings") {
+        els.settingsSoundToggle.checked = state.soundOn;
+        const linked = !!(state.me && state.me.loggedIn && state.me.inatLogin);
+        els.settingsHighlightOptIn.checked = !!(state.me && state.me.allowHighlightBot);
+        els.settingsHighlightOptIn.disabled = !linked;
+      }
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
 
       const primaryMobileViews = ["home", "roster", "battle", "buddies"];

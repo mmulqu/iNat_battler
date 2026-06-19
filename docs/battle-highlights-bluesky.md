@@ -230,8 +230,25 @@ participants opted in (a profile/settings flag) — see `docs/settings-plan.md`.
      `atproto.js` for when we revisit. To enable own-account posting later: set
      `OAUTH_SCOPE` to `atproto transition:generic` (or granular blob+rpc scopes) and
      restore the self-post branch in `shareBattleVideo`.
-5. **Autonomous curator** — scoring cron + render-via-Browser-Rendering job + opt-in
-   gating + dedupe + daily cap.
+5. **Autonomous curator — ✅ DONE (2026-06-18).**
+   - **Headless render proven:** Cloudflare Browser Rendering (`BROWSER` binding +
+     `@cloudflare/puppeteer`, needs `nodejs_compat`) runs the `/replay` page and its
+     **WebCodecs H.264 encoder works headless** — verified via admin
+     `GET /api/highlights/render-test` (~13s total, 11 MB) and end-to-end with
+     `?post=1` (rendered + posted to @wildmarch). `renderHighlightHeadless` in
+     `src/highlight-bot.js`.
+   - **Opt-in:** `users.allow_highlight_bot` (migration `0018`), toggled in Settings →
+     "Highlight videos" via `POST /api/settings/highlight-opt-in`; surfaced in `/api/me`.
+   - **Curator** (`runHighlightCurator`, in the cron): self-throttled (KV
+     `highlight:last_run`, 30-min scan interval), daily cap (`HIGHLIGHT_MAX_PER_DAY=2`),
+     dedupe + failure ledger (`battle_highlights` table). Scores recent (≤72h)
+     opted-in **victories** (`scoreBattleForHighlight`: sweeps, comebacks, clutch
+     low-HP finishes, fast wins, crit drama; min score 4), renders the best one
+     headlessly, posts to @wildmarch crediting the player via @mention.
+   - **Safety:** gated behind `HIGHLIGHT_BOT_ENABLED` (currently **"false"** — cron
+     no-ops). Admin `POST /api/highlights/run-curator` forces a run (bypasses the flag
+     + interval; still respects opt-in, dedupe, daily cap) for testing.
+   - **To go live:** set `HIGHLIGHT_BOT_ENABLED=true` once happy.
 
 ## Open decisions (when we build)
 
