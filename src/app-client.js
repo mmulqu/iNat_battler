@@ -230,6 +230,7 @@
       rosterLookupInput: document.getElementById("rosterLookupInput"),
       rosterLookupButton: document.getElementById("rosterLookupButton"),
       rosterViewBanner: document.getElementById("rosterViewBanner"),
+      settingsInatAccount: document.getElementById("settingsInatAccount"),
       battlePanel: document.getElementById("battlePanel"),
       battleTabButton: document.getElementById("battleTabButton"),
       battleView: document.getElementById("battleView"),
@@ -835,6 +836,11 @@
     els.recentSpritesPanel.style.setProperty("--tile-min", state.recentZoom + "px");
 
     function handleBskyContainerClick(event) {
+      if (event.target.closest("[data-go-settings]")) {
+        switchView("settings");
+        return;
+      }
+
       const pick = event.target.closest("[data-typeahead-pick]");
       if (pick) {
         const input = document.getElementById(pick.getAttribute("data-input-id"));
@@ -897,6 +903,9 @@
     els.homeDashboard.addEventListener("click", handleBskyContainerClick);
     els.homeDashboard.addEventListener("input", handleBskyContainerInput);
     els.homeDashboard.addEventListener("keydown", handleBskyContainerKeydown);
+    els.settingsInatAccount.addEventListener("click", handleBskyContainerClick);
+    els.settingsInatAccount.addEventListener("input", handleBskyContainerInput);
+    els.settingsInatAccount.addEventListener("keydown", handleBskyContainerKeydown);
 
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".typeahead")) closeTypeaheadLists();
@@ -1875,40 +1884,15 @@
       '</div>';
     }
 
-    function renderBsky() {
-      if (!els.bskyBody) return;
-      const me = state.me;
-      const busyAttr = state.bskyBusy ? " disabled" : "";
-
-      if (!me) {
-        els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "loading";
-        els.bskyBody.innerHTML = '<div class="subtle">Loading Bluesky session…</div>';
-        return;
+    // The iNaturalist link/swap/unlink controls live in Settings → Account.
+    function renderInatAccountBlock(me, busyAttr) {
+      if (!me || !me.loggedIn) {
+        return '<p class="subtle">Sign in with Bluesky first to link an iNaturalist account.</p>';
       }
 
-      if (!me.loggedIn) {
-        els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "signed out";
-        els.bskyBody.innerHTML =
-          renderChallengeBanner() +
-          renderBskyStatus() +
-          renderTypeaheadInput("bskyHandleInput", "you.bsky.social", "login") +
-          '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
-            (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
-          '</button>' +
-          '<div class="subtle">Uses AT Protocol OAuth (Bluesky and any compatible PDS) and only asks for permission to create posts.</div>';
-        return;
-      }
-
-      els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "@" + me.handle;
-
-      let html = renderBskyStatus() +
-      '<div class="bsky-row">' +
-        '<strong>' + escapeHtml(me.displayName || "@" + me.handle) + '</strong>' +
-        '<button class="secondary" type="button" data-bsky-action="logout"' + busyAttr + '>Sign out</button>' +
-      '</div>';
-
-      // Show the verify form when not linked, when the user is mid-swap
-      // (a pending login exists), or when they explicitly chose to change it.
+      let html = "";
+      // Show the verify form when not linked, when the user is mid-swap (a
+      // pending login exists), or when they explicitly chose to change it.
       const showInatForm = !me.inatLogin || state.inatChangeOpen || Boolean(me.inatPendingLogin);
 
       if (me.inatLogin) {
@@ -1946,6 +1930,57 @@
         if (me.inatLogin) {
           html += '<button class="secondary" type="button" data-bsky-action="inat-change-cancel"' + busyAttr + '>Cancel</button>';
         }
+      }
+
+      return html;
+    }
+
+    function renderInatSettings() {
+      if (!els.settingsInatAccount) return;
+      els.settingsInatAccount.innerHTML = renderInatAccountBlock(state.me, state.bskyBusy ? " disabled" : "");
+    }
+
+    function renderBsky() {
+      renderInatSettings();
+      if (!els.bskyBody) return;
+      const me = state.me;
+      const busyAttr = state.bskyBusy ? " disabled" : "";
+
+      if (!me) {
+        els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "loading";
+        els.bskyBody.innerHTML = '<div class="subtle">Loading Bluesky session…</div>';
+        return;
+      }
+
+      if (!me.loggedIn) {
+        els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "signed out";
+        els.bskyBody.innerHTML =
+          renderChallengeBanner() +
+          renderBskyStatus() +
+          renderTypeaheadInput("bskyHandleInput", "you.bsky.social", "login") +
+          '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
+          '</button>' +
+          '<div class="subtle">Uses AT Protocol OAuth (Bluesky and any compatible PDS) and only asks for permission to create posts.</div>';
+        return;
+      }
+
+      els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "@" + me.handle;
+
+      let html = renderBskyStatus() +
+      '<div class="bsky-row">' +
+        '<strong>' + escapeHtml(me.displayName || "@" + me.handle) + '</strong>' +
+        '<button class="secondary" type="button" data-bsky-action="logout"' + busyAttr + '>Sign out</button>' +
+      '</div>';
+
+      // iNaturalist linking/swap/unlink lives in Settings → Account to keep the
+      // gameplay sidebar uncluttered. Just point there from here.
+      if (me.inatLogin) {
+        html += '<div class="subtle">iNaturalist: <strong>' + escapeHtml(me.inatLogin) + '</strong> &middot; ' +
+          'manage in <button type="button" class="link-button" data-go-settings>Settings</button></div>';
+      } else {
+        html += '<div class="subtle">Link your iNaturalist account in ' +
+          '<button type="button" class="link-button" data-go-settings>Settings → Account</button> to import your roster.</div>';
       }
 
       html += renderChallengeBanner();
@@ -2146,6 +2181,7 @@
         const linked = !!(state.me && state.me.loggedIn && state.me.inatLogin);
         els.settingsHighlightOptIn.checked = !!(state.me && state.me.allowHighlightBot);
         els.settingsHighlightOptIn.disabled = !linked;
+        renderInatSettings();
       }
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
 

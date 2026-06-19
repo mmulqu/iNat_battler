@@ -9628,6 +9628,10 @@ ${APP_CSS}
                 <div class="stat"><span class="subtle">Affinity</span><strong id="bondCount">0</strong></div>
               </div>
             </div>
+            <div class="settings-subsection">
+              <h4>iNaturalist link</h4>
+              <div class="settings-inat-account" id="settingsInatAccount"></div>
+            </div>
             <div class="settings-actions">
               <button class="secondary" id="settingsReimportButton" type="button">Re-import roster</button>
               <button class="secondary" id="settingsSignOutButton" type="button">Sign out</button>

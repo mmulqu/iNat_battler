@@ -3498,6 +3498,32 @@
       text-decoration: underline;
     }
 
+    .link-button {
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      font: inherit;
+      color: #047c78;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+
+    .settings-subsection {
+      margin-top: 12px;
+    }
+
+    .settings-subsection h4 {
+      margin: 0 0 8px;
+      font-size: 0.95rem;
+    }
+
+    .settings-inat-account {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
     .lb-row-name .lb-avatar {
       width: 26px;
       height: 26px;
