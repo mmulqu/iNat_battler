@@ -151,33 +151,136 @@ Changes:
   them to probes.
 - Keep direct APIs available for trusted use.
 
+## Growth & Community
+
+Features that help the app reach and retain players once the public alpha is live.
+Most of these are post-readiness (not blockers for inviting testers), but they shape
+the social loop that brings iNaturalist/Bluesky users in.
+
+### Battle highlight clips — ✅ SHIPPED (2026-06-19)
+
+Render short MP4 highlights of battles and share them. Full design + per-phase
+status in `docs/battle-highlights-bluesky.md`.
+
+- Deterministic seeded replay → canvas redraw → in-browser **WebCodecs H.264 MP4**
+  (`src/replay-page.js`), one renderer that runs in the user's browser (Share button,
+  $0 server cost) and in headless Chrome for the bot (`src/highlight-bot.js`).
+- A user "Share as video 🎥" button on the result overlay posts to the brand feed;
+  bytes stream straight to Bluesky (R2 bypassed) and the MP4 is discarded after.
+- Crits/KOs are reproduced exactly because the engine RNG is fully seeded — no
+  separate "highlight trigger" capture is needed; the whole battle replays.
+
+### Bluesky auto-posting — ✅ SHIPPED (2026-06-19)
+
+An autonomous curator (`runHighlightCurator`, cron) renders and posts notable battles
+to the brand feed.
+
+- Scores recent opted-in **wins** (≤72h), renders the best, posts crediting the player
+  via @mention; KV-throttled with a daily cap and a `battle_highlights` dedupe ledger.
+- Per-user opt-in (`users.allow_highlight_bot` + Settings "Highlight videos" toggle);
+  reuses the atproto plumbing. Gated behind `HIGHLIGHT_BOT_ENABLED` (currently "false").
+- Per-user posting to a player's **own** account is deferred (needs broader OAuth
+  scope); button + bot post to the brand feed for now.
+
+### Brand Bluesky account — ✅ DONE (@wildmarch)
+
+The public account the auto-posts publish to is live: **@wildmarch.bsky.social**
+(email verified). Its app password lives only as the Worker secret
+`BSKY_BOT_APP_PASSWORD` with the `BSKY_BOT_IDENTIFIER` var — never committed.
+_Remaining: profile/avatar/banner polish + a pinned "what is this" post linking to the
+app, and alpha announcements once testing opens._
+
+### Custom sprite creation repo
+
+A separate public repository that teaches players how to create and upload their own
+species sprites.
+
+- Standalone repo (keeps the main app repo focused) with a clear, friendly guide.
+- Contents:
+  - Step-by-step instructions for creating a sprite and uploading it through
+    **Settings → Sprites** (the per-user Discord-QA path).
+  - Recommended prompts / prompt templates for generating sprites in the app's art
+    style.
+  - Suggested image models/tools (and any settings that match our look — transparent
+    background, consistent framing, size).
+  - Style/spec guidance: dimensions, transparency, framing, file format, do/don't
+    examples.
+  - QA/approval expectations so contributors know what gets accepted.
+- Link it from the app (Settings → About, and the landing "how it works") once it
+  exists.
+
+## Recent Progress (2026-06-19)
+
+- Dev Lab is no longer exposed in the public app frontend. Dev Batch, Global Seed,
+  manual shared-library upload, batch sync/status, and related private operations are
+  available only through server-side admin-gated endpoints.
+- Authenticated public custom sprite uploads remain open through **Settings → Sprites**
+  and the Discord QA flow. The approval/submission list is private to the signed-in
+  submitter: players cannot list another user's submissions, even after approval.
+  Approved sprites can still appear as actual in-game art for other players once QA
+  approves them; pending sprites remain owner-only.
+- Sprite Tree now shows an in-tab loading spinner with rotating `iNat_trees`-style
+  taxonomy messages so users know the tab is working. The tree API was also optimized
+  with a ranked ready-asset query plus short client/server caches.
+- Battle balance was rechecked with a 153,000-duel body-plan simulation
+  (`npm run simulate -- 1000`). This validates the core 1v1 engine/mana/type rules, not
+  full 5v5 production battles with generated species moves, training, terrain, or
+  switching. The system is much closer than the original baseline, but body-plan win
+  rates still need tuning before public alpha.
+- **Public landing page is live** (`#publicLanding`): fantasy hero art
+  (`landing-hero-battle.webp`), product name + one-line pitch, "Sign in with Bluesky"
+  CTA + "See how it works", a 4-step How It Works, and an Alpha Notes/trust section.
+  Logged-out visitors see the landing; signing in swaps to the app layout. Verified
+  responsive on desktop + mobile.
+- **Guided onboarding is live** (`renderOnboardingHome`): a signed-in but unlinked user
+  lands on a Home setup card with a 3-step flow (Bluesky connected → choose iNaturalist
+  username → paste verification code & verify+import), an "Open iNaturalist settings"
+  link, and the no-password explanation. After verify+import they land on the Home
+  dashboard.
+- **Home dashboard is live** (`renderHome`): default logged-in view with player summary,
+  next-action card, team/roster shortcuts, and recently-added sprites — Roster is no
+  longer the first thing a player sees.
+
+### Security & hardening (2026-06-19)
+
+- Closed 4 unauthenticated mutation routes (IDOR): team save, NPC battle start, battle
+  action, sprite preference — identity now derives from the session cookie, not the
+  path/body; battle action verifies ownership.
+- Replaced wildcard CORS with an allowlist; spend-cap default flipped
+  (`DISABLE_GENERATION_LIMITS="false"`); KV per-IP rate limiting on auth/account/link/
+  share endpoints; `AbortSignal.timeout` on all server-side external calls; hot-path DB
+  indexes (migration 0019).
+- Maintainability refactors: extracted the embedded client CSS/JS to `src/app.css` +
+  `src/app-client.js` (Text modules) and converted the router to a route table.
+
 ## Public Alpha Checklist
 
 Before inviting broader testers:
 
-- Landing page exists and works for logged-out visitors.
-- Bluesky sign-in CTA is clear.
-- iNaturalist verification flow is guided and understandable.
-- Roster can handle hundreds of taxa without endless scrolling.
-- Battle tab has a useful empty state and team readiness flow.
-- Dev tools are absent from normal player workflows and private ops routes are admin-gated.
-- Privacy/data explanation is visible.
-- The app clearly labels itself as pre-alpha or alpha.
-- Error states are understandable for auth, iNaturalist import, sprite generation, and challenge creation.
+- ✅ Landing page exists and works for logged-out visitors.
+- ✅ Bluesky sign-in CTA is clear.
+- ✅ iNaturalist verification flow is guided and understandable.
+- ◻ Roster can handle hundreds of taxa without endless scrolling. _(pagination shipped;
+  quick filters / compact mode still to do — see Roster Usability.)_
+- ◻ Battle tab has a useful empty state and team readiness flow.
+- ✅ Dev tools are absent from normal player workflows and private ops routes are admin-gated.
+- ✅ Privacy/data explanation is visible.
+- ✅ The app clearly labels itself as pre-alpha or alpha.
+- ◻ Error states are understandable for auth, iNaturalist import, sprite generation, and challenge creation.
 
 ## Implementation Order
 
-1. Add a public landing page and logged-out hero.
-2. Generate or add a fantasy battle hero image asset.
-3. Create a Home dashboard for logged-in users.
-4. Convert the existing default logged-in view from Roster to Home.
-5. Improve iNaturalist linking into a guided setup panel.
-6. Add roster quick filters and reduce long scrolling.
-7. Add compact roster mode or pagination improvements.
-8. Improve Battle empty state and team readiness display.
-9. Remove internal generation controls from the public frontend.
-10. Add dev/admin gating for internal controls.
-11. Polish visual hierarchy and status messaging.
+1. ✅ Add a public landing page and logged-out hero.
+2. ✅ Generate or add a fantasy battle hero image asset.
+3. ✅ Create a Home dashboard for logged-in users.
+4. ✅ Convert the existing default logged-in view from Roster to Home.
+5. ✅ Improve iNaturalist linking into a guided setup panel.
+6. ◻ Add roster quick filters and reduce long scrolling.
+7. ◻ Add compact roster mode or pagination improvements. _(pagination shipped.)_
+8. ◻ Improve Battle empty state and team readiness display.
+9. ✅ Remove internal generation controls from the public frontend.
+10. ✅ Add dev/admin gating for internal controls.
+11. ◻ Polish visual hierarchy and status messaging.
 
 ## Open Decisions
 
