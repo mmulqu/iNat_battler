@@ -26,6 +26,94 @@ Build:
 
 The API is the product surface. The skill is just documentation plus play policy.
 
+## Agent Onboarding & Bootstrap
+
+The headline UX goal: a human points their agent at **one URL** and the agent can
+understand the game, acquire the skill, get permission to act as the human, and
+start playing — without browser scraping or hand-copied secrets.
+
+Model it as a five-stage funnel where each stage is independently useful and an
+agent can stop at "recommend only" if it never gets a credential.
+
+### 1. Discovery — the single thing you point at
+
+The human prompt resolves to one canonical entrypoint. Provide both conventions:
+
+- `GET /llms.txt` — human-and-machine readable orchestration doc (top of funnel).
+- `GET /.well-known/inat-battler.json` — strict machine manifest: API base URL,
+  API version, links to `/api/rules`, the skill package, the MCP endpoint, and
+  the supported auth methods.
+
+So the "prompt" is literally: *"Play iNat Battler as me. Start by reading
+https://<host>/llms.txt and follow it."* `llms.txt` drives everything after.
+
+### 2. Understand — machine-readable rules before any action
+
+`GET /api/rules` is the "understand" substrate and should be complete enough that
+an agent never reverse-engineers mechanics: type-effectiveness chart, terrain/move
+favoring, move categories, status effects, training/respec math, territory
+requirements and daily caps, sprite asset version, and the canonical action
+vocabulary. Paired with the legal-action endpoints (`/api/battles/:id/actions`,
+`/api/territory/candidates`) the **server stays the rules engine and the agent is
+just policy** — this is what keeps bots from drifting or cheating.
+
+### 3. Install the skill — define "install" per runtime
+
+"Install a skill" means different things; support a gradient from the same source:
+
+- **Universal floor:** the skill is fetchable Markdown. Any HTTP-capable LLM reads
+  `references/api.md` + policy docs into context. No install step required.
+- **Claude Code / Agent SDK:** distribute `inat-battler-player` as a package the
+  agent unpacks into its skills dir (git repo today; a `GET /skill/...zip`
+  endpoint and/or a Claude Code marketplace plugin later).
+- **Letta:** attach as skill + tools, or point at the MCP wrapper.
+- **MCP-native:** the manifest advertises the MCP endpoint; the runtime autoloads.
+
+The skill is knowledge + policy only, **zero secrets**. A `quickstart` block at the
+top of `SKILL.md` with the literal first three calls makes self-onboarding
+deterministic.
+
+### 4. Authenticate — device-link flow is the linchpin
+
+"Paste an API key from Settings" works but is clunky for point-and-play. Add an
+**OAuth-style device-authorization (linking-code) flow** as the primary path:
+
+```text
+Agent:  POST /api/agent/link/start        -> { user_code: "BUG-4F2K", verify_url, poll_token, expires_in }
+Agent:  tells human → "Approve me: open <host>/link, enter BUG-4F2K"
+Human:  (already signed in via Bluesky) approves, picks scopes + a label
+Agent:  POST /api/agent/link/poll {poll_token}  (polls) -> { api_key: "ibat_...", scopes, user_id }
+Agent:  Authorization: Bearer ibat_...  → plays
+```
+
+Why it's the unlock: no secret copy-paste, the human approves **once** in the
+browser they're already in, and chooses scopes at approval time. It mirrors the
+GitHub/TV device-code flow that agents and humans already understand.
+Implementation is the `api_keys` table plus a short-lived `agent_link_requests`
+table, and teaching the session helper to accept `Authorization: Bearer`.
+
+Keep "paste a key from Settings" as the power-user fallback.
+
+### 5. Play — instant sandbox first, then the real account
+
+Let the agent **play before it authenticates**: an anonymous demo/NPC sandbox
+(`POST /api/battles/demo/start`) on a throwaway roster, no account needed, so
+"install → do a battle" works in seconds and the agent learns the loop before
+touching the human's real roster. Optionally gate first real-account writes behind
+a **self-check tutorial battle** the agent must win in the sandbox — a competence
+check that doubles as learning and as a guardrail against a confused agent burning
+the human's daily territory budget.
+
+### Onboarding safety defaults
+
+- Scopes chosen at link time; default-deny the spicy ones (`write:share` social
+  posting, `write:generation` paid sprites). Conservative social policy (no
+  unsolicited challenges/taunts).
+- Every API-key action is logged as agent-assisted; `last_used_at` is surfaced so
+  humans can audit, and revocation is one click in Settings.
+- Server-side daily budgets remain the real safety net — onboarding never grants a
+  way around them.
+
 ## Auth Philosophy
 
 We should be open where openness makes sense:
@@ -396,14 +484,32 @@ Do not make MCP authoritative. The HTTP API remains canonical.
 
 ## Implementation Phases
 
-### Phase 1: API Key And Snapshot
+### Phase 1: API Key, Discovery, Snapshot, Skill  — IMPLEMENTED
 
-- Add personal API keys for signed-in users.
-- Support `Authorization: Bearer ...` in `requireSession` or a sibling helper.
+- Add personal API keys for signed-in users (`api_keys` table, `ibat_` tokens,
+  hashed at rest, create/list/revoke from Settings → Account). Key management
+  itself requires a real cookie session, not a Bearer key.
+- Support `Authorization: Bearer ibat_...` in `getSession`, mapping to the same
+  account record as the browser session (so every existing authed endpoint works
+  for agents immediately).
+- Add discovery: `GET /llms.txt` and `GET /.well-known/inat-battler.json`.
+- Add `GET /api/rules` (machine-readable rules from the real game constants).
 - Add `GET /api/player/snapshot`.
-- Draft `skills/inat-battler-player/SKILL.md`.
+- Ship `skills/inat-battler-player/` (SKILL.md + references).
 
 Success: an external agent can authenticate as a real user and summarize what to do next.
+
+### Phase 1.5: Device-Link Onboarding  — PLANNED
+
+- Add `agent_link_requests` table and the device-authorization flow
+  (`POST /api/agent/link/start`, `POST /api/agent/link/poll`, plus a `/link`
+  approval page that reuses the signed-in browser session and lets the human pick
+  scopes/label).
+- Add an anonymous demo/NPC sandbox (`POST /api/battles/demo/start`) for
+  install-and-immediately-play, and an optional competence-gate tutorial battle.
+
+Success: a human points an agent at `/llms.txt` and approves it once in the
+browser; no key copy-paste.
 
 ### Phase 2: Battle-Friendly API
 
