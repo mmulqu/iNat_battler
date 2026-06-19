@@ -9476,12 +9476,7 @@ ${APP_CSS}
         </section>
         <section class="view-panel" id="battleView" hidden>
           <div class="empty" id="battleEmptyState">
-            <div>
-              <strong>No battle in progress.</strong><br>
-              Phase 1: pick exactly 5 ready sprites in the Roster tab.<br>
-              Phase 2: press Battle NPC, or accept a Bluesky challenge &mdash; the arena opens here.<br><br>
-              <button class="secondary" id="demoBattleButton" type="button">Run 5v5 Test Battle</button>
-            </div>
+            <div><strong>Loading the arena…</strong></div>
           </div>
           <section class="battle" id="battlePanel" hidden></section>
         </section>

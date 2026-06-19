@@ -122,6 +122,7 @@
       treeZoom: Number(localStorage.getItem("inatBattler:treeZoom")) || 58,
       recentSprites: null,
       landingSpritesLoaded: false,
+      showImportSummary: false,
       recentSearch: "",
       recentSort: "newest",
       recentGroup: "all",
@@ -224,7 +225,6 @@
       battleTabButton: document.getElementById("battleTabButton"),
       battleView: document.getElementById("battleView"),
       battleEmptyState: document.getElementById("battleEmptyState"),
-      demoBattleButton: document.getElementById("demoBattleButton"),
       leaderboardTabButton: document.getElementById("leaderboardTabButton"),
       leaderboardView: document.getElementById("leaderboardView"),
       leaderboardPanel: document.getElementById("leaderboardPanel"),
@@ -504,7 +504,25 @@
     });
 
     els.startBattleButton.addEventListener("click", startNpcBattle);
-    els.demoBattleButton.addEventListener("click", startDemoBattle);
+
+    // The Battle empty state is re-rendered as a dynamic arena entry point, so its
+    // buttons are wired by delegation (re-rendering would drop direct listeners).
+    els.battleEmptyState.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-empty-action]");
+      if (!button) return;
+      const action = button.getAttribute("data-empty-action");
+      if (action === "pick-team") {
+        state.rosterStatus = "ready";
+        state.rosterPage = 1;
+        if (els.rosterStatusFilter) els.rosterStatusFilter.value = "ready";
+        await reloadRosterPage(true);
+        await switchView("roster");
+      } else if (action === "battle-npc") {
+        await startNpcBattle();
+      } else if (action === "demo") {
+        await startDemoBattle();
+      }
+    });
 
     els.leaderboardRefreshButton.addEventListener("click", () => loadLeaderboard(true));
     els.leaderboardModeToggle.addEventListener("click", (event) => {
@@ -559,6 +577,9 @@
         await switchView("tree");
       } else if (action === "start-battle") {
         await startNpcBattle();
+      } else if (action === "dismiss-import") {
+        state.showImportSummary = false;
+        renderHome();
       }
     });
 
@@ -1112,6 +1133,9 @@
       const message = "Linked iNaturalist account " + res.inatLogin + "." + importText + " You can remove the code from your bio now.";
       state.bskyMessage = message;
       state.bskyMessageKind = "success";
+      // Show the first-import welcome summary on the Home dashboard once setup
+      // completes (plan step 7). Cleared when the user dismisses it.
+      state.showImportSummary = true;
       state.me = {
         ...(state.me || {}),
         loggedIn: true,
@@ -2921,6 +2945,42 @@
       };
     }
 
+    // One-time welcome summary shown on the Home dashboard right after a player
+    // finishes setup (verify + import). Numbers update live as sprites generate.
+    function renderImportSummary(summary, handle) {
+      const total = summary.totalCount || 0;
+      const ready = summary.readyCount || 0;
+      const queued = summary.pendingCount || 0;
+      const stillWorking = total === 0 || queued > 0 || ready < Math.min(5, total);
+      const teamLine = ready >= 5
+        ? "You have enough ready sprites to field a full five-species team."
+        : (total === 0
+          ? "Your species are importing now — they'll appear here as they finish."
+          : Math.max(0, 5 - ready) + " more ready " + (5 - ready === 1 ? "sprite" : "sprites") + " and you can field a full team.");
+      return '<section class="import-summary">' +
+        '<button class="import-summary-dismiss" type="button" data-home-action="dismiss-import" aria-label="Dismiss">×</button>' +
+        '<div class="subtle">Setup complete</div>' +
+        '<h2>Roster ready, ' + escapeHtml(handle) + '!</h2>' +
+        '<p>' + escapeHtml(teamLine) + (stillWorking ? " Sprite generation runs in the background; these numbers update as it finishes." : "") + '</p>' +
+        '<div class="import-summary-stats">' +
+          importStat(total, "Taxa imported") +
+          importStat(ready, "Sprites ready") +
+          importStat(queued, "Queued") +
+        '</div>' +
+        '<div class="home-actions">' +
+          '<button class="primary" type="button" data-home-action="ready-roster">Pick your team</button>' +
+          '<button class="secondary" type="button" data-home-action="dismiss-import">Go to Home</button>' +
+        '</div>' +
+      '</section>';
+    }
+
+    function importStat(value, label) {
+      return '<div class="import-stat">' +
+        '<strong>' + escapeHtml(String(value)) + '</strong>' +
+        '<span>' + escapeHtml(label) + '</span>' +
+      '</div>';
+    }
+
     function renderHome() {
       if (!els.homeDashboard) return;
 
@@ -2939,6 +2999,7 @@
         : "Import a roster to see your largest groups.";
 
       els.homeDashboard.innerHTML =
+        (state.showImportSummary ? renderImportSummary(summary, handle) : "") +
         '<section class="home-hero-card">' +
           '<div class="home-copy">' +
             '<div class="subtle">Player Home</div>' +
@@ -5010,6 +5071,42 @@
       '</div>';
     }
 
+    // Arena entry point shown when no battle is active: team slots, a readiness
+    // checklist, and the actions that start a battle.
+    function renderBattleEmptyState() {
+      if (!els.battleEmptyState) return;
+      const linked = !!(state.me && state.me.loggedIn && state.me.inatLogin);
+      const summary = currentRosterSummary();
+      const selectedCount = state.selectedTaxa.size;
+      const teamReady = selectedCount === 5;
+      const check = (ok, label) =>
+        '<li class="battle-check' + (ok ? " done" : "") + '">' +
+          '<span class="battle-check-mark">' + (ok ? "✓" : "○") + '</span>' +
+          '<span>' + escapeHtml(label) + '</span>' +
+        '</li>';
+
+      els.battleEmptyState.innerHTML =
+        '<div class="battle-entry">' +
+          '<div class="battle-entry-head">' +
+            '<div class="subtle">Battle Arena</div>' +
+            '<h2>Ready a team, then fight</h2>' +
+            '<p>Pick five ready species, then take on an NPC or challenge another naturalist on Bluesky.</p>' +
+          '</div>' +
+          renderHomeTeamSlots() +
+          '<ul class="battle-checklist">' +
+            check(linked, "iNaturalist roster imported") +
+            check(summary.readyCount > 0, "At least one sprite ready to battle") +
+            check(teamReady, "Five species selected (" + selectedCount + "/5)") +
+          '</ul>' +
+          '<div class="battle-entry-actions">' +
+            '<button class="secondary" type="button" data-empty-action="pick-team">Pick Team</button>' +
+            '<button class="primary" type="button" data-empty-action="battle-npc"' + (teamReady ? "" : " disabled") + '>Battle NPC</button>' +
+            '<button class="secondary" type="button" data-empty-action="demo">Run 5v5 Test Battle</button>' +
+          '</div>' +
+          '<p class="subtle battle-entry-note">Want a human opponent? Open the Bluesky panel to send an async challenge — they play live while your snapshotted team is piloted by the AI.</p>' +
+        '</div>';
+    }
+
     function renderBattle() {
       const battle = state.battle;
       els.battlePanel.hidden = !battle;
@@ -5018,6 +5115,7 @@
       renderViewTabs();
       if (!battle) {
         state.swapOpen = false;
+        renderBattleEmptyState();
         return;
       }
 
