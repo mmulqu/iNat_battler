@@ -155,6 +155,11 @@
       challengeInfo: null,
       inatLinkPending: null,
       inatChangeOpen: false,
+      // Read-only "view another existing player's roster" mode. When viewUserId
+      // is set, the roster grid loads that user instead of state.userId (which
+      // always stays the signed-in owner) and all editing is suppressed.
+      viewUserId: null,
+      viewLabel: "",
       mySprites: [],
       training: null,
       trainingFilter: "",
@@ -222,6 +227,9 @@
       rosterModeButton: document.getElementById("rosterModeButton"),
       rosterTypeChips: document.getElementById("rosterTypeChips"),
       rosterPagination: document.getElementById("rosterPagination"),
+      rosterLookupInput: document.getElementById("rosterLookupInput"),
+      rosterLookupButton: document.getElementById("rosterLookupButton"),
+      rosterViewBanner: document.getElementById("rosterViewBanner"),
       battlePanel: document.getElementById("battlePanel"),
       battleTabButton: document.getElementById("battleTabButton"),
       battleView: document.getElementById("battleView"),
@@ -532,6 +540,12 @@
     });
 
     els.leaderboardPanel.addEventListener("click", async (event) => {
+      const nameLink = event.target.closest("[data-view-roster]");
+      if (nameLink) {
+        await enterRosterView(nameLink.getAttribute("data-view-roster"), nameLink.getAttribute("data-view-label"));
+        return;
+      }
+
       const shareButton = event.target.closest("[data-share-rank]");
       if (!shareButton || shareButton.disabled) return;
 
@@ -691,8 +705,10 @@
     });
 
     els.rosterGrid.addEventListener("click", async (event) => {
+      // Sprite-variant preference is a write tied to the owner's account, so it
+      // is disabled while viewing another player's roster.
       const spriteButton = event.target.closest("[data-sprite-shift]");
-      if (spriteButton) {
+      if (spriteButton && !state.viewUserId) {
         event.stopPropagation();
         await chooseSpriteVariant(
           spriteButton.getAttribute("data-taxon-id"),
@@ -708,6 +724,8 @@
         return;
       }
 
+      // Team selection only applies to your own roster.
+      if (state.viewUserId) return;
       const card = event.target.closest("[data-taxon-card]");
       if (!card) return;
       toggleTeamSelection(card.getAttribute("data-taxon-id"));
@@ -715,6 +733,7 @@
 
     els.rosterGrid.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
+      if (state.viewUserId) return;
 
       const card = event.target.closest("[data-taxon-card]");
       if (!card) return;
@@ -760,6 +779,17 @@
       state.rosterMode = state.rosterMode === "sprites" ? "cards" : "sprites";
       localStorage.setItem("inatBattler:rosterMode", state.rosterMode);
       render();
+    });
+
+    els.rosterLookupButton.addEventListener("click", lookupRosterFromInput);
+    els.rosterLookupInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        lookupRosterFromInput();
+      }
+    });
+    els.rosterViewBanner.addEventListener("click", (event) => {
+      if (event.target.closest("[data-roster-view-exit]")) exitRosterView();
     });
 
     els.rosterTypeChips.addEventListener("click", (event) => {
@@ -1938,10 +1968,11 @@
     }
 
     async function loadRoster() {
-      if (!state.userId) return;
+      const rosterUserId = state.viewUserId || state.userId;
+      if (!rosterUserId) return;
 
       const params = new URLSearchParams({
-        userId: state.userId,
+        userId: rosterUserId,
         limit: String(ROSTER_PAGE_SIZE),
         offset: String((state.rosterPage - 1) * ROSTER_PAGE_SIZE)
       });
@@ -1963,8 +1994,69 @@
       }
 
       pruneSelectedTaxa();
+      updateRosterViewBanner();
       render();
       schedulePolling();
+    }
+
+    function updateRosterViewBanner() {
+      if (!els.rosterViewBanner) return;
+      document.body.dataset.viewingOther = state.viewUserId ? "1" : "";
+      if (!state.viewUserId) {
+        els.rosterViewBanner.hidden = true;
+        els.rosterViewBanner.innerHTML = "";
+        return;
+      }
+      els.rosterViewBanner.hidden = false;
+      els.rosterViewBanner.innerHTML =
+        '<span>Viewing <strong>' + escapeHtml(state.viewLabel || state.viewUserId) + '</strong>’s roster (read-only)</span>' +
+        '<button class="secondary" type="button" data-roster-view-exit>Back to my roster</button>';
+    }
+
+    async function enterRosterView(userId, label) {
+      const target = String(userId || "").trim();
+      if (!target) return;
+      // No-op if it's actually the signed-in user.
+      if (target === state.userId) {
+        await exitRosterView();
+        return;
+      }
+      state.viewUserId = target;
+      state.viewLabel = label || target.replace(/^inat:/, "");
+      state.rosterPage = 1;
+      state.activeView = "roster";
+      renderViewTabs();
+      if (els.rosterLookupInput) els.rosterLookupInput.value = "";
+      try {
+        await loadRoster();
+        if (!state.taxa.length) {
+          setStatus("No roster found for “" + state.viewLabel + "”. They may not be in iNat Battler yet.");
+        }
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
+    async function exitRosterView() {
+      if (!state.viewUserId) return;
+      state.viewUserId = null;
+      state.viewLabel = "";
+      state.rosterPage = 1;
+      try {
+        await loadRoster();
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
+    function lookupRosterFromInput() {
+      const raw = els.rosterLookupInput ? els.rosterLookupInput.value.trim() : "";
+      const login = raw.replace(/^@/, "").trim();
+      if (!login) {
+        setStatus("Enter an iNaturalist username to view their roster.");
+        return;
+      }
+      enterRosterView("inat:" + login.toLowerCase(), login);
     }
 
     async function reloadRosterPage(resetPage) {
@@ -1977,6 +2069,23 @@
     }
 
     async function switchView(view) {
+      // Viewing another player's roster is modal to the roster tab; any tab
+      // switch returns to the signed-in owner's data.
+      const wasViewing = Boolean(state.viewUserId);
+      if (wasViewing) {
+        state.viewUserId = null;
+        state.viewLabel = "";
+        state.rosterPage = 1;
+        updateRosterViewBanner();
+        if (state.userId) {
+          try {
+            await loadRoster();
+          } catch (error) {
+            setStatus(error.message);
+          }
+        }
+      }
+
       state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "map", "training", "settings"].includes(view) ? view : "home";
       renderViewTabs();
 
@@ -2777,6 +2886,11 @@
     function lbDisplayName(entry) {
       const name = escapeHtml(entry.name || entry.userId);
       const handle = entry.handle ? ' <span class="subtle">@' + escapeHtml(entry.handle) + '</span>' : "";
+      if (entry.userId) {
+        const label = entry.name || entry.handle || entry.userId;
+        return '<button type="button" class="lb-name-link" data-view-roster="' + escapeAttr(entry.userId) +
+          '" data-view-label="' + escapeAttr(label) + '" title="View this naturalist’s roster">' + name + '</button>' + handle;
+      }
       return name + handle;
     }
 
@@ -3246,7 +3360,9 @@
       els.emptyState.style.display = state.taxa.length ? "none" : "grid";
       els.emptyState.textContent = hasFilters
         ? "No roster creatures match these filters."
-        : "Link your iNaturalist account, then import your roster.";
+        : state.viewUserId
+          ? "“" + (state.viewLabel || state.viewUserId) + "” isn’t in iNat Battler yet, or has no roster."
+          : "Link your iNaturalist account, then import your roster.";
       els.rosterGrid.classList.toggle("sprite-mode", state.rosterMode === "sprites");
       els.rosterModeButton.textContent = state.rosterMode === "sprites" ? "Card View" : "Sprite Grid";
       els.rosterGrid.innerHTML = state.taxa

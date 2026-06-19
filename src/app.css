@@ -1064,6 +1064,40 @@
       min-width: 0;
     }
 
+    .roster-lookup {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 0 0 10px;
+    }
+
+    .roster-lookup input {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .roster-view-banner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 0 0 12px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: rgba(4, 124, 120, 0.12);
+      border: 1px solid rgba(4, 124, 120, 0.35);
+    }
+
+    /* Read-only mode: hide the team-selection affordances on the roster grid. */
+    body[data-viewing-other="1"] #rosterGrid .select-mark {
+      display: none;
+    }
+
+    body[data-viewing-other="1"] #rosterGrid [data-taxon-card] {
+      cursor: default;
+    }
+
     .bsky-row strong {
       overflow: hidden;
       text-overflow: ellipsis;
@@ -3446,6 +3480,22 @@
       max-width: 260px;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    .lb-name-link {
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 0;
+      font: inherit;
+      color: inherit;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .lb-name-link:hover {
+      color: #047c78;
+      text-decoration: underline;
     }
 
     .lb-row-name .lb-avatar {

@@ -9469,6 +9469,11 @@ ${APP_CSS}
             <h2>Roster</h2>
             <span class="subtle" id="refreshLabel"></span>
           </div>
+          <div class="roster-lookup">
+            <input id="rosterLookupInput" type="search" placeholder="View another naturalist (iNaturalist username)" data-roster-lookup-enter>
+            <button class="secondary" id="rosterLookupButton" type="button">View roster</button>
+          </div>
+          <div class="roster-view-banner" id="rosterViewBanner" hidden></div>
           <div class="roster-toolbar">
             <input id="rosterSearchInput" type="search" placeholder="Search roster">
             <select id="rosterSortSelect" aria-label="Sort roster">
