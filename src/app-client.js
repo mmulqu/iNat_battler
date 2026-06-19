@@ -231,6 +231,10 @@
       rosterLookupButton: document.getElementById("rosterLookupButton"),
       rosterViewBanner: document.getElementById("rosterViewBanner"),
       settingsInatAccount: document.getElementById("settingsInatAccount"),
+      apiKeyLabelInput: document.getElementById("apiKeyLabelInput"),
+      apiKeyCreateButton: document.getElementById("apiKeyCreateButton"),
+      apiKeyReveal: document.getElementById("apiKeyReveal"),
+      apiKeyList: document.getElementById("apiKeyList"),
       battlePanel: document.getElementById("battlePanel"),
       battleTabButton: document.getElementById("battleTabButton"),
       battleView: document.getElementById("battleView"),
@@ -906,6 +910,12 @@
     els.settingsInatAccount.addEventListener("click", handleBskyContainerClick);
     els.settingsInatAccount.addEventListener("input", handleBskyContainerInput);
     els.settingsInatAccount.addEventListener("keydown", handleBskyContainerKeydown);
+
+    els.apiKeyCreateButton.addEventListener("click", createApiKeyFromInput);
+    els.apiKeyList.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-revoke-key]");
+      if (button) revokeApiKeyById(button.getAttribute("data-revoke-key"));
+    });
 
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".typeahead")) closeTypeaheadLists();
@@ -1940,6 +1950,69 @@
       els.settingsInatAccount.innerHTML = renderInatAccountBlock(state.me, state.bskyBusy ? " disabled" : "");
     }
 
+    async function loadApiKeys() {
+      if (!els.apiKeyList) return;
+      if (!(state.me && state.me.loggedIn)) {
+        els.apiKeyList.innerHTML = '<p class="subtle">Sign in to manage API keys.</p>';
+        return;
+      }
+      try {
+        const res = await apiFetch("/api/account/api-keys");
+        renderApiKeys(res.keys || []);
+      } catch (error) {
+        els.apiKeyList.innerHTML = '<p class="subtle">' + escapeHtml(error.message) + '</p>';
+      }
+    }
+
+    function renderApiKeys(keys) {
+      if (!keys.length) {
+        els.apiKeyList.innerHTML = '<p class="subtle">No API keys yet.</p>';
+        return;
+      }
+      els.apiKeyList.innerHTML = keys.map((key) => {
+        const used = key.lastUsedAt ? "last used " + new Date(key.lastUsedAt).toLocaleDateString() : "never used";
+        return '<div class="api-key-row">' +
+          '<div><strong>' + escapeHtml(key.label) + '</strong>' +
+            '<div class="subtle">' + escapeHtml(used) + '</div></div>' +
+          '<button class="secondary" type="button" data-revoke-key="' + escapeAttr(key.apiKeyId) + '">Revoke</button>' +
+        '</div>';
+      }).join("");
+    }
+
+    async function createApiKeyFromInput() {
+      const label = els.apiKeyLabelInput ? els.apiKeyLabelInput.value.trim() : "";
+      els.apiKeyCreateButton.disabled = true;
+      try {
+        const res = await apiFetch("/api/account/api-keys", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ label })
+        });
+        if (els.apiKeyLabelInput) els.apiKeyLabelInput.value = "";
+        els.apiKeyReveal.hidden = false;
+        els.apiKeyReveal.innerHTML =
+          '<p><strong>Copy this key now — it will not be shown again:</strong></p>' +
+          '<code class="api-key-token">' + escapeHtml(res.token) + '</code>';
+        setStatus("API key created.");
+        await loadApiKeys();
+      } catch (error) {
+        setStatus(error.message);
+      } finally {
+        els.apiKeyCreateButton.disabled = false;
+      }
+    }
+
+    async function revokeApiKeyById(apiKeyId) {
+      if (!apiKeyId) return;
+      try {
+        await apiFetch("/api/account/api-keys/" + encodeURIComponent(apiKeyId), { method: "DELETE" });
+        setStatus("API key revoked.");
+        await loadApiKeys();
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
     function renderBsky() {
       renderInatSettings();
       if (!els.bskyBody) return;
@@ -2182,6 +2255,7 @@
         els.settingsHighlightOptIn.checked = !!(state.me && state.me.allowHighlightBot);
         els.settingsHighlightOptIn.disabled = !linked;
         renderInatSettings();
+        loadApiKeys();
       }
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
 

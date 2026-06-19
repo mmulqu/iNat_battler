@@ -341,6 +341,44 @@ const ROUTES = [
 
   { method: "GET", path: "/api/me", handler: async (request, env) => jsonResponse(await getMe(request, env)) },
 
+  // --- Agent / non-browser client support (docs/agent-player-integration-plan.md) ---
+
+  // Aggregate "wake up and decide" state for any client, including agents.
+  { method: "GET", path: "/api/player/snapshot", handler: async (request, env) => {
+    const session = await requireSession(request, env);
+    return jsonResponse(await getPlayerSnapshot(env, session));
+  } },
+
+  // Machine-readable rules; openly readable so an agent can understand the game
+  // before authenticating.
+  { method: "GET", path: "/api/rules", handler: (request, env) => jsonResponse(getGameRules(env)) },
+
+  // Personal API keys for agents/scripts. Management requires a browser session
+  // (an API key cannot mint or revoke keys).
+  { method: "POST", path: "/api/account/api-keys", handler: async (request, env) => {
+    const session = await requireSession(request, env);
+    await enforceRateLimit(env, request, "api-keys", 10, 60);
+    const payload = await readJson(request);
+    return jsonResponse(await createApiKey(env, session, payload?.label));
+  } },
+
+  { method: "GET", path: "/api/account/api-keys", handler: async (request, env) => {
+    const session = await requireSession(request, env);
+    return jsonResponse(await listApiKeys(env, session));
+  } },
+
+  { method: "DELETE", path: /^\/api\/account\/api-keys\/([^/]+)$/, handler: async (request, env, ctx, { params }) => {
+    const session = await requireSession(request, env);
+    return jsonResponse(await revokeApiKey(env, session, decodeURIComponent(params[1])));
+  } },
+
+  // Discovery: the single thing a human points an agent at.
+  { method: "GET", path: "/llms.txt", handler: (request, env, ctx, { url }) =>
+    new Response(renderLlmsTxt(url.origin), { headers: { "content-type": "text/plain; charset=utf-8" } }) },
+
+  { method: "GET", path: "/.well-known/inat-battler.json", handler: (request, env, ctx, { url }) =>
+    jsonResponse(renderAgentManifest(url.origin)) },
+
   { method: "GET", path: "/api/bsky/typeahead", handler: async (request, env, ctx, { url }) => {
     const actors = await searchActorsTypeahead(url.searchParams.get("q"), 8);
     return jsonResponse({ actors });
@@ -5696,6 +5734,12 @@ function sessionCookieHeader(token, maxAgeSeconds) {
 }
 
 async function getSession(request, env) {
+  // Non-browser clients (agents, scripts, MCP) authenticate with a personal API
+  // key as a Bearer token; it maps to the same account record as the cookie
+  // session. See docs/agent-player-integration-plan.md.
+  const bearer = readBearerToken(request);
+  if (bearer) return getSessionFromApiKey(env, bearer);
+
   const token = readCookie(request, SESSION_COOKIE);
   if (!token) return null;
 
@@ -5716,7 +5760,119 @@ async function getSession(request, env) {
     await env.DB.prepare("DELETE FROM oauth_sessions WHERE session_id = ?").bind(sessionId).run();
     return null;
   }
+  row.via = "cookie";
   return row;
+}
+
+function readBearerToken(request) {
+  const header = request.headers.get("authorization") || request.headers.get("Authorization");
+  if (!header) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match ? match[1].trim() : null;
+}
+
+const API_KEY_PREFIX = "ibat_";
+
+async function getSessionFromApiKey(env, token) {
+  if (!token || !token.startsWith(API_KEY_PREFIX)) return null;
+
+  const keyHash = await sha256Hex(token);
+  const row = await env.DB.prepare(`
+    SELECT
+      k.api_key_id, k.scopes, k.revoked_at,
+      a.did, a.handle, a.display_name, a.avatar_url,
+      a.inat_login, a.inat_user_id,
+      a.inat_pending_login, a.inat_verification_code
+    FROM api_keys k
+    JOIN accounts a ON a.did = k.did
+    WHERE k.key_hash = ?
+  `).bind(keyHash).first();
+
+  if (!row || row.revoked_at) return null;
+
+  // Best-effort usage timestamp; never block the request on it.
+  try {
+    await env.DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE api_key_id = ?")
+      .bind(new Date().toISOString(), row.api_key_id).run();
+  } catch (_) { /* ignore */ }
+
+  row.via = "api_key";
+  row.scopes = row.scopes || "full";
+  return row;
+}
+
+function requireCookieSession(session) {
+  // Key management and other identity-sensitive operations must come from a real
+  // browser session, so an API key cannot mint or revoke other API keys.
+  if (!session || session.via === "api_key") {
+    throw httpError("This action requires a signed-in browser session", 403);
+  }
+  return session;
+}
+
+function generateApiKeyToken() {
+  const alphabet = "abcdefghijkmnpqrstuvwxyz23456789";
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const body = Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+  return `${API_KEY_PREFIX}${body}`;
+}
+
+async function createApiKey(env, session, rawLabel) {
+  requireCookieSession(session);
+  const label = String(rawLabel ?? "").trim().slice(0, 60) || "API key";
+
+  const existing = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM api_keys WHERE did = ? AND revoked_at IS NULL"
+  ).bind(session.did).first();
+  if (Number(existing?.n ?? 0) >= 20) {
+    throw httpError("You already have the maximum number of active API keys. Revoke one first.", 400);
+  }
+
+  const token = generateApiKeyToken();
+  const keyHash = await sha256Hex(token);
+  const apiKeyId = (crypto.randomUUID && crypto.randomUUID()) || keyHash.slice(0, 32);
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    INSERT INTO api_keys (api_key_id, did, key_hash, label, scopes, created_at)
+    VALUES (?, ?, ?, ?, 'full', ?)
+  `).bind(apiKeyId, session.did, keyHash, label, now).run();
+
+  // The plaintext token is returned exactly once and never stored.
+  return { apiKeyId, label, createdAt: now, token };
+}
+
+async function listApiKeys(env, session) {
+  requireCookieSession(session);
+  const rows = await env.DB.prepare(`
+    SELECT api_key_id, label, scopes, created_at, last_used_at
+    FROM api_keys
+    WHERE did = ? AND revoked_at IS NULL
+    ORDER BY created_at DESC
+  `).bind(session.did).all();
+
+  return {
+    keys: (rows.results ?? []).map((row) => ({
+      apiKeyId: row.api_key_id,
+      label: row.label,
+      scopes: row.scopes,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at
+    }))
+  };
+}
+
+async function revokeApiKey(env, session, apiKeyId) {
+  requireCookieSession(session);
+  const now = new Date().toISOString();
+  const res = await env.DB.prepare(`
+    UPDATE api_keys SET revoked_at = ?
+    WHERE api_key_id = ? AND did = ? AND revoked_at IS NULL
+  `).bind(now, String(apiKeyId ?? ""), session.did).run();
+
+  if (!res?.meta?.changes) throw httpError("API key not found", 404);
+  return { apiKeyId, revoked: true };
 }
 
 async function requireSession(request, env) {
@@ -6054,6 +6210,211 @@ async function getMe(request, env) {
     allowHighlightBot,
     pendingChallenges: Number(pending?.pending ?? 0)
   };
+}
+
+// The default "wake up and decide" endpoint for humans, mobile clients, scripts,
+// and agents. Aggregates the cross-tab state an agent needs so it does not have
+// to crawl five endpoints. See docs/agent-player-integration-plan.md.
+async function getPlayerSnapshot(env, session) {
+  const userId = session.inat_login ? inatUserIdFor(session.inat_login) : null;
+  const identity = {
+    did: session.did,
+    handle: session.handle,
+    displayName: session.display_name,
+    inatLogin: session.inat_login || null,
+    userId,
+    authVia: session.via || "cookie"
+  };
+
+  if (!userId) {
+    return {
+      identity,
+      linked: false,
+      message: "No iNaturalist account linked. Link one (Settings, or the verification flow), then POST /api/import to build a roster.",
+      docs: { rules: "/api/rules", skill: "/llms.txt" }
+    };
+  }
+
+  const [summary, teams, challengesRes, used, holdingsRows] = await Promise.all([
+    getRosterSummary(env, userId, true).catch(() => null),
+    listTeams(env, userId).catch(() => []),
+    listChallengesForSession(env, session).catch(() => ({ challenges: [] })),
+    territoryActionsToday(env, userId).catch(() => 0),
+    env.DB.prepare("SELECT biome_type AS biome, COUNT(*) AS n FROM tiles WHERE owner_id = ? GROUP BY biome_type")
+      .bind(userId).all().catch(() => ({ results: [] }))
+  ]);
+
+  const challenges = challengesRes.challenges || [];
+  const incoming = challenges.filter((c) => c.direction === "incoming" && c.status === "pending");
+  const outgoing = challenges.filter((c) => c.direction === "outgoing" && c.status === "pending");
+
+  const cap = intEnv(env, "TERRITORY_DAILY_ACTION_CAP", TERRITORY_DAILY_ACTION_CAP_DEFAULT);
+  const heldTilesByBiome = {};
+  for (const row of (holdingsRows.results ?? [])) heldTilesByBiome[row.biome] = Number(row.n);
+  const heldTilesTotal = Object.values(heldTilesByBiome).reduce((a, b) => a + b, 0);
+
+  const savedTeam = Array.isArray(teams) && teams.length
+    ? { name: teams[0].name, taxonIds: teams[0].taxonIds || [], updatedAt: teams[0].updatedAt }
+    : null;
+
+  return {
+    identity,
+    linked: true,
+    roster: summary,
+    savedTeam,
+    challenges: {
+      incomingPending: incoming.length,
+      outgoingPending: outgoing.length,
+      items: challenges.slice(0, 10)
+    },
+    territory: {
+      dailyActionCap: cap,
+      actionsUsedToday: used,
+      actionsLeftToday: Math.max(0, cap - used),
+      heldTilesTotal,
+      heldTilesByBiome
+    },
+    nextSteps: buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap }),
+    docs: {
+      rules: "/api/rules",
+      startNpcBattle: "POST /api/battles/npc/start",
+      challenges: "GET /api/challenges",
+      territoryClaims: "GET /api/territory/claims",
+      skill: "/llms.txt"
+    }
+  };
+}
+
+function buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap }) {
+  const steps = [];
+  if (summary && summary.totalCount === 0) {
+    steps.push("Roster is empty — POST /api/import to pull your research-grade species.");
+  }
+  if (summary && summary.readyCount < 5) {
+    steps.push(`Only ${summary.readyCount} ready sprites; you need 5 for a team. Some may be queued (${summary.pendingCount}).`);
+  }
+  if (!savedTeam && summary && summary.readyCount >= 5) {
+    steps.push("No saved team — pick 5 ready species and POST /api/users/:userId/teams.");
+  }
+  if (incoming && incoming.length) {
+    steps.push(`${incoming.length} incoming challenge(s) pending — review GET /api/challenges and accept if you have a ready team.`);
+  }
+  if (savedTeam && summary && summary.readyCount >= 5) {
+    steps.push("Team is ready — POST /api/battles/npc/start to battle an NPC and earn rating.");
+  }
+  if ((cap - used) > 0) {
+    steps.push(`${Math.max(0, cap - used)} territory actions left today — GET /api/territory/claims for opportunities.`);
+  }
+  if (!steps.length) steps.push("Nothing urgent. Consider training favored species or contesting tiles.");
+  return steps;
+}
+
+// Machine-readable rules so agents (and the web UI) never reverse-engineer game
+// mechanics. Sourced from the real game constants in game.js.
+function getGameRules(env) {
+  return {
+    apiVersion: 1,
+    game: "iNat Battler",
+    summary: "Turn-based creature battles where each player's roster is built from their real iNaturalist research-grade observations.",
+    typeChart: TYPE_CHART,
+    terrainMoveBonus: TERRAIN_MOVE_BONUS,
+    team: { size: 5, note: "Teams must be exactly 5 species with ready sprites." },
+    training: {
+      note: "Training points are earned from observations and spent per species to raise stats; respec is supported.",
+      endpoints: ["GET /api/training", "POST /api/training/allocate", "POST /api/training/respec"]
+    },
+    territory: {
+      minLocalSpeciesToAct: intEnv(env, "TERRITORY_MIN_LOCAL_SPECIES", TERRITORY_MIN_LOCAL_SPECIES),
+      dailyActionCap: intEnv(env, "TERRITORY_DAILY_ACTION_CAP", TERRITORY_DAILY_ACTION_CAP_DEFAULT),
+      note: "Claim unowned tiles, garrison them with biome-appropriate teams, and contest defended tiles. Acting requires research-grade species observed locally."
+    },
+    spriteAssetVersion: ASSET_VERSION,
+    auth: {
+      browser: "Bluesky OAuth session cookie",
+      agent: "Authorization: Bearer ibat_... (create a personal API key in Settings -> Account)"
+    },
+    endpoints: {
+      snapshot: "GET /api/player/snapshot",
+      me: "GET /api/me",
+      roster: "GET /api/roster?userId=<id>",
+      saveTeam: "POST /api/users/:userId/teams",
+      npcBattle: "POST /api/battles/npc/start",
+      battle: "GET /api/battles/:battleId, POST /api/battles/:battleId/action",
+      challenges: "GET /api/challenges, POST /api/challenges/:id/accept",
+      territory: "GET /api/territory/claims, POST /api/territory/claim"
+    },
+    docs: "See https://github.com/mmulqu/inat_battler/blob/main/docs/agent-player-integration-plan.md"
+  };
+}
+
+const SKILL_REPO_URL = "https://github.com/mmulqu/inat_battler/tree/main/skills/inat-battler-player";
+
+function renderAgentManifest(origin) {
+  return {
+    name: "iNat Battler",
+    description: "Turn-based creature battles where each player's roster comes from their real iNaturalist research-grade observations. Agents are first-class API clients.",
+    apiVersion: 1,
+    apiBase: origin + "/api",
+    discovery: { llmsTxt: origin + "/llms.txt", rules: origin + "/api/rules" },
+    snapshot: origin + "/api/player/snapshot",
+    skill: { name: "inat-battler-player", repo: SKILL_REPO_URL },
+    auth: {
+      methods: ["bluesky_oauth_cookie", "api_key_bearer"],
+      apiKeyHeader: "Authorization: Bearer ibat_...",
+      createApiKey: "Sign in on the website, then Settings -> Account -> API keys",
+      deviceLink: "planned (POST /api/agent/link/start)"
+    },
+    docs: "https://github.com/mmulqu/inat_battler/blob/main/docs/agent-player-integration-plan.md"
+  };
+}
+
+function renderLlmsTxt(origin) {
+  return `# iNat Battler
+
+Turn-based creature battles where your roster is built from your real
+iNaturalist research-grade observations. Agents are first-class players: they use
+the same HTTP API as the website, not a separate bot mode.
+
+## Start here (agents)
+
+1. Read the rules (no auth needed):
+     GET ${origin}/api/rules
+2. Get the skill package for play policy:
+     ${SKILL_REPO_URL}
+3. Authenticate as your human. The human creates a personal API key at:
+     ${origin}  ->  Settings -> Account -> API keys
+   Send it on every request:
+     Authorization: Bearer ibat_...
+4. Decide what to do next with one call:
+     GET ${origin}/api/player/snapshot
+5. Act through the normal endpoints (see /api/rules "endpoints").
+
+If you have no credential, you can still read public data and produce
+recommendations — do not fabricate roster, observation, or battle state.
+
+## Core endpoints
+
+- GET  ${origin}/api/rules                 machine-readable game rules
+- GET  ${origin}/api/player/snapshot       aggregate "what should I do" state
+- GET  ${origin}/api/roster?userId=<id>    a player's roster (read-only)
+- POST ${origin}/api/users/:userId/teams   save a 5-species team (own account)
+- POST ${origin}/api/battles/npc/start     start an NPC battle
+- GET  ${origin}/api/battles/:id           battle state
+- POST ${origin}/api/battles/:id/action    submit a battle move
+- GET  ${origin}/api/challenges            incoming/outgoing challenges
+- GET  ${origin}/api/territory/claims      claimable/contestable tiles
+
+## Manifest
+
+${origin}/.well-known/inat-battler.json
+
+## Etiquette
+
+The human creates the real value by making observations. Play the game layer
+well, stay within daily action limits, and keep outbound social actions
+conservative: accept reasonable challenges, but do not spam challenges or post
+taunts unless the human configured them.
+`;
 }
 
 async function ensureFreshAccessToken(env, session) {
@@ -9258,8 +9619,8 @@ function corsHeaders() {
   // Origin is decided centrally in applyCors() (the fetch wrapper) against an
   // allowlist; these are the method/header parts that are origin-independent.
   return {
-    "access-control-allow-methods": "GET,POST,HEAD,OPTIONS",
-    "access-control-allow-headers": "content-type"
+    "access-control-allow-methods": "GET,POST,DELETE,HEAD,OPTIONS",
+    "access-control-allow-headers": "content-type,authorization"
   };
 }
 
@@ -9627,6 +9988,16 @@ ${APP_CSS}
             <div class="settings-subsection">
               <h4>iNaturalist link</h4>
               <div class="settings-inat-account" id="settingsInatAccount"></div>
+            </div>
+            <div class="settings-subsection">
+              <h4>API keys (for agents)</h4>
+              <p class="subtle">Personal access tokens let an AI agent or script play as you through the same API. Treat a key like a password; it is shown once. See <a href="/llms.txt" target="_blank" rel="noopener">/llms.txt</a>.</p>
+              <div class="api-key-create">
+                <input id="apiKeyLabelInput" type="text" maxlength="60" placeholder="Label (e.g. Claude pilot)">
+                <button class="secondary" id="apiKeyCreateButton" type="button">Create key</button>
+              </div>
+              <div class="api-key-reveal" id="apiKeyReveal" hidden></div>
+              <div class="api-key-list" id="apiKeyList"></div>
             </div>
             <div class="settings-actions">
               <button class="secondary" id="settingsReimportButton" type="button">Re-import roster</button>
