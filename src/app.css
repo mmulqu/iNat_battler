@@ -1970,12 +1970,6 @@
       border-radius: 8px;
       background: var(--surface-translucent);
       box-shadow: var(--shadow);
-      transform-style: preserve-3d;
-      transition: transform 260ms ease;
-    }
-
-    .card.flipped .card-inner {
-      transform: rotateY(180deg);
     }
 
     .card-actions {
@@ -2030,20 +2024,29 @@
       overflow: hidden;
       border-radius: 8px;
       background: var(--surface-translucent);
-      backface-visibility: hidden;
     }
 
+    /* The details face replaces the front instead of flipping in 3D, so text is
+       never mirrored and the sprite never bleeds through behind the stats. */
     .card-back {
       position: absolute;
       inset: 0;
-      display: grid;
+      display: none;
       grid-template-rows: auto auto 1fr;
       gap: 10px;
       padding: 12px;
+      padding-top: 40px;
       padding-bottom: 44px;
       overflow: auto;
       background: var(--surface-2);
-      transform: rotateY(180deg);
+    }
+
+    .card.flipped .card-front {
+      visibility: hidden;
+    }
+
+    .card.flipped .card-back {
+      display: grid;
     }
 
     .card-back-head {
@@ -2244,6 +2247,7 @@
       position: absolute;
       top: 8px;
       left: 8px;
+      z-index: 4;
       min-height: 24px;
       border-radius: 999px;
       padding: 4px 8px;
