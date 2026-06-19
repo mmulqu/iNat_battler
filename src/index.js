@@ -359,6 +359,12 @@ const ROUTES = [
     return jsonResponse(await confirmInatLink(env, session, ctx));
   } },
 
+  { method: "POST", path: "/api/inat/unlink", handler: async (request, env) => {
+    const session = await requireSession(request, env);
+    await enforceRateLimit(env, request, "inat-link", 15, 60);
+    return jsonResponse(await handleInatUnlink(env, session));
+  } },
+
   { method: "POST", path: "/api/my-sprites/upload", handler: async (request, env) => {
     const session = await requireSession(request, env);
     return jsonResponse(await uploadUserSprite(request, env, session));
@@ -6230,6 +6236,22 @@ async function confirmInatLink(env, session, ctx) {
   };
 }
 
+// Detach the iNaturalist link from this Bluesky identity WITHOUT deleting any
+// imported data. Roster, training, teams, ratings, and territory rows are keyed
+// by the iNat user id (inat:<login>), so re-linking the same profile restores
+// everything, and linking a different profile starts a separate roster. To
+// erase data, use /api/account/delete instead.
+async function handleInatUnlink(env, session) {
+  const now = new Date().toISOString();
+  await env.DB.prepare(`
+    UPDATE accounts
+    SET inat_login = NULL, inat_user_id = NULL, inat_verified_at = NULL,
+        inat_pending_login = NULL, inat_verification_code = NULL, updated_at = ?
+    WHERE did = ?
+  `).bind(now, session.did).run();
+  return { ok: true, unlinked: true };
+}
+
 function sanitizeChallengeMessage(rawMessage) {
   const message = String(rawMessage ?? "")
     .replace(/[\u0000-\u001f\u007f]/g, " ")
@@ -9447,6 +9469,11 @@ ${APP_CSS}
             <h2>Roster</h2>
             <span class="subtle" id="refreshLabel"></span>
           </div>
+          <div class="roster-lookup">
+            <input id="rosterLookupInput" type="search" placeholder="View another naturalist (iNaturalist username)" data-roster-lookup-enter>
+            <button class="secondary" id="rosterLookupButton" type="button">View roster</button>
+          </div>
+          <div class="roster-view-banner" id="rosterViewBanner" hidden></div>
           <div class="roster-toolbar">
             <input id="rosterSearchInput" type="search" placeholder="Search roster">
             <select id="rosterSortSelect" aria-label="Sort roster">
@@ -9600,6 +9627,10 @@ ${APP_CSS}
                 <div class="stat"><span class="subtle">Queued</span><strong id="queuedCount">0</strong></div>
                 <div class="stat"><span class="subtle">Affinity</span><strong id="bondCount">0</strong></div>
               </div>
+            </div>
+            <div class="settings-subsection">
+              <h4>iNaturalist link</h4>
+              <div class="settings-inat-account" id="settingsInatAccount"></div>
             </div>
             <div class="settings-actions">
               <button class="secondary" id="settingsReimportButton" type="button">Re-import roster</button>

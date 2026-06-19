@@ -154,6 +154,12 @@
       challenges: [],
       challengeInfo: null,
       inatLinkPending: null,
+      inatChangeOpen: false,
+      // Read-only "view another existing player's roster" mode. When viewUserId
+      // is set, the roster grid loads that user instead of state.userId (which
+      // always stays the signed-in owner) and all editing is suppressed.
+      viewUserId: null,
+      viewLabel: "",
       mySprites: [],
       training: null,
       trainingFilter: "",
@@ -221,6 +227,10 @@
       rosterModeButton: document.getElementById("rosterModeButton"),
       rosterTypeChips: document.getElementById("rosterTypeChips"),
       rosterPagination: document.getElementById("rosterPagination"),
+      rosterLookupInput: document.getElementById("rosterLookupInput"),
+      rosterLookupButton: document.getElementById("rosterLookupButton"),
+      rosterViewBanner: document.getElementById("rosterViewBanner"),
+      settingsInatAccount: document.getElementById("settingsInatAccount"),
       battlePanel: document.getElementById("battlePanel"),
       battleTabButton: document.getElementById("battleTabButton"),
       battleView: document.getElementById("battleView"),
@@ -531,6 +541,12 @@
     });
 
     els.leaderboardPanel.addEventListener("click", async (event) => {
+      const nameLink = event.target.closest("[data-view-roster]");
+      if (nameLink) {
+        await enterRosterView(nameLink.getAttribute("data-view-roster"), nameLink.getAttribute("data-view-label"));
+        return;
+      }
+
       const shareButton = event.target.closest("[data-share-rank]");
       if (!shareButton || shareButton.disabled) return;
 
@@ -690,8 +706,10 @@
     });
 
     els.rosterGrid.addEventListener("click", async (event) => {
+      // Sprite-variant preference is a write tied to the owner's account, so it
+      // is disabled while viewing another player's roster.
       const spriteButton = event.target.closest("[data-sprite-shift]");
-      if (spriteButton) {
+      if (spriteButton && !state.viewUserId) {
         event.stopPropagation();
         await chooseSpriteVariant(
           spriteButton.getAttribute("data-taxon-id"),
@@ -707,6 +725,8 @@
         return;
       }
 
+      // Team selection only applies to your own roster.
+      if (state.viewUserId) return;
       const card = event.target.closest("[data-taxon-card]");
       if (!card) return;
       toggleTeamSelection(card.getAttribute("data-taxon-id"));
@@ -714,6 +734,7 @@
 
     els.rosterGrid.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
+      if (state.viewUserId) return;
 
       const card = event.target.closest("[data-taxon-card]");
       if (!card) return;
@@ -761,6 +782,17 @@
       render();
     });
 
+    els.rosterLookupButton.addEventListener("click", lookupRosterFromInput);
+    els.rosterLookupInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        lookupRosterFromInput();
+      }
+    });
+    els.rosterViewBanner.addEventListener("click", (event) => {
+      if (event.target.closest("[data-roster-view-exit]")) exitRosterView();
+    });
+
     els.rosterTypeChips.addEventListener("click", (event) => {
       const chip = event.target.closest("[data-type-chip]");
       if (!chip) return;
@@ -804,6 +836,11 @@
     els.recentSpritesPanel.style.setProperty("--tile-min", state.recentZoom + "px");
 
     function handleBskyContainerClick(event) {
+      if (event.target.closest("[data-go-settings]")) {
+        switchView("settings");
+        return;
+      }
+
       const pick = event.target.closest("[data-typeahead-pick]");
       if (pick) {
         const input = document.getElementById(pick.getAttribute("data-input-id"));
@@ -818,6 +855,20 @@
       const button = event.target.closest("[data-bsky-action]");
       if (!button) return;
       const action = button.getAttribute("data-bsky-action");
+
+      // Instant UI toggles for the iNaturalist swap form — no network, no busy state.
+      if (action === "inat-change") {
+        state.inatChangeOpen = true;
+        renderBsky();
+        document.getElementById("inatLinkInput")?.focus();
+        return;
+      }
+      if (action === "inat-change-cancel") {
+        state.inatChangeOpen = false;
+        renderBsky();
+        return;
+      }
+
       button.disabled = true;
       button.textContent = bskyBusyButtonText(action);
       handleBskyAction(action, button.getAttribute("data-challenge-id"));
@@ -852,6 +903,9 @@
     els.homeDashboard.addEventListener("click", handleBskyContainerClick);
     els.homeDashboard.addEventListener("input", handleBskyContainerInput);
     els.homeDashboard.addEventListener("keydown", handleBskyContainerKeydown);
+    els.settingsInatAccount.addEventListener("click", handleBskyContainerClick);
+    els.settingsInatAccount.addEventListener("input", handleBskyContainerInput);
+    els.settingsInatAccount.addEventListener("keydown", handleBskyContainerKeydown);
 
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".typeahead")) closeTypeaheadLists();
@@ -1023,6 +1077,7 @@
         else if (action === "logout") await bskyLogout();
         else if (action === "inat-start") await inatLinkStart();
         else if (action === "inat-confirm") await inatLinkConfirm();
+        else if (action === "inat-unlink") await inatUnlink();
         else if (action === "challenge-send") await sendChallenge();
         else if (action === "challenge-accept") await acceptChallengeAction(challengeId);
         else if (action === "challenge-decline") await declineChallengeAction(challengeId);
@@ -1045,6 +1100,7 @@
     function bskyProgressMessage(action) {
       if (action === "inat-confirm") return "Checking your iNaturalist profile for the verification code.";
       if (action === "inat-start") return "Creating a new iNaturalist verification code.";
+      if (action === "inat-unlink") return "Unlinking your iNaturalist account.";
       if (action === "login") return "Contacting your Bluesky host.";
       if (action === "challenge-send") return "Creating and posting the Bluesky challenge.";
       if (action === "challenge-accept") return "Accepting the challenge and opening battle.";
@@ -1057,6 +1113,7 @@
     function bskyBusyButtonText(action) {
       if (action === "inat-confirm") return "Verifying...";
       if (action === "inat-start") return "Creating code...";
+      if (action === "inat-unlink") return "Unlinking...";
       if (action === "login") return "Signing in...";
       if (action === "challenge-send") return "Sending...";
       if (action === "challenge-accept") return "Accepting...";
@@ -1136,6 +1193,7 @@
       // Show the first-import welcome summary on the Home dashboard once setup
       // completes (plan step 7). Cleared when the user dismisses it.
       state.showImportSummary = true;
+      state.inatChangeOpen = false;
       state.me = {
         ...(state.me || {}),
         loggedIn: true,
@@ -1159,6 +1217,28 @@
           loadRoster().catch((error) => setStatus(error.message));
         }, 8000);
       }
+    }
+
+    async function inatUnlink() {
+      await apiFetch("/api/inat/unlink", { method: "POST" });
+      state.inatChangeOpen = false;
+      // Detach the iNat identity locally too; the roster rows stay in D1 and are
+      // restored by re-linking the same username. Mirrors refreshMe's clearing.
+      state.userId = null;
+      state.inatLogin = null;
+      localStorage.removeItem("inatBattler:userId");
+      localStorage.removeItem("inatBattler:inatLogin");
+      if (state.me) {
+        state.me.inatLogin = null;
+        state.me.inatUserId = null;
+        state.me.userId = null;
+        state.me.inatPendingLogin = null;
+        state.me.inatVerificationCode = null;
+      }
+      state.bskyMessage = "iNaturalist account unlinked. Your roster is saved — re-link the same username anytime to restore it.";
+      state.bskyMessageKind = "success";
+      setStatus("iNaturalist account unlinked.");
+      await refreshMe();
     }
 
     async function sendChallenge() {
@@ -1804,7 +1884,64 @@
       '</div>';
     }
 
+    // The iNaturalist link/swap/unlink controls live in Settings → Account.
+    function renderInatAccountBlock(me, busyAttr) {
+      if (!me || !me.loggedIn) {
+        return '<p class="subtle">Sign in with Bluesky first to link an iNaturalist account.</p>';
+      }
+
+      let html = "";
+      // Show the verify form when not linked, when the user is mid-swap (a
+      // pending login exists), or when they explicitly chose to change it.
+      const showInatForm = !me.inatLogin || state.inatChangeOpen || Boolean(me.inatPendingLogin);
+
+      if (me.inatLogin) {
+        html += '<div class="bsky-row">' +
+          '<div class="subtle">iNaturalist: <strong>' + escapeHtml(me.inatLogin) + '</strong> (verified)</div>' +
+          '<span class="bsky-row-actions">' +
+            '<button class="secondary" type="button" data-bsky-action="inat-change"' + busyAttr + '>Change</button>' +
+            '<button class="secondary" type="button" data-bsky-action="inat-unlink"' + busyAttr + '>' +
+              (state.bskyBusy && state.bskyAction === "inat-unlink" ? "Unlinking..." : "Unlink") +
+            '</button>' +
+          '</span>' +
+        '</div>';
+      }
+
+      if (showInatForm) {
+        html += '<div class="subtle">' +
+          (me.inatLogin
+            ? 'Switch to a different iNaturalist account by proving ownership (your current roster stays saved):'
+            : 'Link your iNaturalist account by proving ownership &mdash; no iNat OAuth, no write access:') +
+          '</div>' +
+          '<input id="inatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="iNaturalist username" value="' + escapeAttr(me.inatPendingLogin || "") + '">' +
+          '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : "Get verification code") +
+          '</button>';
+
+        if (me.inatPendingLogin && me.inatVerificationCode) {
+          html += '<div class="bsky-code">' + escapeHtml(me.inatVerificationCode) + '</div>' +
+            '<div class="subtle">Add this code to the profile bio of "' + escapeHtml(me.inatPendingLogin) +
+            '" in <a href="https://www.inaturalist.org/users/edit" target="_blank" rel="noopener">iNaturalist settings</a>, save, then verify. You can remove it afterwards.</div>' +
+            '<button class="primary" type="button" data-bsky-action="inat-confirm"' + busyAttr + '>' +
+              (state.bskyBusy && state.bskyAction === "inat-confirm" ? "Verifying..." : "Verify Link") +
+            '</button>';
+        }
+
+        if (me.inatLogin) {
+          html += '<button class="secondary" type="button" data-bsky-action="inat-change-cancel"' + busyAttr + '>Cancel</button>';
+        }
+      }
+
+      return html;
+    }
+
+    function renderInatSettings() {
+      if (!els.settingsInatAccount) return;
+      els.settingsInatAccount.innerHTML = renderInatAccountBlock(state.me, state.bskyBusy ? " disabled" : "");
+    }
+
     function renderBsky() {
+      renderInatSettings();
       if (!els.bskyBody) return;
       const me = state.me;
       const busyAttr = state.bskyBusy ? " disabled" : "";
@@ -1824,7 +1961,7 @@
           '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
           '</button>' +
-          '<div class="subtle">Uses Bluesky OAuth and only asks for permission to create posts.</div>';
+          '<div class="subtle">Uses AT Protocol OAuth (Bluesky and any compatible PDS) and only asks for permission to create posts.</div>';
         return;
       }
 
@@ -1836,23 +1973,14 @@
         '<button class="secondary" type="button" data-bsky-action="logout"' + busyAttr + '>Sign out</button>' +
       '</div>';
 
+      // iNaturalist linking/swap/unlink lives in Settings → Account to keep the
+      // gameplay sidebar uncluttered. Just point there from here.
       if (me.inatLogin) {
-        html += '<div class="subtle">iNaturalist: <strong>' + escapeHtml(me.inatLogin) + '</strong> (verified)</div>';
+        html += '<div class="subtle">iNaturalist: <strong>' + escapeHtml(me.inatLogin) + '</strong> &middot; ' +
+          'manage in <button type="button" class="link-button" data-go-settings>Settings</button></div>';
       } else {
-        html += '<div class="subtle">Link your iNaturalist account by proving ownership &mdash; no iNat OAuth, no write access:</div>' +
-          '<input id="inatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="iNaturalist username" value="' + escapeAttr(me.inatPendingLogin || "") + '">' +
-          '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
-            (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : "Get verification code") +
-          '</button>';
-
-        if (me.inatPendingLogin && me.inatVerificationCode) {
-          html += '<div class="bsky-code">' + escapeHtml(me.inatVerificationCode) + '</div>' +
-            '<div class="subtle">Add this code to the profile bio of "' + escapeHtml(me.inatPendingLogin) +
-            '" in <a href="https://www.inaturalist.org/users/edit" target="_blank" rel="noopener">iNaturalist settings</a>, save, then verify. You can remove it afterwards.</div>' +
-            '<button class="primary" type="button" data-bsky-action="inat-confirm"' + busyAttr + '>' +
-              (state.bskyBusy && state.bskyAction === "inat-confirm" ? "Verifying..." : "Verify Link") +
-            '</button>';
-        }
+        html += '<div class="subtle">Link your iNaturalist account in ' +
+          '<button type="button" class="link-button" data-go-settings>Settings → Account</button> to import your roster.</div>';
       }
 
       html += renderChallengeBanner();
@@ -1875,10 +2003,11 @@
     }
 
     async function loadRoster() {
-      if (!state.userId) return;
+      const rosterUserId = state.viewUserId || state.userId;
+      if (!rosterUserId) return;
 
       const params = new URLSearchParams({
-        userId: state.userId,
+        userId: rosterUserId,
         limit: String(ROSTER_PAGE_SIZE),
         offset: String((state.rosterPage - 1) * ROSTER_PAGE_SIZE)
       });
@@ -1900,8 +2029,69 @@
       }
 
       pruneSelectedTaxa();
+      updateRosterViewBanner();
       render();
       schedulePolling();
+    }
+
+    function updateRosterViewBanner() {
+      if (!els.rosterViewBanner) return;
+      document.body.dataset.viewingOther = state.viewUserId ? "1" : "";
+      if (!state.viewUserId) {
+        els.rosterViewBanner.hidden = true;
+        els.rosterViewBanner.innerHTML = "";
+        return;
+      }
+      els.rosterViewBanner.hidden = false;
+      els.rosterViewBanner.innerHTML =
+        '<span>Viewing <strong>' + escapeHtml(state.viewLabel || state.viewUserId) + '</strong>’s roster (read-only)</span>' +
+        '<button class="secondary" type="button" data-roster-view-exit>Back to my roster</button>';
+    }
+
+    async function enterRosterView(userId, label) {
+      const target = String(userId || "").trim();
+      if (!target) return;
+      // No-op if it's actually the signed-in user.
+      if (target === state.userId) {
+        await exitRosterView();
+        return;
+      }
+      state.viewUserId = target;
+      state.viewLabel = label || target.replace(/^inat:/, "");
+      state.rosterPage = 1;
+      state.activeView = "roster";
+      renderViewTabs();
+      if (els.rosterLookupInput) els.rosterLookupInput.value = "";
+      try {
+        await loadRoster();
+        if (!state.taxa.length) {
+          setStatus("No roster found for “" + state.viewLabel + "”. They may not be in iNat Battler yet.");
+        }
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
+    async function exitRosterView() {
+      if (!state.viewUserId) return;
+      state.viewUserId = null;
+      state.viewLabel = "";
+      state.rosterPage = 1;
+      try {
+        await loadRoster();
+      } catch (error) {
+        setStatus(error.message);
+      }
+    }
+
+    function lookupRosterFromInput() {
+      const raw = els.rosterLookupInput ? els.rosterLookupInput.value.trim() : "";
+      const login = raw.replace(/^@/, "").trim();
+      if (!login) {
+        setStatus("Enter an iNaturalist username to view their roster.");
+        return;
+      }
+      enterRosterView("inat:" + login.toLowerCase(), login);
     }
 
     async function reloadRosterPage(resetPage) {
@@ -1914,6 +2104,23 @@
     }
 
     async function switchView(view) {
+      // Viewing another player's roster is modal to the roster tab; any tab
+      // switch returns to the signed-in owner's data.
+      const wasViewing = Boolean(state.viewUserId);
+      if (wasViewing) {
+        state.viewUserId = null;
+        state.viewLabel = "";
+        state.rosterPage = 1;
+        updateRosterViewBanner();
+        if (state.userId) {
+          try {
+            await loadRoster();
+          } catch (error) {
+            setStatus(error.message);
+          }
+        }
+      }
+
       state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "map", "training", "settings"].includes(view) ? view : "home";
       renderViewTabs();
 
@@ -1974,6 +2181,7 @@
         const linked = !!(state.me && state.me.loggedIn && state.me.inatLogin);
         els.settingsHighlightOptIn.checked = !!(state.me && state.me.allowHighlightBot);
         els.settingsHighlightOptIn.disabled = !linked;
+        renderInatSettings();
       }
       els.battleTabButton.textContent = state.battle && state.battle.status === "active" ? "Battle ⚔" : "Battle";
 
@@ -2714,6 +2922,11 @@
     function lbDisplayName(entry) {
       const name = escapeHtml(entry.name || entry.userId);
       const handle = entry.handle ? ' <span class="subtle">@' + escapeHtml(entry.handle) + '</span>' : "";
+      if (entry.userId) {
+        const label = entry.name || entry.handle || entry.userId;
+        return '<button type="button" class="lb-name-link" data-view-roster="' + escapeAttr(entry.userId) +
+          '" data-view-label="' + escapeAttr(label) + '" title="View this naturalist’s roster">' + name + '</button>' + handle;
+      }
       return name + handle;
     }
 
@@ -3183,7 +3396,9 @@
       els.emptyState.style.display = state.taxa.length ? "none" : "grid";
       els.emptyState.textContent = hasFilters
         ? "No roster creatures match these filters."
-        : "Link your iNaturalist account, then import your roster.";
+        : state.viewUserId
+          ? "“" + (state.viewLabel || state.viewUserId) + "” isn’t in iNat Battler yet, or has no roster."
+          : "Link your iNaturalist account, then import your roster.";
       els.rosterGrid.classList.toggle("sprite-mode", state.rosterMode === "sprites");
       els.rosterModeButton.textContent = state.rosterMode === "sprites" ? "Card View" : "Sprite Grid";
       els.rosterGrid.innerHTML = state.taxa

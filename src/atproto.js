@@ -98,7 +98,7 @@ export function normalizeHandle(rawHandle) {
     .replace(/^@/, "")
     .toLowerCase();
   if (!/^[a-z0-9][a-z0-9.-]{1,250}\.[a-z]{2,}$/.test(handle)) {
-    throw new Error(`"${rawHandle}" does not look like a Bluesky handle (try name.bsky.social)`);
+    throw new Error(`"${rawHandle}" does not look like an AT Protocol handle (e.g. name.bsky.social)`);
   }
   return handle;
 }
@@ -112,9 +112,9 @@ async function fetchJson(url) {
 export async function resolveHandleToDid(handle) {
   const url = `${PUBLIC_APPVIEW_URL}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`;
   const res = await fetch(url, { headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`Could not resolve Bluesky handle @${handle}`);
+  if (!res.ok) throw new Error(`Could not resolve handle @${handle}`);
   const data = await res.json();
-  if (!data?.did) throw new Error(`Could not resolve Bluesky handle @${handle}`);
+  if (!data?.did) throw new Error(`Could not resolve handle @${handle}`);
   return data.did;
 }
 
