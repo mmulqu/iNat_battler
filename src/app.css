@@ -324,6 +324,31 @@
       line-height: 1.45;
     }
 
+    .landing-gallery[hidden] {
+      display: none;
+    }
+
+    .landing-sprites {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+      gap: 10px;
+    }
+
+    .landing-sprite {
+      display: grid;
+      place-items: center;
+      aspect-ratio: 1 / 1;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background:
+        radial-gradient(circle at 50% 38%, var(--surface-2), var(--surface-3));
+      overflow: hidden;
+    }
+
+    .landing-sprite .sheet-sprite {
+      width: 88%;
+    }
+
     .primary,
     .secondary {
       min-height: 42px;

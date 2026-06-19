@@ -9340,6 +9340,14 @@ ${APP_CSS}
         </div>
       </section>
 
+      <section class="landing-section landing-gallery" id="landingGallery" hidden>
+        <div class="landing-section-head">
+          <h3>Real species, real sprites</h3>
+          <p>Every battler is generated from an actual iNaturalist taxon. Here are some recently added to the shared library.</p>
+        </div>
+        <div class="landing-sprites" id="landingSprites" aria-hidden="true"></div>
+      </section>
+
       <section class="landing-section" id="how-it-works">
         <div class="landing-section-head">
           <h3>How It Works</h3>

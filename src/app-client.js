@@ -121,6 +121,7 @@
       treeSearch: "",
       treeZoom: Number(localStorage.getItem("inatBattler:treeZoom")) || 58,
       recentSprites: null,
+      landingSpritesLoaded: false,
       recentSearch: "",
       recentSort: "newest",
       recentGroup: "all",
@@ -169,6 +170,8 @@
       importButton: document.getElementById("importButton"),
       publicLanding: document.getElementById("publicLanding"),
       landingAuth: document.getElementById("landingAuth"),
+      landingGallery: document.getElementById("landingGallery"),
+      landingSprites: document.getElementById("landingSprites"),
       appLayout: document.getElementById("appLayout"),
       manualSpriteForm: document.getElementById("manualSpriteForm"),
       manualTaxonId: document.getElementById("manualTaxonId"),
@@ -1732,6 +1735,8 @@
 
       if (!showLanding) return;
 
+      loadLandingSprites();
+
       const busyAttr = state.bskyBusy ? " disabled" : "";
       if (!state.me) {
         els.landingAuth.innerHTML = '<div class="landing-auth-note">Checking Bluesky session...</div>';
@@ -1745,6 +1750,27 @@
           (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
         '</button>' +
         '<div class="landing-auth-note">Uses Bluesky OAuth for identity and challenge posts. iNaturalist linking happens after sign-in.</div>';
+    }
+
+    // Populate the logged-out landing with a strip of real, recently generated
+    // sprites so visitors see the actual collectible art before signing in. Loads
+    // once; failures are silent (the landing still works without it).
+    async function loadLandingSprites() {
+      if (state.landingSpritesLoaded || !els.landingSprites) return;
+      state.landingSpritesLoaded = true;
+      try {
+        const res = await apiFetch("/api/recent-sprites?limit=18");
+        const sprites = (res.sprites || []).filter((s) => s.sprite && s.sprite.url).slice(0, 18);
+        if (!sprites.length) return;
+        els.landingSprites.innerHTML = sprites.map((s) =>
+          '<div class="landing-sprite" title="' + escapeAttr(s.name || s.scientificName || "") + '">' +
+            renderSheetSprite(s.sprite.url, "anim-idle") +
+          '</div>'
+        ).join("");
+        if (els.landingGallery) els.landingGallery.hidden = false;
+      } catch (e) {
+        state.landingSpritesLoaded = false; // allow a retry on the next render
+      }
     }
 
     function renderBskyStatus() {
