@@ -8,6 +8,13 @@
       "type": "Data",
       "globs": ["**/*.png", "**/*.webp"],
       "fallthrough": true
+    },
+    {
+      // The app stylesheet and client script are extracted out of
+      // renderAppHtml() and imported as text, then inlined into the HTML.
+      "type": "Text",
+      "globs": ["**/app.css", "**/app-client.js"],
+      "fallthrough": true
     }
   ],
   "vars": {
