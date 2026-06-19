@@ -1111,13 +1111,23 @@ async function fetchSpeciesCounts(env, inatLogin) {
   return rows;
 }
 
+// Wrap fetch with an abort-on-timeout so a hung upstream (OpenAI, iNaturalist,
+// Discord, image hosts) can't stall a request. This matters most in the
+// cron/queue path, where tasks run sequentially and one hang would block the
+// rest (and can blow the whole cron's wall-clock budget). Throws on timeout.
+async function fetchWithTimeout(url, init = {}, timeoutMs = 30000) {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
+  return fetch(url, { ...init, signal });
+}
+
 async function fetchInatWithRetry(url) {
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     headers: {
       "Accept": "application/json",
       "User-Agent": INAT_USER_AGENT
     }
-  });
+  }, 15000);
 
   if (res.status !== 429) return res;
 
@@ -1127,12 +1137,12 @@ async function fetchInatWithRetry(url) {
     : 2500;
   await sleep(waitMs);
 
-  return fetch(url, {
+  return fetchWithTimeout(url, {
     headers: {
       "Accept": "application/json",
       "User-Agent": INAT_USER_AGENT
     }
-  });
+  }, 15000);
 }
 
 async function readSpeciesCountsCache(env, cacheKey) {
@@ -2634,13 +2644,13 @@ async function uploadOpenAIBatchFile(env, jsonl, filename) {
   form.append("purpose", "batch");
   form.append("file", new Blob([jsonl], { type: "application/jsonl" }), filename);
 
-  const response = await fetch("https://api.openai.com/v1/files", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/files", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${env.OPENAI_API_KEY}`
     },
     body: form
-  });
+  }, 60000);
 
   if (!response.ok) {
     const text = await response.text();
@@ -2651,7 +2661,7 @@ async function uploadOpenAIBatchFile(env, jsonl, filename) {
 }
 
 async function createOpenAIBatch(env, inputFileId, endpoint, metadata) {
-  const response = await fetch("https://api.openai.com/v1/batches", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/batches", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
@@ -2663,7 +2673,7 @@ async function createOpenAIBatch(env, inputFileId, endpoint, metadata) {
       completion_window: "24h",
       metadata
     })
-  });
+  }, 30000);
 
   if (!response.ok) {
     const text = await response.text();
@@ -2859,11 +2869,11 @@ async function syncPendingSpriteBatches(
 }
 
 async function retrieveOpenAIBatch(env, batchId) {
-  const response = await fetch(`https://api.openai.com/v1/batches/${encodeURIComponent(batchId)}`, {
+  const response = await fetchWithTimeout(`https://api.openai.com/v1/batches/${encodeURIComponent(batchId)}`, {
     headers: {
       "Authorization": `Bearer ${env.OPENAI_API_KEY}`
     }
-  });
+  }, 30000);
 
   if (!response.ok) {
     const text = await response.text();
@@ -2891,11 +2901,11 @@ async function updateStoredSpriteBatch(env, batch) {
 }
 
 async function* streamOpenAIFileJsonlLines(env, fileId) {
-  const response = await fetch(`https://api.openai.com/v1/files/${encodeURIComponent(fileId)}/content`, {
+  const response = await fetchWithTimeout(`https://api.openai.com/v1/files/${encodeURIComponent(fileId)}/content`, {
     headers: {
       "Authorization": `Bearer ${env.OPENAI_API_KEY}`
     }
-  });
+  }, 120000);
 
   if (!response.ok) {
     const text = await response.text();
@@ -3334,7 +3344,7 @@ async function generateMovesForTaxon(env, taxonId, options = {}) {
     imageDataUrl: options.imageDataUrl || null
   });
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  const res = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       authorization: `Bearer ${env.OPENAI_API_KEY}`,
@@ -3345,7 +3355,7 @@ async function generateMovesForTaxon(env, taxonId, options = {}) {
       messages,
       response_format: { type: "json_object" }
     })
-  });
+  }, 60000);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw httpError(`OpenAI chat failed (${res.status}): ${text.slice(0, 200)}`, 502);
@@ -6920,10 +6930,10 @@ async function proxyAvatar(rawUrl) {
   if (target.protocol !== "https:" || !allowed) {
     return new Response("forbidden host", { status: 403 });
   }
-  const upstream = await fetch(target.toString(), {
+  const upstream = await fetchWithTimeout(target.toString(), {
     headers: { accept: "image/*" },
     cf: { cacheTtl: 86400, cacheEverything: true }
-  });
+  }, 15000);
   if (!upstream.ok) return new Response("upstream error", { status: 502 });
   const headers = new Headers();
   headers.set("content-type", upstream.headers.get("content-type") || "image/jpeg");
@@ -7943,11 +7953,11 @@ async function postSpriteToDiscordQA(env, { submissionId, taxonLabel, inatLogin,
     `${submissionId}.${extensionForContentType(contentType)}`
   );
 
-  const res = await fetch(`${DISCORD_API_URL}/channels/${channelId}/messages`, {
+  const res = await fetchWithTimeout(`${DISCORD_API_URL}/channels/${channelId}/messages`, {
     method: "POST",
     headers: { authorization: `Bot ${token}` },
     body: form
-  });
+  }, 15000);
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     throw new Error(`Discord post failed (${res.status}): ${detail.slice(0, 180)}`);
@@ -7958,9 +7968,10 @@ async function postSpriteToDiscordQA(env, { submissionId, taxonLabel, inatLogin,
 
 async function fetchDiscordDecision(env, row) {
   const { token } = discordConfig(env);
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `${DISCORD_API_URL}/channels/${row.discord_channel_id}/messages/${row.discord_message_id}`,
-    { headers: { authorization: `Bot ${token}` } }
+    { headers: { authorization: `Bot ${token}` } },
+    15000
   );
   if (res.status === 404) return { decision: null, error: "QA message was deleted on Discord" };
   if (!res.ok) return { decision: null, error: `Discord read failed (${res.status})` };
@@ -8531,7 +8542,7 @@ async function generateSpriteWithOpenAI(env, promptSpec, referenceImages = []) {
     ? openAIImageEditRequest(apiKey, model, prompt, size, quality, outputFormat, background, imageReferences)
     : openAIImageGenerationRequest(apiKey, model, prompt, size, quality, outputFormat, background);
 
-  const res = await fetch(endpoint, request);
+  const res = await fetchWithTimeout(endpoint, request, 120000);
 
   if (!res.ok) {
     const text = await res.text();
@@ -8663,9 +8674,9 @@ async function loadSpeciesPhotoReferenceImage(env, taxon) {
   if (!sourceUrl || !isSafeReferenceImageUrl(sourceUrl)) return null;
 
   try {
-    const response = await fetch(sourceUrl, {
+    const response = await fetchWithTimeout(sourceUrl, {
       headers: { "User-Agent": "taxa-battler/0.1" }
-    });
+    }, 20000);
 
     if (!response.ok) return null;
 
