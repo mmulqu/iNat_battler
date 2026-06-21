@@ -2383,19 +2383,18 @@
         try {
           state.biomeLayer = protomapsL.leafletLayer({
             // ?v bumps when the tileset is rebuilt, to bust browser/edge cache.
-            url: "/tiles/biomes.pmtiles?v=2",
-            // PMTiles (res2/res3) paints the fast world→regional view; the local
-            // res5 grid (API, claimable) takes over at z>=8. Data caps at z7, but
-            // we let it PAINT through z9 (overzoomed) as a fallback: PMTiles lives
-            // in Leaflet's tilePane (below the overlayPane res5 hexes), so when the
-            // res5 grid loads it overlays cleanly, and when a wide z8/z9 viewport
-            // exceeds the res5 cell cap (returns tooMany) the coarse biome still
-            // shows instead of a blank gap between the medium and finest scales.
-            maxDataZoom: 7,
+            url: "/tiles/biomes.pmtiles?v=3",
+            // The archive now carries crisp biome hexes at every scale: res2 (z0-4),
+            // res3 (z5-7), res5 (z8-11). PMTiles is range-read, so each view only
+            // pulls its viewport's tiles. It lives in Leaflet's tilePane, below the
+            // overlayPane res5 claimable grid (API) — so the biome fill paints the
+            // base and the interactive claimable hexes overlay cleanly on top, with
+            // no blank gap when a wide viewport exceeds the res5 API cell cap.
+            maxDataZoom: 11,
             paintRules: [{
               dataLayer: "biomes",
               minzoom: 0,
-              maxzoom: 9,
+              maxzoom: 15,
               symbolizer: new protomapsL.PolygonSymbolizer({
                 fill: (z, f) => biomeColor(f.props.biome),
                 opacity: 0.5
