@@ -3601,6 +3601,22 @@
       word-break: break-all;
     }
 
+    .api-key-reveal-row {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .api-key-reveal-row .api-key-token {
+      flex: 1;
+      margin-top: 0;
+    }
+
+    .api-key-reveal-row button {
+      flex: none;
+    }
+
     .api-key-list {
       display: flex;
       flex-direction: column;

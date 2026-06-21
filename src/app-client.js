@@ -916,6 +916,14 @@
       const button = event.target.closest("[data-revoke-key]");
       if (button) revokeApiKeyById(button.getAttribute("data-revoke-key"));
     });
+    if (els.apiKeyReveal) {
+      els.apiKeyReveal.addEventListener("click", (event) => {
+        const button = event.target.closest("#apiKeyCopyButton");
+        if (!button) return;
+        const token = els.apiKeyReveal.querySelector(".api-key-token");
+        if (token) copyWithFeedback(token.textContent, button);
+      });
+    }
 
     document.addEventListener("click", (event) => {
       if (!event.target.closest(".typeahead")) closeTypeaheadLists();
@@ -1867,6 +1875,18 @@
         '<div class="landing-auth-note">Uses Bluesky OAuth for identity and challenge posts. iNaturalist linking happens after sign-in.</div>';
     }
 
+    // Write text to the clipboard and briefly flip a button's label to "Copied!".
+    async function copyWithFeedback(text, btn) {
+      try {
+        await navigator.clipboard.writeText(text);
+        const prev = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = prev; }, 1500);
+      } catch (_) {
+        setStatus("Copy failed — select the text and copy it manually.");
+      }
+    }
+
     // Fill the "play with an AI agent" prompt with this deploy's origin and wire
     // its copy button. Runs once; the prompt lives in the static landing markup.
     function setupAgentPrompt() {
@@ -2019,7 +2039,10 @@
         els.apiKeyReveal.hidden = false;
         els.apiKeyReveal.innerHTML =
           '<p><strong>Copy this key now — it will not be shown again:</strong></p>' +
-          '<code class="api-key-token">' + escapeHtml(res.token) + '</code>';
+          '<div class="api-key-reveal-row">' +
+            '<code class="api-key-token">' + escapeHtml(res.token) + '</code>' +
+            '<button class="secondary" type="button" id="apiKeyCopyButton">Copy</button>' +
+          '</div>';
         setStatus("API key created.");
         await loadApiKeys();
       } catch (error) {
