@@ -722,29 +722,39 @@
         return;
       }
 
-      const detailsButton = event.target.closest("[data-card-details]");
-      if (detailsButton) {
+      // The corner toggle builds your team; it must not also flip the card.
+      const selectButton = event.target.closest("[data-card-select]");
+      if (selectButton) {
         event.stopPropagation();
-        toggleCardFlip(detailsButton.getAttribute("data-taxon-id"));
+        if (!selectButton.disabled) toggleTeamSelection(selectButton.getAttribute("data-taxon-id"));
         return;
       }
 
-      // Team selection only applies to your own roster.
-      if (state.viewUserId) return;
       const card = event.target.closest("[data-taxon-card]");
       if (!card) return;
-      toggleTeamSelection(card.getAttribute("data-taxon-id"));
+      // Card view: a click anywhere flips between sprite and stats (both ways).
+      // Sprite-grid view has no back face, so a click there picks the team.
+      if (state.rosterMode === "cards") {
+        toggleCardFlip(card.getAttribute("data-taxon-id"));
+      } else if (!state.viewUserId) {
+        toggleTeamSelection(card.getAttribute("data-taxon-id"));
+      }
     });
 
     els.rosterGrid.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
-      if (state.viewUserId) return;
-
+      // Let focusable controls (the select toggle, sprite arrows) handle their own
+      // keys; only the card itself flips/selects.
+      if (event.target.closest("[data-card-select], [data-sprite-shift]")) return;
       const card = event.target.closest("[data-taxon-card]");
       if (!card) return;
-
       event.preventDefault();
-      toggleTeamSelection(card.getAttribute("data-taxon-id"));
+      // Mirror click: flip in card view, select in sprite view.
+      if (state.rosterMode === "cards") {
+        toggleCardFlip(card.getAttribute("data-taxon-id"));
+      } else if (!state.viewUserId) {
+        toggleTeamSelection(card.getAttribute("data-taxon-id"));
+      }
     });
 
     els.rosterSearchInput.addEventListener("input", debounce(() => {
@@ -4101,10 +4111,22 @@
       const badge = isReady ? "ready" : status;
       const types = Array.isArray(taxon.types) ? taxon.types.join(" / ") : (taxon.iconicTaxon || "Life");
 
-      return '<article class="card ' + (isFlipped ? "flipped " : "") + (isSelected ? "selected " : "") + (!isReady ? "unselectable" : "") + '" data-taxon-card data-taxon-id="' + escapeAttr(taxonId) + '" tabindex="0" role="button" aria-pressed="' + String(isSelected) + '" aria-label="' + escapeAttr((taxon.name || taxon.scientificName || "Taxon") + " combat selection") + '">' +
+      // Selection (building your team of 5) is its own corner toggle so the rest
+      // of the card is free to flip on click. Only shown on your own roster.
+      const selectControl = state.viewUserId
+        ? ""
+        : '<button class="select-mark" type="button" data-card-select data-taxon-id="' + escapeAttr(taxonId) + '"' +
+            (isReady ? "" : " disabled") +
+            ' aria-pressed="' + String(isSelected) + '" aria-label="' + (isSelected ? "Remove from team" : "Add to team") + '"' +
+            ' title="' + (isSelected ? "In your team — click to remove" : "Add to your team") + '">' +
+            (isSelected ? "✓" : "+") +
+          '</button>';
+      const flipHint = '<span class="card-flip-hint" aria-hidden="true">' + (isFlipped ? "↩ sprite" : "stats ↻") + '</span>';
+
+      return '<article class="card ' + (isFlipped ? "flipped " : "") + (isSelected ? "selected " : "") + (!isReady ? "unselectable" : "") + '" data-taxon-card data-taxon-id="' + escapeAttr(taxonId) + '" tabindex="0" role="button" aria-pressed="' + String(isFlipped) + '" aria-label="' + escapeAttr((taxon.name || taxon.scientificName || "Taxon") + " — click to flip between sprite and stats") + '">' +
         '<div class="card-inner">' +
           '<span class="badge">' + escapeHtml(badge) + '</span>' +
-          '<div class="select-mark" aria-hidden="true">' + (isSelected ? "OK" : "") + '</div>' +
+          selectControl +
           '<div class="card-face card-front">' +
             '<div class="sprite ' + (isReady ? "ready" : "") + '">' +
               image +
@@ -4122,15 +4144,11 @@
                 '<span class="chip">Affinity ' + Number(affinityLevel(taxon) || 0) + '</span>' +
               '</div>' +
             '</div>' +
-            '<div class="card-actions">' +
-              '<button class="card-action" type="button" data-card-details data-taxon-id="' + escapeAttr(taxonId) + '">Details</button>' +
-            '</div>' +
+            flipHint +
           '</div>' +
           '<div class="card-face card-back">' +
             renderCardBack(taxon, types) +
-            '<div class="card-actions">' +
-              '<button class="card-action" type="button" data-card-details data-taxon-id="' + escapeAttr(taxonId) + '">Roster</button>' +
-            '</div>' +
+            flipHint +
           '</div>' +
         '</div>' +
       '</article>';

@@ -2038,7 +2038,7 @@
       position: absolute;
       top: 8px;
       right: 8px;
-      z-index: 4;
+      z-index: 5;
       display: grid;
       place-items: center;
       width: 28px;
@@ -2050,14 +2050,54 @@
       font-weight: 900;
     }
 
+    /* Card view: the mark is an interactive team toggle showing +/✓. (Sprite
+       view keeps a non-interactive div mark and shows selection via the border.) */
+    button.select-mark {
+      padding: 0;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      transition: transform 0.08s ease, background 0.12s ease, color 0.12s ease;
+    }
+
+    button.select-mark:hover {
+      transform: scale(1.12);
+      border-color: var(--teal);
+      color: var(--teal);
+    }
+
     .card.selected .select-mark {
       border-color: var(--teal);
       background: var(--teal);
       color: white;
     }
 
-    .card.unselectable .select-mark {
+    .card.selected .select-mark:hover {
+      color: white;
+    }
+
+    .card.unselectable .select-mark,
+    .select-mark:disabled {
       opacity: 0.42;
+      cursor: default;
+    }
+
+    /* Subtle hint that the whole card flips on click (sprite ⇄ stats). */
+    .card-flip-hint {
+      position: absolute;
+      bottom: 6px;
+      right: 8px;
+      z-index: 3;
+      pointer-events: none;
+      font-size: 10px;
+      letter-spacing: 0.02em;
+      color: var(--muted);
+      opacity: 0.7;
+    }
+
+    .card:hover .card-flip-hint {
+      opacity: 1;
     }
 
     .card-face {
@@ -2078,13 +2118,18 @@
       gap: 10px;
       padding: 12px;
       padding-top: 40px;
-      padding-bottom: 44px;
+      padding-bottom: 22px;
       overflow: auto;
       background: var(--surface-2);
     }
 
     .card.flipped .card-front {
       visibility: hidden;
+    }
+
+    /* unselectable = can't join a team (no sprite yet), but still flippable. */
+    .card.unselectable {
+      cursor: pointer;
     }
 
     .card.flipped .card-back {
