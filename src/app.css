@@ -328,6 +328,48 @@
       display: none;
     }
 
+    .landing-agent .landing-steps {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .agent-prompt {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--surface-2);
+    }
+
+    .agent-prompt-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 10px 8px 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .agent-prompt-bar button {
+      flex: none;
+    }
+
+    .agent-prompt-text {
+      margin: 0;
+      padding: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.86rem;
+      line-height: 1.55;
+      color: var(--ink);
+    }
+
+    .agent-prompt-note {
+      margin: 10px 2px 0;
+      font-size: 0.85rem;
+    }
+
     .landing-sprites {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
@@ -3738,7 +3780,8 @@
       }
 
       .landing-steps,
-      .landing-trust {
+      .landing-trust,
+      .landing-agent .landing-steps {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 

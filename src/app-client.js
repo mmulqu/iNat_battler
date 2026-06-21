@@ -1850,6 +1850,7 @@
       if (!showLanding) return;
 
       loadLandingSprites();
+      setupAgentPrompt();
 
       const busyAttr = state.bskyBusy ? " disabled" : "";
       if (!state.me) {
@@ -1864,6 +1865,32 @@
           (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
         '</button>' +
         '<div class="landing-auth-note">Uses Bluesky OAuth for identity and challenge posts. iNaturalist linking happens after sign-in.</div>';
+    }
+
+    // Fill the "play with an AI agent" prompt with this deploy's origin and wire
+    // its copy button. Runs once; the prompt lives in the static landing markup.
+    function setupAgentPrompt() {
+      if (state.agentPromptReady) return;
+      const pre = document.getElementById("agentPromptText");
+      const btn = document.getElementById("copyAgentPrompt");
+      if (!pre || !btn) return;
+      state.agentPromptReady = true;
+      pre.textContent = pre.textContent.replace(/__ORIGIN__/g, location.origin);
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(pre.textContent);
+          const prev = btn.textContent;
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = prev; }, 1500);
+        } catch (_) {
+          // Clipboard blocked: select the text so the user can copy manually.
+          const range = document.createRange();
+          range.selectNodeContents(pre);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      });
     }
 
     // Populate the logged-out landing with a strip of real, recently generated

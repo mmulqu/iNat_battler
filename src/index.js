@@ -10275,6 +10275,35 @@ ${APP_CSS}
         </div>
       </section>
 
+      <section class="landing-section landing-agent" id="play-with-agent">
+        <div class="landing-section-head">
+          <h3>Play with an AI agent</h3>
+          <p>iNat Battler is also an API. Point your own coding agent — Claude Code, Codex, or any MCP/HTTP agent — at it and it plays for you: builds a team, battles NPCs, and claims territory while you observe nature.</p>
+        </div>
+        <div class="landing-steps">
+          <div class="landing-step">
+            <strong>1. Make an API key</strong>
+            <span>After signing in: Settings → Account → API keys (an <code>ibat_…</code> token).</span>
+          </div>
+          <div class="landing-step">
+            <strong>2. Paste the prompt</strong>
+            <span>Drop it into your agent and swap in your key. No install required.</span>
+          </div>
+          <div class="landing-step">
+            <strong>3. It plays</strong>
+            <span>The agent reads the rules, checks your state, and acts via the API.</span>
+          </div>
+        </div>
+        <div class="agent-prompt">
+          <div class="agent-prompt-bar">
+            <span class="subtle">Copy this into your agent</span>
+            <button class="secondary" type="button" id="copyAgentPrompt">Copy</button>
+          </div>
+          <pre class="agent-prompt-text" id="agentPromptText">Be my iNat Battler player-agent. Read __ORIGIN__/llms.txt for the rules and API, authenticate with my key ibat_YOUR_KEY_HERE, then GET /api/player/snapshot and play for me — pick a team, battle NPCs, and claim/defend territory via the API. Keep calls token-efficient.</pre>
+          <p class="subtle agent-prompt-note">Replace <code>ibat_YOUR_KEY_HERE</code> with your key. Want richer, installable play knowledge? Add the skill from the repo: <a href="https://github.com/mmulqu/inat_battler/tree/main/skills/inat-battler-player" target="_blank" rel="noopener">inat-battler-player</a>.</p>
+        </div>
+      </section>
+
       <section class="landing-section">
         <div class="landing-section-head">
           <h3>Privacy &amp; trust</h3>
