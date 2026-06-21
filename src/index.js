@@ -903,7 +903,8 @@ const ROUTES = [
     }
     const npcTemplate = String(payload.npcTemplate ?? "backyard_beginner");
     const difficulty = ["easy", "normal", "hard"].includes(payload.difficulty) ? payload.difficulty : "normal";
-    return jsonResponse(await startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty));
+    const battle = await startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty);
+    return jsonResponse(wantsCompactBattle(request, payload) && !battle?.error ? compactBattleView(battle) : battle);
   } },
 
   { method: "POST", path: "/api/battles/demo/start", handler: async (request, env) =>
@@ -967,9 +968,11 @@ const ROUTES = [
       String(payload.moveId ?? ""),
       payload.switchIndex
     );
-    // Include the next legal actions inline so an agent can keep playing without a
-    // follow-up GET /actions each turn. Best-effort; never block the move on it.
     if (result && !result.error) {
+      // Compact callers (agents) get the next actions + log tail without the full
+      // replay/teams (~9K tokens/turn). Full callers (web) get state + inline
+      // actions so they can keep playing without a follow-up GET either.
+      if (wantsCompactBattle(request, payload)) return jsonResponse(compactBattleView(result));
       try { result.actions = getBattleActions(result); } catch { /* ignore */ }
     }
     return jsonResponse(result);
@@ -6430,8 +6433,8 @@ function getGameRules(env) {
       roster: "GET /api/roster?userId=<id>",
       resolveSpecies: "GET /api/roster?userId=<id>&taxonIds=1,2,3 (resolve specific taxon ids to full cards)",
       saveTeam: "POST /api/users/:userId/teams",
-      npcBattle: "POST /api/battles/npc/start (omit taxonIds to use your saved team)",
-      battle: "GET /api/battles/:battleId, GET /api/battles/:battleId/actions, POST /api/battles/:battleId/action (response includes next actions inline)",
+      npcBattle: "POST /api/battles/npc/start (omit taxonIds to use your saved team; compact response for API-key callers)",
+      battle: "GET /api/battles/:battleId, GET /api/battles/:battleId/actions, POST /api/battles/:battleId/action (API-key callers get a compact view + next actions by default; view:'full' for full state)",
       challenges: "GET /api/challenges, POST /api/challenges/:id/accept",
       territory: "GET /api/territory/holdings (your tiles + garrisons), GET /api/territory/candidates?kind=claim|contest, GET /api/territory/tile?h3=<cell>, GET /api/territory/claims, POST /api/territory/sync, POST /api/territory/claim, POST /api/territory/garrison, POST /api/territory/contest"
     },
@@ -6552,6 +6555,30 @@ function getBattleActions(state) {
   return { ...base, moves, switches };
 }
 
+// Token-efficient battle view for agents: the decision-relevant state plus the
+// next legal actions and a short log tail — without the full replay payload and
+// both full teams (which together are ~35KB / ~9K tokens every turn). The web
+// client still gets the full state; agents (or any caller passing view=compact)
+// get this. Fall back to GET /api/battles/:id for the complete state if needed.
+function compactBattleView(state, logTail = 8) {
+  const view = getBattleActions(state);
+  view.difficulty = state.difficulty ?? null;
+  view.log = Array.isArray(state.log) ? state.log.slice(-logTail) : [];
+  if (state.status && state.status !== "active") view.result = state.status;
+  view.fullStateUrl = `/api/battles/${state.battleId}`;
+  return view;
+}
+
+// Decide whether a battle response should be the compact agent view. Explicit
+// view=compact|full wins; otherwise default compact for API-key (agent) callers
+// so the web (cookie) keeps the full state it renders from.
+function wantsCompactBattle(request, payload) {
+  const v = payload?.view ?? new URL(request.url).searchParams.get("view");
+  if (v === "compact") return true;
+  if (v === "full") return false;
+  return Boolean(readBearerToken(request));
+}
+
 function battleCreatureBrief(creature) {
   return {
     taxonId: creature.taxonId,
@@ -6621,6 +6648,7 @@ async function getTerritoryCandidates(env, session, kind) {
       const score = localSpecies + (biomeHoldings === 0 ? 8 : 0);
       candidates.push({
         h3, biome,
+        centroid: tileCentroid(h3),
         favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
         ownership: "unowned",
         localSpecies,
@@ -6636,6 +6664,7 @@ async function getTerritoryCandidates(env, session, kind) {
       const score = localSpecies + Math.max(0, 12 - defenseStrength) + (biomeHoldings === 0 ? 4 : 0);
       candidates.push({
         h3, biome,
+        centroid: tileCentroid(h3),
         favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
         ownership: "owned_by_other",
         owner: ownerDisplayName(owner),
@@ -7834,6 +7863,7 @@ async function getTerritoryTileDetail(env, session, h3) {
   return {
     h3,
     biome,
+    centroid: tileCentroid(h3),
     owner: ownerDisplayName(ownerId),
     mine,
     owned: Boolean(ownerId),

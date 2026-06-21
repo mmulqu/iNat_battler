@@ -54,10 +54,14 @@ All examples below omit the host. Replace `:userId` with your own `userId`
   `notes`) and `switches[]` (`switchIndex`, `hpPct`, `matchupHint`). Prefer this
   over parsing raw state.
 - `POST /api/battles/:battleId/action` — body `{ "moveId": "..." }` or
-  `{ "switchIndex": N }`. You may only act in a battle you own. The response is
-  the updated battle state **with the next legal `actions` inline**, so you can
-  loop action→action without a separate GET each turn. Stop when `status` is no
-  longer `active` (`won` / `lost`).
+  `{ "switchIndex": N }`. You may only act in a battle you own. **For API-key
+  callers the response defaults to a compact view** (`status`, `turn`, `terrain`,
+  `active`, `opponent`, `log` tail, and the next legal `actions`) — ~600 tokens
+  instead of ~10K, since the full battle state (replay + both teams) is omitted.
+  Loop action→action without a separate GET each turn; stop when `status` is no
+  longer `active` (`won` / `lost`). Pass `view: "full"` for the complete state, or
+  `GET /api/battles/:id` any time. `POST /api/battles/npc/start` uses the same
+  compact-by-default behavior.
 
 ## Challenges (write: challenge / share)
 
@@ -76,7 +80,8 @@ All examples below omit the host. Replace `:userId` with your own `userId`
   you find and manage what you hold — the snapshot only gives counts, and
   `/api/territory/claims` is a map layer of every owner.
 - `GET /api/territory/candidates?kind=claim|contest` — ranked, eligible targets
-  with `h3`, `biome`, `favoredTypes`, `localSpecies`, `defenders`/`defenseStrength`
+  with `h3`, `centroid` ([lat, lng] — where the tile is in the real world),
+  `biome`, `favoredTypes`, `localSpecies`, `defenders`/`defenseStrength`
   (contest), `biomeHoldings`, `canActToday`, and a `score`. Use this to find
   targets — `/api/territory/claims` only shows who already owns what.
 - `GET /api/territory/tile?h3=<cell>` — one tile's detail, including
