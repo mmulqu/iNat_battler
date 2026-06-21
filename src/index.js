@@ -487,6 +487,13 @@ const ROUTES = [
     return jsonResponse(await getTerritoryCandidates(env, session, url.searchParams.get("kind")));
   } },
 
+  // Tiles the agent owns, with each tile's current garrison resolved to species
+  // and a needsGarrison flag. The "manage what I hold" endpoint.
+  { method: "GET", path: "/api/territory/holdings", handler: async (request, env) => {
+    const session = await requireSession(request, env);
+    return jsonResponse(await getTerritoryHoldings(env, session));
+  } },
+
   { method: "GET", path: "/api/territory/tile", handler: async (request, env, ctx, { url }) => {
     const session = await requireSession(request, env);
     return jsonResponse(await getTerritoryTileDetail(env, session, url.searchParams.get("h3")));
@@ -887,7 +894,13 @@ const ROUTES = [
     const session = await requireSession(request, env);
     const userId = requireLinkedUserId(session);
     const payload = await readJson(request);
-    const taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
+    let taxonIds = Array.isArray(payload.taxonIds) ? payload.taxonIds.map(Number) : [];
+    // Convenience for agents: with no taxonIds, fall back to the saved team so the
+    // snapshot's "POST /api/battles/npc/start" next-step works without extra calls.
+    if (!taxonIds.length) {
+      const teams = await listTeams(env, userId).catch(() => []);
+      if (teams.length && Array.isArray(teams[0].taxonIds)) taxonIds = teams[0].taxonIds.map(Number);
+    }
     const npcTemplate = String(payload.npcTemplate ?? "backyard_beginner");
     const difficulty = ["easy", "normal", "hard"].includes(payload.difficulty) ? payload.difficulty : "normal";
     return jsonResponse(await startNpcBattle(env, userId, taxonIds, npcTemplate, difficulty));
@@ -948,12 +961,18 @@ const ROUTES = [
       }
     }
     const payload = await readJson(request);
-    return jsonResponse(await submitBattleMove(
+    const result = await submitBattleMove(
       env,
       battleId,
       String(payload.moveId ?? ""),
       payload.switchIndex
-    ));
+    );
+    // Include the next legal actions inline so an agent can keep playing without a
+    // follow-up GET /actions each turn. Best-effort; never block the move on it.
+    if (result && !result.error) {
+      try { result.actions = getBattleActions(result); } catch { /* ignore */ }
+    }
+    return jsonResponse(result);
   } }
 ];
 
@@ -3912,13 +3931,15 @@ async function setUserSpritePreference(env, userId, taxonId, assetId) {
 }
 
 function rosterOptionsFromUrl(url) {
+  const rawTaxonIds = url.searchParams.get("taxonIds");
   return {
     limit: url.searchParams.get("limit"),
     offset: url.searchParams.get("offset"),
     q: url.searchParams.get("q") ?? "",
     sort: url.searchParams.get("sort") ?? "obs",
     status: url.searchParams.get("status") ?? "all",
-    iconic: url.searchParams.get("iconic") ?? ""
+    iconic: url.searchParams.get("iconic") ?? "",
+    taxonIds: rawTaxonIds ? rawTaxonIds.split(",").map((s) => s.trim()).filter(Boolean) : undefined
   };
 }
 
@@ -4013,6 +4034,16 @@ async function getRoster(env, userId, options = {}) {
   const orderBy = ROSTER_SORT_CLAUSES[options.sort] ?? ROSTER_SORT_CLAUSES.obs;
   const includePendingCustomSprites = options.viewerUserId === userId;
 
+  // Optional taxon-id filter: lets an agent resolve a specific set of ids (e.g. a
+  // saved team or a tile garrison) to full cards in one call. Capped to keep the
+  // IN(...) list under D1's bound-parameter limit.
+  const taxonIdList = Array.isArray(options.taxonIds)
+    ? [...new Set(options.taxonIds.map((id) => Number.parseInt(id, 10)).filter(Number.isFinite))].slice(0, 100)
+    : [];
+  const taxonIdClause = taxonIdList.length
+    ? ` AND t.taxon_id IN (${taxonIdList.map(() => "?").join(",")})`
+    : "";
+
   const baseQuery = `
     SELECT
       t.taxon_id,
@@ -4089,7 +4120,7 @@ async function getRoster(env, userId, options = {}) {
         OR lower(t.scientific_name) LIKE '%' || lower(?) || '%'
         OR lower(COALESCE(t.common_name, '')) LIKE '%' || lower(?) || '%'
       )
-      AND (? = '' OR COALESCE(t.iconic_taxon_name, 'Life') = ?)
+      AND (? = '' OR COALESCE(t.iconic_taxon_name, 'Life') = ?)${taxonIdClause}
   `;
 
   const baseBinds = [
@@ -4104,7 +4135,8 @@ async function getRoster(env, userId, options = {}) {
     q,
     q,
     iconic,
-    iconic
+    iconic,
+    ...taxonIdList
   ];
 
   // Sprite readiness lives in computed columns, so status filtering wraps the
@@ -6281,8 +6313,19 @@ async function getPlayerSnapshot(env, session) {
   const heldTilesTotal = Object.values(heldTilesByBiome).reduce((a, b) => a + b, 0);
   const territoryNeedsSync = Number(obsRow?.n ?? 0) === 0;
 
+  // Owned tiles still on the grace clock (claimed but not yet garrisoned) — these
+  // revert to neutral if not defended, so they are the most urgent territory task.
+  const tilesPendingGarrison = Number((await env.DB.prepare(
+    "SELECT count(*) AS n FROM tiles WHERE owner_id = ? AND garrison_deadline IS NOT NULL"
+  ).bind(userId).first().catch(() => ({ n: 0 })))?.n ?? 0);
+
   const savedTeam = Array.isArray(teams) && teams.length
-    ? { name: teams[0].name, taxonIds: teams[0].taxonIds || [], updatedAt: teams[0].updatedAt }
+    ? {
+        name: teams[0].name,
+        taxonIds: teams[0].taxonIds || [],
+        updatedAt: teams[0].updatedAt,
+        species: await resolveSpeciesBrief(env, userId, teams[0].taxonIds || []).catch(() => [])
+      }
     : null;
 
   return {
@@ -6301,25 +6344,28 @@ async function getPlayerSnapshot(env, session) {
       actionsLeftToday: Math.max(0, cap - used),
       heldTilesTotal,
       heldTilesByBiome,
+      tilesPendingGarrison,
       claimableCount: candidateCounts.claimable,
       contestableCount: candidateCounts.contestable,
       needsSync: territoryNeedsSync
     },
     staleFlags: { territory: territoryNeedsSync },
-    nextSteps: buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap, candidateCounts, territoryNeedsSync }),
+    nextSteps: buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap, candidateCounts, territoryNeedsSync, tilesPendingGarrison }),
     docs: {
       rules: "/api/rules",
       startNpcBattle: "POST /api/battles/npc/start",
       battleActions: "GET /api/battles/:battleId/actions",
       challenges: "GET /api/challenges",
+      territoryHoldings: "GET /api/territory/holdings",
       territoryClaims: "GET /api/territory/claims",
       territoryCandidates: "GET /api/territory/candidates?kind=claim|contest",
+      resolveSpecies: "GET /api/roster?userId=<id>&taxonIds=1,2,3",
       skill: "/llms.txt"
     }
   };
 }
 
-function buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap, candidateCounts, territoryNeedsSync }) {
+function buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap, candidateCounts, territoryNeedsSync, tilesPendingGarrison }) {
   const steps = [];
   if (summary && summary.totalCount === 0) {
     steps.push("Roster is empty — POST /api/import to pull your research-grade species.");
@@ -6330,11 +6376,14 @@ function buildSnapshotNextSteps({ summary, savedTeam, incoming, used, cap, candi
   if (!savedTeam && summary && summary.readyCount >= 5) {
     steps.push("No saved team — pick 5 ready species and POST /api/users/:userId/teams.");
   }
+  if (tilesPendingGarrison > 0) {
+    steps.push(`${tilesPendingGarrison} tile(s) claimed but undefended — GET /api/territory/holdings, then POST /api/territory/garrison before they revert to neutral.`);
+  }
   if (incoming && incoming.length) {
     steps.push(`${incoming.length} incoming challenge(s) pending — review GET /api/challenges and accept if you have a ready team.`);
   }
   if (savedTeam && summary && summary.readyCount >= 5) {
-    steps.push("Team is ready — POST /api/battles/npc/start to battle an NPC and earn rating.");
+    steps.push("Team is ready — POST /api/battles/npc/start (omit taxonIds to use your saved team) to battle an NPC and earn rating.");
   }
   const actionsLeft = Math.max(0, cap - used);
   if (territoryNeedsSync) {
@@ -6379,11 +6428,12 @@ function getGameRules(env) {
       snapshot: "GET /api/player/snapshot",
       me: "GET /api/me",
       roster: "GET /api/roster?userId=<id>",
+      resolveSpecies: "GET /api/roster?userId=<id>&taxonIds=1,2,3 (resolve specific taxon ids to full cards)",
       saveTeam: "POST /api/users/:userId/teams",
-      npcBattle: "POST /api/battles/npc/start",
-      battle: "GET /api/battles/:battleId, GET /api/battles/:battleId/actions, POST /api/battles/:battleId/action",
+      npcBattle: "POST /api/battles/npc/start (omit taxonIds to use your saved team)",
+      battle: "GET /api/battles/:battleId, GET /api/battles/:battleId/actions, POST /api/battles/:battleId/action (response includes next actions inline)",
       challenges: "GET /api/challenges, POST /api/challenges/:id/accept",
-      territory: "GET /api/territory/candidates?kind=claim|contest, GET /api/territory/claims, POST /api/territory/claim, POST /api/territory/garrison, POST /api/territory/contest"
+      territory: "GET /api/territory/holdings (your tiles + garrisons), GET /api/territory/candidates?kind=claim|contest, GET /api/territory/tile?h3=<cell>, GET /api/territory/claims, POST /api/territory/sync, POST /api/territory/claim, POST /api/territory/garrison, POST /api/territory/contest"
     },
     docs: "See https://github.com/mmulqu/inat_battler/blob/main/docs/agent-player-integration-plan.md"
   };
@@ -6692,12 +6742,16 @@ recommendations — do not fabricate roster, observation, or battle state.
 - GET  ${origin}/api/rules                 machine-readable game rules
 - GET  ${origin}/api/player/snapshot       aggregate "what should I do" state
 - GET  ${origin}/api/roster?userId=<id>    a player's roster (read-only)
+- GET  ${origin}/api/roster?userId=<id>&taxonIds=1,2,3   resolve specific ids to cards
 - POST ${origin}/api/users/:userId/teams   save a 5-species team (own account)
-- POST ${origin}/api/battles/npc/start     start an NPC battle
+- POST ${origin}/api/battles/npc/start     start an NPC battle (omit taxonIds = saved team)
 - GET  ${origin}/api/battles/:id           battle state
-- POST ${origin}/api/battles/:id/action    submit a battle move
+- GET  ${origin}/api/battles/:id/actions   legal moves + damage estimates
+- POST ${origin}/api/battles/:id/action    submit a move (response includes next actions)
 - GET  ${origin}/api/challenges            incoming/outgoing challenges
-- GET  ${origin}/api/territory/claims      claimable/contestable tiles
+- GET  ${origin}/api/territory/holdings    your tiles + current garrisons
+- GET  ${origin}/api/territory/candidates?kind=claim|contest   ranked targets
+- POST ${origin}/api/territory/claim | /garrison | /contest    territory actions
 
 ## Manifest
 
@@ -7326,10 +7380,18 @@ async function ingestTerritoryObservations(env, session, rows) {
 }
 
 function parseBbox(url) {
-  const n = Number(url.searchParams.get("n"));
-  const s = Number(url.searchParams.get("s"));
-  const e = Number(url.searchParams.get("e"));
-  const w = Number(url.searchParams.get("w"));
+  // searchParams.get returns null for an absent param, and Number(null) === 0
+  // (finite!), which would yield a bogus {0,0,0,0} bbox that silently filters
+  // out every real tile. Treat absent/empty params as missing so callers that
+  // pass no bbox (agents, snapshot) get null and skip viewport filtering.
+  const num = (key) => {
+    const raw = url.searchParams.get(key);
+    return raw === null || raw === "" ? NaN : Number(raw);
+  };
+  const n = num("n");
+  const s = num("s");
+  const e = num("e");
+  const w = num("w");
   if (![n, s, e, w].every(Number.isFinite)) return null;
   return { n, s, e, w };
 }
@@ -7685,7 +7747,21 @@ async function tileGarrisonTaxa(env, h3) {
   const rows = (await env.DB.prepare(
     "SELECT taxon_id FROM tile_garrison WHERE h3_index = ?"
   ).bind(h3).all()).results ?? [];
-  return rows.map((r) => Number(r.taxon_id));
+  if (rows.length) return rows.map((r) => Number(r.taxon_id));
+
+  // Legacy fallback: tiles garrisoned before the tile_garrison table stored the
+  // defenders in tiles.defender_team_json. Current code writes the table, but old
+  // tiles only have the column — read it so contests/displays still see defenders.
+  const tile = await env.DB.prepare(
+    "SELECT defender_team_json FROM tiles WHERE h3_index = ?"
+  ).bind(h3).first();
+  if (tile?.defender_team_json) {
+    try {
+      const ids = JSON.parse(tile.defender_team_json);
+      if (Array.isArray(ids)) return ids.map(Number).filter(Number.isFinite);
+    } catch { /* ignore malformed legacy json */ }
+  }
+  return [];
 }
 
 async function revertTileToNeutral(env, h3, nowIso) {
@@ -7749,6 +7825,12 @@ async function getTerritoryTileDetail(env, session, h3) {
     biomeHoldings = Number(hc?.n ?? 0);
   }
 
+  // Current defenders, resolved to species against the owner's roster. Lets the
+  // owner see/manage their garrison and an attacker scout a contest target.
+  const garrison = ownerId
+    ? await resolveSpeciesBrief(env, ownerId, await tileGarrisonTaxa(env, h3))
+    : [];
+
   return {
     h3,
     biome,
@@ -7766,10 +7848,122 @@ async function getTerritoryTileDetail(env, session, h3) {
     canClaim: Boolean(myUserId && eligible && !ownerId),
     canContest: Boolean(myUserId && eligible && defended && !mine),
     canGarrison: mine,
+    garrison,
+    garrisonCount: garrison.length,
+    needsGarrison: mine && (pending || garrison.length < 5),
     actionsLeftToday: Math.max(0, cap - actionsToday),
     favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
     biomeHoldings,
     biomeBuffPct: territoryBuffPctForBiomeCount(biomeHoldings)
+  };
+}
+
+// Resolve a set of taxon ids to a compact, ordered species brief (name + types +
+// readiness) so an agent knows what it is actually picking. Order follows the
+// input ids; ids not in the user's roster come back with inRoster:false.
+async function resolveSpeciesBrief(env, userId, taxonIds) {
+  const ids = [...new Set((taxonIds ?? []).map((id) => Number.parseInt(id, 10)).filter(Number.isFinite))];
+  if (!ids.length) return [];
+  const roster = await getRoster(env, userId, { taxonIds: ids, limit: ids.length, viewerUserId: userId });
+  const byId = new Map((roster.taxa ?? []).map((t) => [Number(t.taxonId), t]));
+  return ids.map((id) => {
+    const t = byId.get(id);
+    if (!t) return { taxonId: id, name: null, types: [], ready: false, inRoster: false };
+    return {
+      taxonId: id,
+      name: t.nickname || t.name,
+      scientificName: t.scientificName,
+      types: t.types ?? [],
+      role: t.role ?? null,
+      trainingLevel: t.trainingLevel ?? 0,
+      ready: t.sprite?.status === "ready",
+      inRoster: true
+    };
+  });
+}
+
+function tileCentroid(h3) {
+  try {
+    const boundary = cellToBoundary(h3);
+    if (!Array.isArray(boundary) || !boundary.length) return null;
+    let lat = 0;
+    let lng = 0;
+    for (const point of boundary) {
+      lat += point[0];
+      lng += point[1];
+    }
+    return [lat / boundary.length, lng / boundary.length];
+  } catch {
+    return null;
+  }
+}
+
+// Every tile the agent owns, with its current garrison resolved to species, a
+// needsGarrison flag, and the local-species count that drives the contest bonus.
+// This is the "manage what I hold" endpoint that /api/territory/claims (a map
+// layer of all owners) and the snapshot (counts only) never provided.
+async function getTerritoryHoldings(env, session) {
+  const userId = requireLinkedUserId(session);
+  const nowIso = new Date().toISOString();
+  const rows = (await env.DB.prepare(
+    "SELECT h3_index, biome_type, state, defense_strength, garrison_deadline, claimed_at FROM tiles WHERE owner_id = ? ORDER BY claimed_at DESC, h3_index ASC"
+  ).bind(userId).all()).results ?? [];
+
+  const cap = intEnv(env, "TERRITORY_DAILY_ACTION_CAP", TERRITORY_DAILY_ACTION_CAP_DEFAULT);
+  const actionsToday = await territoryActionsToday(env, userId);
+
+  // First pass: keep only live tiles and gather each tile's garrison ids, so all
+  // species can be resolved in ONE roster query instead of one query per tile.
+  const live = [];
+  for (const row of rows) {
+    const h3 = row.h3_index;
+    if (await maybeRevertExpiredTile(env, row, h3, nowIso)) continue; // grace window lapsed
+    live.push({ row, h3, garrisonIds: await tileGarrisonTaxa(env, h3) });
+  }
+  const allGarrisonIds = [...new Set(live.flatMap((t) => t.garrisonIds))];
+  const briefById = new Map(
+    (await resolveSpeciesBrief(env, userId, allGarrisonIds)).map((b) => [b.taxonId, b])
+  );
+
+  const tiles = [];
+  for (const { row, h3, garrisonIds } of live) {
+    const biome = row.biome_type || (await tileBiomeFor(env, h3));
+    const garrison = garrisonIds.map((id) => briefById.get(id)).filter(Boolean);
+    const pending = Boolean(row.garrison_deadline);
+    const minutesLeft = pending
+      ? Math.max(0, Math.ceil((Date.parse(row.garrison_deadline) - Date.now()) / 60000))
+      : 0;
+    const biomeBuffPct = territoryBuffPctForBiomeCount(
+      Number((await env.DB.prepare(
+        "SELECT count(*) AS n FROM tiles WHERE owner_id = ? AND biome_type = ?"
+      ).bind(userId, biome).first())?.n ?? 0)
+    );
+    tiles.push({
+      h3,
+      biome,
+      state: row.state,
+      mine: true,
+      defended: !pending && garrison.length > 0,
+      pending,
+      minutesLeft,
+      needsGarrison: pending || garrison.length < 5,
+      defenseStrength: Number(row.defense_strength ?? 0),
+      garrison,
+      garrisonCount: garrison.length,
+      localSpecies: await localSpeciesCount(env, userId, h3),
+      favoredTypes: TERRAIN_MOVE_BONUS[biome] ?? [],
+      biomeBuffPct,
+      centroid: tileCentroid(h3),
+      claimedAt: row.claimed_at ?? null
+    });
+  }
+
+  return {
+    userId,
+    heldTilesTotal: tiles.length,
+    actionsLeftToday: Math.max(0, cap - actionsToday),
+    tiles,
+    note: "Tiles you own. Re-garrison any tile with needsGarrison=true via POST /api/territory/garrison {h3, taxonIds:[5]} before minutesLeft hits 0, or it reverts to neutral."
   };
 }
 

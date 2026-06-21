@@ -11,21 +11,28 @@ daily actions (`dailyActionCap`).
 1. If observations are stale (`snapshot.territory.needsSync` is true, or you have
    not synced today), `POST /api/territory/sync`. The server fetches your
    observations itself — no browser needed.
-2. Get ranked, eligible targets:
+2. **Defend what you already hold first.** `GET /api/territory/holdings`. Any tile
+   with `needsGarrison: true` was claimed but is undefended on a grace clock
+   (`minutesLeft`) and will revert to neutral — re-garrison it
+   (`POST /api/territory/garrison {h3, taxonIds:[5]}`) before spending actions on
+   new tiles. The snapshot also surfaces this as `territory.tilesPendingGarrison`.
+3. Get ranked, eligible targets:
    - `GET /api/territory/candidates?kind=claim`
    - `GET /api/territory/candidates?kind=contest`
    Each candidate includes `h3`, `biome`, `favoredTypes`, `localSpecies`,
    `defenders`/`defenseStrength` (for contests), `biomeHoldings`, `canActToday`,
    and a `score` you can re-rank. (`GET /api/territory/claims` is only a map of
    who already owns what.)
-3. Claim high-value unowned tiles first: `POST /api/territory/claim {h3}`.
-4. Garrison your claims with biome-appropriate teams:
-   `POST /api/territory/garrison {h3, taxonIds:[5]}`.
-5. Contest weak or strategically valuable defended tiles:
+4. Claim high-value unowned tiles first: `POST /api/territory/claim {h3}`, then
+   immediately garrison (a fresh claim is undefended).
+5. Garrison your claims with biome-appropriate teams:
+   `POST /api/territory/garrison {h3, taxonIds:[5]}`. Any 5 ready species work;
+   local-observed species hit harder if the tile is later contested.
+6. Contest weak or strategically valuable defended tiles:
    `POST /api/territory/contest {h3, taxonIds:[5]}`. **This starts a battle** —
    it returns a `territory_contest` battle that you must play to completion via
    `/api/battles/:id/action` (see battle-policy.md). Winning takes the tile.
-6. Stop when `actionsLeftToday` (from the snapshot or a candidate) hits 0.
+7. Stop when `actionsLeftToday` (from the snapshot or a candidate) hits 0.
 
 ## Value signals
 
