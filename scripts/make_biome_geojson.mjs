@@ -17,6 +17,18 @@ if (!["2", "3", "5"].includes(res)) {
   console.error("usage: node scripts/make_biome_geojson.mjs <2|3|5>");
   process.exit(1);
 }
+// Coarse res2/res3 must be aggregated from res5 LAND (make_coarse_from_res5.mjs),
+// not built here: this script's majority-of-AREA classification drops thin
+// coastlines/islands (Italy, Ireland, Florida) as ocean. Guard so a casual run
+// can't silently overwrite the good coarse GeoJSON.
+if ((res === "2" || res === "3") && !process.argv.includes("--force")) {
+  console.error(
+    "Refusing to build coarse res" + res + " here — it would drop coastlines/islands.\n" +
+    "Use:  node scripts/make_coarse_from_res5.mjs   (aggregates from res5 LAND)\n" +
+    "Pass --force only if you really want the legacy majority-area output."
+  );
+  process.exit(1);
+}
 const DIR = "../Biome_cf/landcover_export";
 const output = "scripts/biome_res" + res + ".geojsonl";
 const out = fs.createWriteStream(output);

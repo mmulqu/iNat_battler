@@ -2383,7 +2383,7 @@
         try {
           state.biomeLayer = protomapsL.leafletLayer({
             // ?v bumps when the tileset is rebuilt, to bust browser/edge cache.
-            url: "/tiles/biomes.pmtiles?v=3",
+            url: "/tiles/biomes.pmtiles?v=4",
             // The archive now carries crisp biome hexes at every scale: res2 (z0-4),
             // res3 (z5-7), res5 (z8-11). PMTiles is range-read, so each view only
             // pulls its viewport's tiles. It lives in Leaflet's tilePane, below the

@@ -54,6 +54,13 @@ def gdal_progress_cb(bar):
 tmp = []
 for src, minz, maxz in LAYERS:
     out = src.replace(".geojsonl", ".mbtiles")
+    # Reuse an already-tiled band if its .mbtiles is newer than its .geojsonl, so
+    # rebuilding only the coarse bands (after regenerating their GeoJSON) doesn't
+    # re-run the slow res5 tiling. Pass --force to rebuild every band.
+    if "--force" not in sys.argv and os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+        print(f"reusing {os.path.basename(out)} (newer than its geojsonl; --force to rebuild)")
+        tmp.append(out)
+        continue
     if os.path.exists(out):
         os.remove(out)
     desc = f"{os.path.basename(src):28s} z{minz}-{maxz}"
