@@ -4283,9 +4283,12 @@
       if (!state.battle || (!moveId && !isSwitch) || state.battleBusy) return;
 
       const prev = state.battle;
-      const active = getActiveCreature(prev.player);
       state.battleBusy = true;
-      state.battleAnimation = isSwitch ? "anim-idle" : moveAnimClassFor(active, moveId);
+      // Keep the active sprite idle here. playTurnEvents replays the resolved turn
+      // and lunges each side in order (faster actor first), so the player and
+      // opponent never animate at the same time. Baking the player's attack pose
+      // here used to keep it "attacking" through the opponent's strike too.
+      state.battleAnimation = "anim-idle";
       playSfx("click");
       renderBattle();
 

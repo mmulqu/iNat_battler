@@ -2556,20 +2556,39 @@
     .sheet-sprite.hit-flash {
       animation:
         spriteFrames 900ms steps(1, end) infinite,
-        hitFlash 380ms steps(2, end) 1,
+        hitFlash 220ms ease-out 1,
         knockBack 420ms ease-out 1;
     }
 
+    /* On hit: a punchy red glow that flares and fades in ~0.2s. filter is free
+       here — knockBack drives transform and spriteFrames drives background. */
     @keyframes hitFlash {
-      0%, 100% { filter: drop-shadow(0 10px 12px rgba(23, 32, 27, 0.18)); }
-      20%, 70% { filter: sepia(1) saturate(9) hue-rotate(-46deg) brightness(1.3); }
-      45% { filter: brightness(2.4) saturate(0.3); }
+      0% { filter: drop-shadow(0 10px 12px rgba(23, 32, 27, 0.18)); }
+      25% {
+        filter:
+          brightness(1.9) saturate(1.5)
+          drop-shadow(0 0 14px rgba(255, 45, 45, 1))
+          drop-shadow(0 0 5px rgba(255, 0, 0, 0.9));
+      }
+      60% {
+        filter:
+          brightness(1.1) saturate(2.2)
+          drop-shadow(0 0 9px rgba(255, 50, 50, 0.7));
+      }
+      100% { filter: drop-shadow(0 10px 12px rgba(23, 32, 27, 0.18)); }
     }
 
     .dummy-sprite.hit-flash {
       animation:
-        hitFlash 380ms steps(2, end) 1,
+        hitFlash 220ms ease-out 1,
         knockBack 420ms ease-out 1;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .sheet-sprite.hit-flash,
+      .dummy-sprite.hit-flash {
+        animation: hitFlash 220ms ease-out 1;
+      }
     }
 
     .sheet-sprite.fainted,
