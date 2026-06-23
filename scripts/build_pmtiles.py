@@ -4,7 +4,7 @@ Run with the ESRI/arcgis python (has osgeo GDAL 3.7 + pmtiles + tqdm):
   <esri-env>\\python.exe scripts/build_pmtiles.py            # res2+res3 (fast)
   <esri-env>\\python.exe scripts/build_pmtiles.py --res5     # + finest res5 (slow)
 
-Zoom bands -> one MVT layer "biomes":  res2 z0-4, res3 z5-7, res5 z8-11.
+Zoom bands -> one MVT layer "biomes":  res2 z0-4, res3 z5, res5 z6-11.
 
 Prerequisites (generate the GeoJSON first):
   node scripts/make_coarse_from_res5.mjs     # writes biome_res2/res3.geojsonl
@@ -27,10 +27,10 @@ gdal.UseExceptions()
 
 LAYERS = [
     ("scripts/biome_res2.geojsonl", 0, 4),
-    ("scripts/biome_res3.geojsonl", 5, 7),
+    ("scripts/biome_res3.geojsonl", 5, 5),
 ]
 if "--res5" in sys.argv:
-    LAYERS.append(("scripts/biome_res5.geojsonl", 8, 11))  # finest claimable scale
+    LAYERS.append(("scripts/biome_res5.geojsonl", 6, 11))  # finest scale, kicks in 2 levels sooner (z6)
 
 for src, _, _ in LAYERS:
     if not os.path.exists(src):

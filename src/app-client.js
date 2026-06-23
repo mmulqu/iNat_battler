@@ -2383,13 +2383,13 @@
         try {
           state.biomeLayer = protomapsL.leafletLayer({
             // ?v bumps when the tileset is rebuilt, to bust browser/edge cache.
-            url: "/tiles/biomes.pmtiles?v=4",
-            // The archive now carries crisp biome hexes at every scale: res2 (z0-4),
-            // res3 (z5-7), res5 (z8-11). PMTiles is range-read, so each view only
-            // pulls its viewport's tiles. It lives in Leaflet's tilePane, below the
-            // overlayPane res5 claimable grid (API) — so the biome fill paints the
-            // base and the interactive claimable hexes overlay cleanly on top, with
-            // no blank gap when a wide viewport exceeds the res5 API cell cap.
+            url: "/tiles/biomes.pmtiles?v=5",
+            // The archive carries crisp biome hexes at every scale: res2 (z0-4),
+            // res3 (z5), res5 (z6-11) — the finest hexes kick in 2 levels sooner.
+            // PMTiles is range-read, so each view only pulls its viewport's tiles.
+            // It lives in Leaflet's tilePane, below the overlayPane res5 claimable
+            // grid (API) — biome fill paints the base, claimable hexes overlay on
+            // top, no blank gap when a wide viewport exceeds the res5 API cell cap.
             maxDataZoom: 11,
             paintRules: [{
               dataLayer: "biomes",
