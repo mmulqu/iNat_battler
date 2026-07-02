@@ -2746,6 +2746,29 @@
       text-shadow: 2px 2px 0 #6b7178, -1px -1px 0 #6b7178, 1px -1px 0 #6b7178, -1px 1px 0 #6b7178;
     }
 
+    /* Effectiveness-coded damage numbers: super-effective hits land bigger
+       and hotter, resisted hits smaller and dimmer (same 1.2/0.85 thresholds
+       as the engine's effectiveness log lines). */
+    .dmg-float.num-strong {
+      font-size: 2rem;
+      color: #fff3c4;
+      text-shadow: 2px 2px 0 #d9480f, -1px -1px 0 #d9480f, 1px -1px 0 #d9480f, -1px 1px 0 #d9480f;
+    }
+
+    .dmg-float.big.num-strong {
+      font-size: 2.35rem;
+    }
+
+    .dmg-float.num-weak {
+      font-size: 1.2rem;
+      color: #dfe3e8;
+      text-shadow: 2px 2px 0 #6b7178, -1px -1px 0 #6b7178, 1px -1px 0 #6b7178, -1px 1px 0 #6b7178;
+    }
+
+    .dmg-float.big.num-weak {
+      font-size: 1.5rem;
+    }
+
     .dmg-float.crit {
       font-size: 2.1rem;
       color: #ffe066;
@@ -3143,6 +3166,7 @@
     }
 
     .hp {
+      position: relative;
       height: 10px;
       border-radius: 999px;
       background: #dfe5df;
@@ -3151,9 +3175,26 @@
 
     .hp > span {
       display: block;
+      position: relative;
+      z-index: 2;
       height: 100%;
       width: var(--hp, 100%);
       background: linear-gradient(90deg, var(--green), var(--teal));
+      transition: width 0.22s ease;
+    }
+
+    /* Ghost bar: a pale segment that lingers at the pre-hit value behind the
+       fill, then drains after a beat — makes the chunk just lost readable. */
+    .hp > span.hp-ghost {
+      position: absolute;
+      inset: 0 auto 0 0;
+      z-index: 1;
+      background: var(--amber);
+      transition: width 0.25s ease;
+    }
+
+    .hp > span.hp-ghost.draining {
+      transition: width 0.45s ease 0.55s;
     }
 
     .mana {

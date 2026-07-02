@@ -4543,7 +4543,7 @@
           triggerAttackVisual(actorSide, moveAnimClassFor(actorCreature, moveId));
           if (category === "special") playSfx("special");
           await delay(280);
-          hitEffect(targetSide, damage, hpState);
+          hitEffect(targetSide, damage, hpState, entry.data && entry.data.effectiveness);
           if (isCrit) {
             playSfx("crit");
             spawnFloat(targetSide, "CRIT!", "crit");
@@ -4800,7 +4800,7 @@
       }, 620);
     }
 
-    function hitEffect(targetSide, damage, hpState) {
+    function hitEffect(targetSide, damage, hpState, effectiveness) {
       playSfx("hit", Math.min(1.7, 0.7 + damage / 50));
 
       const el = spriteEl(targetSide);
@@ -4833,18 +4833,33 @@
       }
 
       const target = hpState[targetSide];
-      spawnFloat(targetSide, "-" + damage, damage >= target.max * 0.22 ? "big" : "");
+      // Size/color-code the number by effectiveness (same thresholds as the
+      // engine's "super effective" log lines) so the type chart reads at a glance.
+      const mult = Number(effectiveness);
+      let kind = damage >= target.max * 0.22 ? "big" : "";
+      if (Number.isFinite(mult) && mult >= 1.2) kind += " num-strong";
+      else if (Number.isFinite(mult) && mult <= 0.85) kind += " num-weak";
+      spawnFloat(targetSide, "-" + damage, kind.trim());
       target.hp = Math.max(0, target.hp - damage);
       setHpBar(targetSide, target.hp, target.max);
     }
 
     function setHpBar(side, hp, max) {
       const bar = els.battlePanel.querySelector('[data-hp-bar="' + side + '"]');
+      const ghost = els.battlePanel.querySelector('[data-hp-ghost="' + side + '"]');
       const label = els.battlePanel.querySelector('[data-hp-text="' + side + '"]');
       const pct = max ? Math.max(0, Math.round((hp / max) * 100)) : 0;
       if (bar) {
+        const prevPct = parseFloat(bar.style.getPropertyValue("--hp"));
         bar.style.setProperty("--hp", pct + "%");
         bar.classList.toggle("hp-low", pct <= 25);
+        if (ghost) {
+          // On damage the pale ghost segment lingers at the old value and
+          // drains after a beat, showing the chunk just lost. On heals it
+          // rises immediately so it never sits behind the fill.
+          ghost.classList.toggle("draining", Number.isFinite(prevPct) && pct < prevPct);
+          ghost.style.setProperty("--hp", pct + "%");
+        }
       }
       if (label) label.textContent = Math.round(hp) + " / " + Math.round(max) + " HP";
     }
@@ -5806,7 +5821,10 @@
             '</div>' +
             '<div class="combatant-role">' + escapeHtml((creature.types || []).join(" / ")) + '</div>' +
           '</div>' +
-          '<div class="hp" aria-label="HP"><span data-hp-bar="' + side + '" class="' + (hpPct <= 25 ? "hp-low" : "") + '" style="--hp:' + hpPct + '%"></span></div>' +
+          '<div class="hp" aria-label="HP">' +
+            '<span class="hp-ghost" data-hp-ghost="' + side + '" style="--hp:' + hpPct + '%"></span>' +
+            '<span data-hp-bar="' + side + '" class="' + (hpPct <= 25 ? "hp-low" : "") + '" style="--hp:' + hpPct + '%"></span>' +
+          '</div>' +
           '<div class="subtle" data-hp-text="' + side + '">' + Number(creature.hp || 0) + ' / ' + Number(creature.maxHp || 0) + ' HP</div>' +
           '<div class="mana" aria-label="Mana"><span style="--mana:' + manaPct + '%"></span></div>' +
           '<div class="subtle mana-text">' + Number(creature.mana || 0) + ' / ' + Number(creature.maxMana || 0) + ' MP</div>' +

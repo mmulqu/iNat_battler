@@ -5,7 +5,12 @@ Engine code lives in `src/game.js` (pure + seeded RNG), move generation in
 `src/moves.js`, battle orchestration and UI in `src/index.js`.
 
 Status: **1–6 shipped 2026-06-10 (commit `48638b3`)** — see per-section notes for
-the few sub-items still open. 7 (juice) is not started. Balance *tuning* remains
+the few sub-items still open. **7 (juice) is largely shipped**: attack lunges,
+screen shake, floating damage numbers and word bursts (CRIT!/SUPER
+EFFECTIVE!/RESISTED/status), a synthesized Web Audio SFX set, sequenced turn
+playback, and (2026-07-02) the ghost HP bar and effectiveness-coded damage
+numbers. Still open in 7: background music, a Reduce-motion toggle the JS
+animations honor, and move-type flavor effects. Balance *tuning* remains
 ongoing (see the 2026-06-19 high-volume run below): mechanics are in, but the
 38–62% win-rate band is not yet met.
 
@@ -142,7 +147,19 @@ the Training tab (projected damage before/after allocating points)._
   damage vs a reference creature before/after allocating points, reusing
   `estimateDamage`.
 
-## 7. Battle juice — animations & audio
+## 7. Battle juice — animations & audio — ✅ mostly shipped
+
+Status (2026-07-02): most of this section predated the plan entry — attack
+lunges toward the target, hit recoil + screen shake, floating damage numbers,
+crit bursts, effectiveness/status/heal word floats, faint effects, status
+overlays, sequenced log playback, procedural biome backdrops, and a fully
+synthesized Web Audio SFX pack (hit/crit/special/miss/heal/buff/debuff/status/
+faint/win/lose) gated on the sound toggle. Added 2026-07-02: **HP ghost bar**
+(pale segment lingers at the pre-hit value, then drains) and
+**effectiveness-coded damage numbers** (super-effective bigger/hotter, resisted
+smaller/dimmer, same 1.2/0.85 thresholds as the log lines). _Still open:
+background music (+ Settings music toggle/volume), a Reduce-motion setting the
+JS-driven animations honor, and move-type flavor effects (stretch)._
 
 Goal: make battles feel alive and readable, not just a log scrolling under static
 sprites. Pure presentation layer — no engine/balance changes — so it can ship
@@ -267,6 +284,7 @@ legibility) → 4 (switching, largest change, measured) → 6 (polish) → 7 (ju
 Each step ships independently; 2, 6, and 7 are UI/presentation-only and safe
 anytime (7 pairs well with 2's effectiveness cues and the highlight-clip work).
 
-Steps 1–6 are done; what remains is 7 (juice), the small leftovers noted in
-2/6 (legend modal, training preview), and ongoing balance tuning driven by
-`npm run simulate -- 1000` runs against the 38–62% band.
+Steps 1–7 are done apart from small leftovers: music + Reduce-motion +
+move-type flavor in 7, the legend modal in 2, the training preview in 6, and
+ongoing balance tuning driven by `npm run simulate -- 1000` runs against the
+38–62% band.

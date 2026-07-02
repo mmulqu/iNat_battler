@@ -5015,6 +5015,39 @@ async function createRandomReadyNpcTeam(env, excludedTaxonIds = [], size = 5) {
   const excluded = excludedTaxonIds
     .map((taxonId) => Number.parseInt(taxonId, 10))
     .filter(Number.isFinite);
+
+  let npcRows = await queryRandomReadyTaxa(env, excluded, size);
+  // A small shared pool (fresh deploy, local dev) can leave fewer than `size`
+  // candidates once the player's own team is excluded — which dead-ends the
+  // guided import → battle flow. Mirror matches beat a dead end: retry without
+  // the exclusion before giving up.
+  if (npcRows.length < size && excluded.length) {
+    npcRows = await queryRandomReadyTaxa(env, [], size);
+  }
+
+  const npcMovesMap = await loadSpeciesMovesMap(env, npcRows.map((row) => Number(row.taxon_id)));
+  const creatures = npcRows.map((row, index) => {
+    const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
+    return createBattleCreature(
+      taxonSummaryFromRow(row, spriteUrl),
+      `npc-${index}`,
+      null,
+      npcMovesMap.get(Number(row.taxon_id))?.moves ?? null
+    );
+  });
+
+  if (creatures.length < size) {
+    throw new Error(`Need at least ${size} ready global sprites to start an NPC battle`);
+  }
+
+  return {
+    name: "Wild Sprite Team",
+    activeIndex: 0,
+    creatures
+  };
+}
+
+async function queryRandomReadyTaxa(env, excluded, size) {
   const exclusionClause = excluded.length
     ? `AND t.taxon_id NOT IN (${excluded.map(() => "?").join(",")})`
     : "";
@@ -5069,27 +5102,7 @@ async function createRandomReadyNpcTeam(env, excludedTaxonIds = [], size = 5) {
     size
   ).all();
 
-  const npcRows = rows.results ?? [];
-  const npcMovesMap = await loadSpeciesMovesMap(env, npcRows.map((row) => Number(row.taxon_id)));
-  const creatures = npcRows.map((row, index) => {
-    const spriteUrl = row.r2_key ? `/api/assets/${encodeR2Key(row.r2_key)}` : null;
-    return createBattleCreature(
-      taxonSummaryFromRow(row, spriteUrl),
-      `npc-${index}`,
-      null,
-      npcMovesMap.get(Number(row.taxon_id))?.moves ?? null
-    );
-  });
-
-  if (creatures.length < size) {
-    throw new Error(`Need at least ${size} ready global sprites to start an NPC battle`);
-  }
-
-  return {
-    name: "Wild Sprite Team",
-    activeIndex: 0,
-    creatures
-  };
+  return rows.results ?? [];
 }
 
 async function startDemoBattle(env) {
