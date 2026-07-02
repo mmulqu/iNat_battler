@@ -337,6 +337,15 @@ const ROUTES = [
     return jsonResponse(await beginBlueskyLogin(env, url.origin, payload));
   } },
 
+  // Guest mode: play without a Bluesky account. Creates a real account +
+  // session (so iNat linking, imports, battles, training, and territory all
+  // work); Bluesky-only features (challenges, sharing, buddies) stay locked
+  // until the guest connects Bluesky, which adopts their linked iNat account.
+  { method: "POST", path: "/api/auth/guest", handler: async (request, env) => {
+    await enforceRateLimit(env, request, "auth-guest", 6, 3600);
+    return handleGuestLogin(env);
+  } },
+
   { method: "POST", path: "/api/auth/logout", handler: (request, env) => handleLogout(request, env) },
 
   { method: "POST", path: "/api/account/delete", handler: async (request, env) => {
@@ -6141,6 +6150,10 @@ async function handleOAuthCallback(request, env) {
       now
     ).run();
 
+    // If this browser was playing as a guest, move its iNat link + API keys to
+    // the Bluesky account and retire the guest (best-effort, never blocks).
+    await adoptGuestAccount(env, request, row.did, now);
+
     const sessionToken = randomToken(32);
     const sessionId = await sha256Hex(sessionToken);
     const tokenExpiresAt = new Date(Date.now() + Number(tokens.expires_in ?? 300) * 1000).toISOString();
@@ -6186,6 +6199,80 @@ async function handleOAuthCallback(request, env) {
       status: 303,
       headers: { location: `/?authError=${encodeURIComponent(message)}` }
     });
+  }
+}
+
+const GUEST_DID_PREFIX = "guest:";
+
+function isGuestDid(did) {
+  return String(did ?? "").startsWith(GUEST_DID_PREFIX);
+}
+
+// Create a Bluesky-less account + session. Reuses the accounts/oauth_sessions
+// tables with empty OAuth fields so every session-based flow (iNat linking,
+// import, battles, training, territory, API keys) works unchanged; anything
+// that posts to Bluesky checks isGuestDid and explains what connecting unlocks.
+// display_name stays NULL so leaderboards fall back to the iNat login.
+async function handleGuestLogin(env) {
+  const did = GUEST_DID_PREFIX + randomToken(24);
+  const now = new Date().toISOString();
+
+  await env.DB.prepare(`
+    INSERT INTO accounts (did, handle, display_name, avatar_url, created_at, updated_at)
+    VALUES (?, '', NULL, NULL, ?, ?)
+  `).bind(did, now, now).run();
+
+  const sessionToken = randomToken(32);
+  const sessionId = await sha256Hex(sessionToken);
+  const sessionExpiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString();
+
+  await env.DB.prepare(`
+    INSERT INTO oauth_sessions (
+      session_id, did, pds_url, issuer, client_id,
+      access_token, refresh_token, token_expires_at,
+      dpop_private_jwk, dpop_public_jwk, auth_nonce,
+      expires_at, created_at, updated_at
+    )
+    VALUES (?, ?, '', '', '', '', NULL, NULL, '', '', NULL, ?, ?, ?)
+  `).bind(sessionId, did, sessionExpiresAt, now, now).run();
+
+  return new Response(JSON.stringify({ ok: true, guest: true }), {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "set-cookie": sessionCookieHeader(sessionToken, SESSION_TTL_SECONDS)
+    }
+  });
+}
+
+// When a guest signs in with Bluesky, carry their linked iNaturalist account
+// (and any API keys) over to the Bluesky identity, then retire the guest
+// account. Game data needs no migration — it is keyed by inat:<login>, which
+// follows the iNat link. If the Bluesky account already has its own iNat link,
+// that one wins and the guest's link is simply dropped.
+async function adoptGuestAccount(env, request, did, now) {
+  try {
+    const current = await getSession(request, env);
+    if (!current || current.via === "api_key" || !isGuestDid(current.did) || current.did === did) return;
+
+    if (current.inat_login) {
+      const target = await env.DB.prepare("SELECT inat_login FROM accounts WHERE did = ?").bind(did).first();
+      if (!target?.inat_login) {
+        await env.DB.prepare(`
+          UPDATE accounts
+          SET inat_login = ?, inat_user_id = ?, inat_verified_at = ?, updated_at = ?
+          WHERE did = ?
+        `).bind(current.inat_login, current.inat_user_id ?? null, now, now, did).run();
+      }
+    }
+
+    await env.DB.batch([
+      env.DB.prepare("UPDATE api_keys SET did = ? WHERE did = ?").bind(did, current.did),
+      env.DB.prepare("DELETE FROM oauth_sessions WHERE did = ?").bind(current.did),
+      env.DB.prepare("DELETE FROM accounts WHERE did = ?").bind(current.did)
+    ]);
+  } catch (error) {
+    // Adoption is best-effort; a failure must never block the Bluesky sign-in.
+    console.error("guest account adoption failed", error);
   }
 }
 
@@ -6266,6 +6353,7 @@ async function handleAccountDelete(request, env) {
     "DELETE FROM challenges WHERE challenger_did = ? OR opponent_did = ?"
   ).bind(did, did));
   statements.push(env.DB.prepare("DELETE FROM oauth_requests WHERE did = ?").bind(did));
+  statements.push(env.DB.prepare("DELETE FROM api_keys WHERE did = ?").bind(did));
   statements.push(env.DB.prepare("DELETE FROM oauth_sessions WHERE did = ?").bind(did));
   statements.push(env.DB.prepare("DELETE FROM accounts WHERE did = ?").bind(did));
   await env.DB.batch(statements);
@@ -6302,9 +6390,10 @@ async function getMe(request, env) {
 
   return {
     loggedIn: true,
+    guest: isGuestDid(session.did),
     authVia: session.via || "cookie",
     did: session.did,
-    handle: session.handle,
+    handle: session.handle || null,
     displayName: session.display_name,
     avatarUrl: session.avatar_url,
     inatLogin: session.inat_login,
@@ -6325,7 +6414,8 @@ async function getPlayerSnapshot(env, session) {
   const userId = session.inat_login ? inatUserIdFor(session.inat_login) : null;
   const identity = {
     did: session.did,
-    handle: session.handle,
+    guest: isGuestDid(session.did),
+    handle: session.handle || null,
     displayName: session.display_name,
     inatLogin: session.inat_login || null,
     userId,
@@ -6486,7 +6576,7 @@ function getGameRules(env) {
     },
     spriteAssetVersion: ASSET_VERSION,
     auth: {
-      browser: "Bluesky OAuth session cookie",
+      browser: "Bluesky OAuth session cookie, or a Bluesky-less guest session (POST /api/auth/guest). Guests can link iNaturalist, battle NPCs, train, and hold territory; challenges/sharing/buddies need Bluesky.",
       agent: "Authorization: Bearer ibat_... (create a personal API key in Settings -> Account)"
     },
     endpoints: {
@@ -6827,6 +6917,8 @@ the same HTTP API as the website, not a separate bot mode.
      ${SKILL_REPO_URL}
 3. Authenticate as your human. The human creates a personal API key at:
      ${origin}  ->  Settings -> Account -> API keys
+   (works with or without a Bluesky account — guest accounts can mint keys too;
+   guests just can't send challenges or post to Bluesky)
    Send it on every request:
      Authorization: Bearer ibat_...
 4. Decide what to do next with one call:
@@ -6939,6 +7031,10 @@ async function ensureFreshAccessToken(env, session) {
 }
 
 async function createSessionPost(env, session, record) {
+  // Guest accounts have no Bluesky identity at all.
+  if (isGuestDid(session.did)) {
+    throw httpError("Connect a Bluesky account to post — guest accounts can't post to Bluesky.", 403);
+  }
   // API-key sessions carry no OAuth/DPoP tokens, so they can never write to the
   // user's Bluesky repo. Fail with a clear 403 — NOT a 401, which agents would
   // read as "my key is invalid" (callers like createChallenge also treat 401 as
@@ -7100,6 +7196,12 @@ function sanitizeChallengeMessage(rawMessage) {
 }
 
 async function createChallenge(env, origin, session, payload) {
+  // Challenges are addressed and answered by Bluesky identity (the opponent is
+  // notified via a mention post and accepts as their DID), so a guest cannot
+  // send one — there would be no way to route the reply back.
+  if (isGuestDid(session.did)) {
+    throw httpError("Connect a Bluesky account to challenge other players — guests can battle NPCs, train, and claim territory.", 403);
+  }
   if (!session.inat_login) {
     throw httpError("Link your iNaturalist account before challenging other players", 400);
   }
@@ -8925,7 +9027,7 @@ async function postSpriteToDiscordQA(env, { submissionId, taxonLabel, inatLogin,
   const content =
     `**Sprite QA** \`${submissionId}\`\n` +
     `Species: ${taxonLabel}\n` +
-    `Player: @${handle} (iNat: ${inatLogin})\n` +
+    `Player: ${handle ? `@${handle}` : "guest"} (iNat: ${inatLogin})\n` +
     `React ✅ to approve (visible to opponents) or ❌ to reject (visible only to the submitter).`;
 
   const form = new FormData();
