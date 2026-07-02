@@ -27,6 +27,10 @@ All examples below omit the host. Replace `:userId` with your own `userId`
 - `GET /api/roster?userId=<id>&q=<search>&status=ready|pending|missing` — a
   player's roster (read-only; any user). Each entry has `taxonId`, `name`,
   `types`, `role`, `stats`, `moves`, and `sprite.status`.
+- `GET /api/roster?userId=<id>&fields=brief` — **token-lean roster view** for
+  team building: `taxonId`, `name`, `types`, `role`, `stats`, `maxHp`,
+  `spriteStatus`, and move summaries, without sprite/photo/flavor payload.
+  Combine with `&status=ready` to list only battle-eligible species.
 - `GET /api/roster?userId=<id>&taxonIds=1,2,3` — **resolve specific taxon ids**
   to full cards in one call. Use this to learn what a saved team or a tile
   garrison actually is (the snapshot/garrison give ids; this gives names/types).
@@ -47,7 +51,9 @@ All examples below omit the host. Replace `:userId` with your own `userId`
 
 - `POST /api/battles/npc/start` — body `{ "taxonIds": [5 ids], "difficulty":
   "easy|normal|hard" }`. **Omit `taxonIds` to use your saved team.**
-- `GET /api/battles/:battleId` — full battle state.
+- `GET /api/battles/:battleId` — battle state. **Compact view for API-key
+  callers** (same shape as the action response); pass `?view=full` for the
+  complete state (replay log + both full teams).
 - `GET /api/battles/:battleId/actions` — legal actions for your side with
   estimates: `moves[]` (`moveId`, `type`, `category`, `accuracy`, `manaCost`,
   `affordable`, `estimatedDamagePct`, `typeMultiplier`, `terrainFavored`, `stab`,
@@ -66,8 +72,15 @@ All examples below omit the host. Replace `:userId` with your own `userId`
 ## Challenges (write: challenge / share)
 
 - `GET /api/challenges` — incoming/outgoing, each with `direction` and `status`.
-- `POST /api/challenges` — send a challenge (conservative; see SKILL etiquette).
-- `POST /api/challenges/:id/accept` / `POST /api/challenges/:id/decline`.
+- `POST /api/challenges` — body `{ "opponentHandle": "...", "taxonIds": [5 ids],
+  "message"? }` (conservative; see SKILL etiquette). With an API key the
+  challenge is created but the Bluesky announcement post is **skipped**
+  (`postError` explains why) — give the returned `challengeUrl` to the human to
+  share.
+- `POST /api/challenges/:id/accept` — body `{ "taxonIds": [5 ids] }`. Starts the
+  battle immediately (compact view for API-key callers); then play it via
+  `/api/battles/:id/action`.
+- `POST /api/challenges/:id/decline`.
 
 ## Territory (write: territory)
 
@@ -96,14 +109,22 @@ All examples below omit the host. Replace `:userId` with your own `userId`
   it only adds a damage bonus when the tile is contested). Each species can
   defend only **one** tile at a time — a conflict returns 409.
 - `POST /api/territory/contest` — body `{ "h3": "<cell>", "taxonIds": [5] }`.
-  Returns a `territory_contest` **battle**; play it via `/api/battles/:id/action`
-  until it resolves. Winning captures the tile.
+  Returns a `territory_contest` **battle** (compact view for API-key callers);
+  play it via `/api/battles/:id/action` until it resolves. Winning captures the
+  tile.
 
 Daily territory actions are capped server-side; over-limit calls return 429.
 
 ## Errors
 
 - `401` — missing/invalid credential. Get an API key or drop to recommend-only.
-- `403` — acting as the wrong user, or a browser-only action (e.g. managing API
-  keys) attempted with a Bearer key.
+- `403` — acting as the wrong user, or a browser-only action attempted with a
+  Bearer key (managing API keys, posting to the user's Bluesky). Your key is
+  still valid — do not retry, and do not treat this as a bad credential.
 - `429` — rate limit or daily cap reached; wait and retry later.
+
+## No-auth practice battle
+
+`POST /api/battles/demo/start` requires no credential and returns a real battle
+you can play through `/api/battles/:id/actions` + `/api/battles/:id/action`.
+Use it to validate your battle loop before the human hands you a key.
