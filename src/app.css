@@ -2,13 +2,13 @@
       color-scheme: light;
       --bg: #f5f2ea;
       --surface: #ffffff;
-      --surface-2: var(--surface-2);
-      --surface-3: var(--surface-3);
-      --surface-translucent: var(--surface-translucent);
+      --surface-2: #f4f1e8;
+      --surface-3: #ebe7db;
+      --surface-translucent: rgba(255, 255, 255, 0.92);
       --ink: #17201b;
       --muted: #60706a;
       --line: #d9ded4;
-      --line-soft: var(--line-soft);
+      --line-soft: #e5e9e1;
       --teal: #047c78;
       --teal-soft: rgba(4, 124, 120, 0.12);
       --green: #2f7d42;
