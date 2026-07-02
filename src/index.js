@@ -514,7 +514,9 @@ const ROUTES = [
   { method: "POST", path: "/api/territory/contest", handler: async (request, env) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
-    return jsonResponse(await contestTerritoryTile(env, session, String(payload.h3 ?? ""), payload.taxonIds));
+    const battle = await contestTerritoryTile(env, session, String(payload.h3 ?? ""), payload.taxonIds);
+    // Contesting starts the battle; API-key (agent) callers get the compact view.
+    return jsonResponse(wantsCompactBattle(request, payload) && !battle?.error ? compactBattleView(battle) : battle);
   } },
 
   { method: "POST", path: "/api/training/allocate", handler: async (request, env) => {
@@ -549,9 +551,9 @@ const ROUTES = [
   { method: "POST", path: /^\/api\/challenges\/([^/]+)\/accept$/, handler: async (request, env, ctx, { params }) => {
     const session = await requireSession(request, env);
     const payload = await readJson(request);
-    return jsonResponse(
-      await acceptChallenge(env, session, decodeURIComponent(params[1]), payload.taxonIds ?? [])
-    );
+    const battle = await acceptChallenge(env, session, decodeURIComponent(params[1]), payload.taxonIds ?? []);
+    // Accepting starts the battle; API-key (agent) callers get the compact view.
+    return jsonResponse(wantsCompactBattle(request, payload) && !battle?.error ? compactBattleView(battle) : battle);
   } },
 
   { method: "POST", path: /^\/api\/challenges\/([^/]+)\/decline$/, handler: async (request, env, ctx, { params }) => {
@@ -907,12 +909,18 @@ const ROUTES = [
     return jsonResponse(wantsCompactBattle(request, payload) && !battle?.error ? compactBattleView(battle) : battle);
   } },
 
-  { method: "POST", path: "/api/battles/demo/start", handler: async (request, env) =>
-    jsonResponse(await startDemoBattle(env)) },
+  { method: "POST", path: "/api/battles/demo/start", handler: async (request, env) => {
+    const battle = await startDemoBattle(env);
+    // The demo needs no auth, but agents can pass ?view=compact (or their API
+    // key) to practice with the same compact battle loop they'll use for real.
+    return jsonResponse(wantsCompactBattle(request, null) && !battle?.error ? compactBattleView(battle) : battle);
+  } },
 
   { method: "GET", path: /^\/api\/battles\/([^/]+)$/, handler: async (request, env, ctx, { params }) => {
     const battle = await getBattle(env, decodeURIComponent(params[1]));
-    return battle ? jsonResponse(battle) : jsonResponse({ error: "Battle not found" }, 404);
+    if (!battle) return jsonResponse({ error: "Battle not found" }, 404);
+    // API-key (agent) callers default to the compact view; ?view=full opts out.
+    return jsonResponse(wantsCompactBattle(request, null) ? compactBattleView(battle) : battle);
   } },
 
   // Legal actions + damage estimates for your side of a battle (agent-friendly).
@@ -3942,6 +3950,7 @@ function rosterOptionsFromUrl(url) {
     sort: url.searchParams.get("sort") ?? "obs",
     status: url.searchParams.get("status") ?? "all",
     iconic: url.searchParams.get("iconic") ?? "",
+    fields: url.searchParams.get("fields") ?? "",
     taxonIds: rawTaxonIds ? rawTaxonIds.split(",").map((s) => s.trim()).filter(Boolean) : undefined
   };
 }
@@ -4217,6 +4226,33 @@ async function getRoster(env, userId, options = {}) {
         trainingFromRow(row, buffMap),
         speciesGenome?.moves ?? null
       );
+
+      // Token-lean card for agents (fields=brief): everything needed to pick a
+      // team and reason about matchups, minus sprite/photo/flavor payload.
+      if (options.fields === "brief") {
+        return {
+          taxonId: Number(row.taxon_id),
+          name: row.common_name || row.scientific_name,
+          scientificName: row.scientific_name,
+          types: genome.types,
+          role: genome.role,
+          stats: battleCreature.stats,
+          maxHp: battleCreature.maxHp,
+          obsCount: row.obs_count,
+          trainingLevel: Math.max(0, Number(row.points_spent ?? 0)),
+          spriteStatus: spriteReady ? "ready" : (row.sprite_job_status || "missing"),
+          hasSignatureMoves: Boolean(speciesGenome),
+          moves: (battleCreature.moves || []).map((move) => ({
+            id: move.id,
+            name: move.name,
+            type: move.type ?? null,
+            category: move.category ?? null,
+            power: move.power ?? 0,
+            accuracy: move.accuracy ?? 100,
+            effect: move.effect ?? null
+          }))
+        };
+      }
 
       return {
         taxonId: row.taxon_id,
@@ -5844,7 +5880,7 @@ async function getSessionFromApiKey(env, token) {
   const keyHash = await sha256Hex(token);
   const row = await env.DB.prepare(`
     SELECT
-      k.api_key_id, k.scopes, k.revoked_at,
+      k.api_key_id, k.scopes, k.revoked_at, k.last_used_at,
       a.did, a.handle, a.display_name, a.avatar_url,
       a.inat_login, a.inat_user_id,
       a.inat_pending_login, a.inat_verification_code
@@ -5855,11 +5891,15 @@ async function getSessionFromApiKey(env, token) {
 
   if (!row || row.revoked_at) return null;
 
-  // Best-effort usage timestamp; never block the request on it.
-  try {
-    await env.DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE api_key_id = ?")
-      .bind(new Date().toISOString(), row.api_key_id).run();
-  } catch (_) { /* ignore */ }
+  // Best-effort usage timestamp; never block the request on it. Agents loop
+  // battle turns, so throttle the write to once per 5 minutes per key.
+  const lastUsed = Date.parse(row.last_used_at ?? "");
+  if (!Number.isFinite(lastUsed) || Date.now() - lastUsed > 5 * 60 * 1000) {
+    try {
+      await env.DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE api_key_id = ?")
+        .bind(new Date().toISOString(), row.api_key_id).run();
+    } catch (_) { /* ignore */ }
+  }
 
   row.via = "api_key";
   row.scopes = row.scopes || "full";
@@ -6262,6 +6302,7 @@ async function getMe(request, env) {
 
   return {
     loggedIn: true,
+    authVia: session.via || "cookie",
     did: session.did,
     handle: session.handle,
     displayName: session.display_name,
@@ -6369,6 +6410,7 @@ async function getPlayerSnapshot(env, session) {
       territoryClaims: "GET /api/territory/claims",
       territoryCandidates: "GET /api/territory/candidates?kind=claim|contest",
       resolveSpecies: "GET /api/roster?userId=<id>&taxonIds=1,2,3",
+      briefRoster: "GET /api/roster?userId=<id>&status=ready&fields=brief (token-lean team-building view)",
       skill: "/llms.txt"
     }
   };
@@ -6419,6 +6461,20 @@ function getGameRules(env) {
     typeChart: TYPE_CHART,
     terrainMoveBonus: TERRAIN_MOVE_BONUS,
     team: { size: 5, note: "Teams must be exactly 5 species with ready sprites." },
+    statusEffects: {
+      stunned: "Skips the creature's next action (consumed when it triggers).",
+      marked: "Takes +25% damage from the next hit against it.",
+      poisoned: "Loses 8% max HP at the end of each turn for 3 turns.",
+      shielded: "The next hit against it is halved (self-applied by defensive moves).",
+      rallied: "Comeback: the first time a creature survives below 30% HP it gains +1 Strike and +1 Sense stage (once per creature per battle)."
+    },
+    moveEffects: {
+      status: "May inflict a status on the target (chance-based riders; pure status moves always land).",
+      drain: "Heals the attacker for a percentage of damage dealt.",
+      recoil: "The attacker takes a percentage of damage dealt.",
+      multihit: "Strikes 2-3 times in one action."
+    },
+    mana: "Moves cost mana (see manaCost in /api/battles/:id/actions). When no damaging move is affordable, the free fallback move 'struggle' (recoil) is always legal.",
     training: {
       note: "Training points are earned from observations and spent per species to raise stats; respec is supported.",
       endpoints: ["GET /api/training", "POST /api/training/allocate", "POST /api/training/respec"]
@@ -6436,13 +6492,21 @@ function getGameRules(env) {
     endpoints: {
       snapshot: "GET /api/player/snapshot",
       me: "GET /api/me",
-      roster: "GET /api/roster?userId=<id>",
+      import: "POST /api/import (refresh your roster from your verified iNaturalist account)",
+      roster: "GET /api/roster?userId=<id> (add &fields=brief for a token-lean view; &status=ready to filter)",
       resolveSpecies: "GET /api/roster?userId=<id>&taxonIds=1,2,3 (resolve specific taxon ids to full cards)",
       saveTeam: "POST /api/users/:userId/teams",
       npcBattle: "POST /api/battles/npc/start (omit taxonIds to use your saved team; compact response for API-key callers)",
+      demoBattle: "POST /api/battles/demo/start (no auth needed — try the battle loop before linking anything)",
       battle: "GET /api/battles/:battleId, GET /api/battles/:battleId/actions, POST /api/battles/:battleId/action (API-key callers get a compact view + next actions by default; view:'full' for full state)",
-      challenges: "GET /api/challenges, POST /api/challenges/:id/accept",
+      challenges: "GET /api/challenges, POST /api/challenges {opponentHandle, taxonIds:[5]}, POST /api/challenges/:id/accept {taxonIds:[5]}, POST /api/challenges/:id/decline (API-key challenges are created without the Bluesky post — share challengeUrl manually)",
+      training: "GET /api/training, POST /api/training/sync, POST /api/training/allocate, POST /api/training/respec, POST /api/training/nickname",
       territory: "GET /api/territory/holdings (your tiles + garrisons), GET /api/territory/candidates?kind=claim|contest, GET /api/territory/tile?h3=<cell>, GET /api/territory/claims, POST /api/territory/sync, POST /api/territory/claim, POST /api/territory/garrison, POST /api/territory/contest"
+    },
+    errors: {
+      401: "Missing or invalid credential (bad/revoked API key, or signed out).",
+      403: "Valid credential but not allowed: wrong user's resource, or a browser-only action (managing API keys, posting to Bluesky) attempted with an API key.",
+      429: "Rate limit or daily cap reached — wait and retry later."
     },
     docs: "See https://github.com/mmulqu/inat_battler/blob/main/docs/agent-player-integration-plan.md"
   };
@@ -6571,7 +6635,7 @@ function compactBattleView(state, logTail = 8) {
   view.difficulty = state.difficulty ?? null;
   view.log = Array.isArray(state.log) ? state.log.slice(-logTail) : [];
   if (state.status && state.status !== "active") view.result = state.status;
-  view.fullStateUrl = `/api/battles/${state.battleId}`;
+  view.fullStateUrl = `/api/battles/${state.battleId}?view=full`;
   return view;
 }
 
@@ -6772,21 +6836,41 @@ the same HTTP API as the website, not a separate bot mode.
 If you have no credential, you can still read public data and produce
 recommendations — do not fabricate roster, observation, or battle state.
 
+## Try it with no account at all
+
+POST ${origin}/api/battles/demo/start?view=compact needs no auth and returns a
+real battle. Play it with GET /api/battles/:id/actions and POST
+/api/battles/:id/action?view=compact to learn the battle loop before the human
+links anything.
+
 ## Core endpoints
 
 - GET  ${origin}/api/rules                 machine-readable game rules
 - GET  ${origin}/api/player/snapshot       aggregate "what should I do" state
+- POST ${origin}/api/import                refresh your roster from iNaturalist
 - GET  ${origin}/api/roster?userId=<id>    a player's roster (read-only)
-- GET  ${origin}/api/roster?userId=<id>&taxonIds=1,2,3   resolve specific ids to cards
+    add &fields=brief for a token-lean view; &status=ready to filter;
+    &taxonIds=1,2,3 to resolve specific ids (e.g. a saved team) to cards
 - POST ${origin}/api/users/:userId/teams   save a 5-species team (own account)
 - POST ${origin}/api/battles/npc/start     start an NPC battle (omit taxonIds = saved team)
-- GET  ${origin}/api/battles/:id           battle state
+- GET  ${origin}/api/battles/:id           battle state (compact for API-key callers; ?view=full for everything)
 - GET  ${origin}/api/battles/:id/actions   legal moves + damage estimates
 - POST ${origin}/api/battles/:id/action    submit a move (response includes next actions)
 - GET  ${origin}/api/challenges            incoming/outgoing challenges
+- POST ${origin}/api/challenges            {opponentHandle, taxonIds:[5]} — with an API
+    key the Bluesky post is skipped (postError is set); share challengeUrl manually
+- POST ${origin}/api/challenges/:id/accept {taxonIds:[5]} — starts the battle
+- GET  ${origin}/api/training              training points earned/spent per species
 - GET  ${origin}/api/territory/holdings    your tiles + current garrisons
 - GET  ${origin}/api/territory/candidates?kind=claim|contest   ranked targets
 - POST ${origin}/api/territory/claim | /garrison | /contest    territory actions
+
+## Errors
+
+- 401: missing/invalid credential — get a key from the human or go read-only.
+- 403: your key is fine but the action is browser-only (API-key management,
+  posting to Bluesky) or targets another user's resource. Do not retry.
+- 429: rate limit or daily action cap — stop and try again later.
 
 ## Manifest
 
@@ -6855,6 +6939,16 @@ async function ensureFreshAccessToken(env, session) {
 }
 
 async function createSessionPost(env, session, record) {
+  // API-key sessions carry no OAuth/DPoP tokens, so they can never write to the
+  // user's Bluesky repo. Fail with a clear 403 — NOT a 401, which agents would
+  // read as "my key is invalid" (callers like createChallenge also treat 401 as
+  // fatal but degrade gracefully on other errors).
+  if (session.via === "api_key" || !session.session_id) {
+    throw httpError(
+      "Posting to Bluesky requires the browser session; an API key cannot post on the user's behalf. Share the link manually instead.",
+      403
+    );
+  }
   const fresh = await ensureFreshAccessToken(env, session);
   const dpopKey = {
     privateJwk: JSON.parse(fresh.dpop_private_jwk),
