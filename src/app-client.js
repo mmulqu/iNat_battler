@@ -139,6 +139,7 @@
       backdropCache: null,
       lastResultBattle: null,
       polling: null,
+      pollDelayMs: 0,
       me: null,
       presence: {
         started: false,
@@ -2229,6 +2230,7 @@
 
     async function reloadRosterPage(resetPage) {
       if (resetPage) state.rosterPage = 1;
+      state.pollDelayMs = 0; // user action: restart the sprite poll cadence
       try {
         await loadRoster();
       } catch (error) {
@@ -2289,6 +2291,10 @@
     function renderViewTabs() {
       const view = state.activeView;
       document.body.dataset.view = view;
+      for (const button of document.querySelectorAll("[data-view-tab]")) {
+        if (button.getAttribute("data-view-tab") === view) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+      }
       els.homeTabButton.classList.toggle("active", view === "home");
       els.rosterTabButton.classList.toggle("active", view === "roster");
       els.battleTabButton.classList.toggle("active", view === "battle");
@@ -2321,7 +2327,10 @@
 
       const primaryMobileViews = ["home", "roster", "battle", "buddies"];
       for (const button of els.mobileNav.querySelectorAll("[data-mobile-nav]")) {
-        button.classList.toggle("active", button.getAttribute("data-mobile-nav") === view);
+        const isActive = button.getAttribute("data-mobile-nav") === view;
+        button.classList.toggle("active", isActive);
+        if (isActive) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
       }
       els.mobileMoreButton.classList.toggle("active", !primaryMobileViews.includes(view));
       for (const button of els.mobileSheet.querySelectorAll("[data-mobile-nav]")) {
@@ -2356,15 +2365,59 @@
       els.mapLegend.innerHTML = html;
     }
 
-    function initTerritoryMap() {
+    // Leaflet + protomaps are only needed by this tab, so they are fetched on
+    // first open instead of shipping with every page view. Leaflet is required;
+    // the protomaps biome layer stays optional (the map degrades gracefully).
+    let mapLibsPromise = null;
+    function loadExternalScript(src) {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = src;
+        script.crossOrigin = "";
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error("Failed to load " + src));
+        document.head.appendChild(script);
+      });
+    }
+    function ensureMapLibraries() {
+      if (typeof L !== "undefined") return Promise.resolve();
+      if (!mapLibsPromise) {
+        const css = document.createElement("link");
+        css.rel = "stylesheet";
+        css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+        css.crossOrigin = "";
+        document.head.appendChild(css);
+        mapLibsPromise = loadExternalScript("https://unpkg.com/leaflet@1.9.4/dist/leaflet.js")
+          .then(() => loadExternalScript("https://unpkg.com/protomaps-leaflet@4.0.1/dist/protomaps-leaflet.js")
+            .catch(() => { /* biome basemap is optional */ }))
+          .catch((error) => {
+            mapLibsPromise = null; // allow a retry on the next tab open
+            throw error;
+          });
+      }
+      return mapLibsPromise;
+    }
+
+    async function initTerritoryMap() {
       if (state.map) {
         setTimeout(() => { state.map.invalidateSize(); }, 60);
         return;
       }
-      if (typeof L === "undefined") {
-        els.mapStatusLabel.textContent = "Map library still loading — reopen this tab in a moment.";
+      if (state.mapInitializing) return;
+      state.mapInitializing = true;
+      try {
+        if (typeof L === "undefined") {
+          els.mapStatusLabel.textContent = "Loading the map…";
+          await ensureMapLibraries();
+          els.mapStatusLabel.textContent = "Your observations on the living map. Each hex is a real biome.";
+        }
+      } catch (error) {
+        els.mapStatusLabel.textContent = "Couldn't load the map — check your connection and reopen this tab.";
         return;
+      } finally {
+        state.mapInitializing = false;
       }
+      if (state.map) return;
       const map = L.map(els.mapCanvas, { zoomControl: true, preferCanvas: false, worldCopyJump: true });
       state.map = map;
       state.mapTileLayer = L.layerGroup().addTo(map);
@@ -5820,19 +5873,31 @@
       return team.creatures[team.activeIndex || 0];
     }
 
+    // Refresh the roster while sprites are actively generating. Only queued /
+    // running sprites can change on their own ("missing" needs a user or admin
+    // action first, so it would poll forever), the interval backs off toward a
+    // minute, and a hidden tab skips the fetch instead of hammering the API.
     function schedulePolling() {
       if (state.polling) clearTimeout(state.polling);
 
-      const hasPending = state.taxa.some((taxon) => ["queued", "running", "missing"].includes(taxon.sprite.status));
-      if (!hasPending) return;
+      const hasPending = state.taxa.some((taxon) => ["queued", "running"].includes(taxon.sprite.status));
+      if (!hasPending) {
+        state.pollDelayMs = 0;
+        return;
+      }
 
+      state.pollDelayMs = state.pollDelayMs ? Math.min(60000, Math.round(state.pollDelayMs * 1.5)) : 8000;
       state.polling = setTimeout(async () => {
+        if (document.hidden) {
+          schedulePolling();
+          return;
+        }
         try {
           await loadRoster();
         } catch (error) {
           setStatus(error.message);
         }
-      }, 8000);
+      }, state.pollDelayMs);
     }
 
     async function apiFetch(path, init) {
@@ -5840,7 +5905,7 @@
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        throw new Error(data.error || "Request failed");
+        throw new Error(data.error || "Request failed (" + res.status + ")");
       }
 
       return data;
@@ -5887,5 +5952,5 @@
     }
 
     function escapeAttr(value) {
-      return escapeHtml(value).replace(/\\x60/g, "&#96;");
+      return escapeHtml(value).replace(/\x60/g, "&#96;");
     }

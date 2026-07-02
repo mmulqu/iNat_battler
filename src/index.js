@@ -287,7 +287,7 @@ export default {
 // `method` is a verb, an array of verbs, or "*" for any method. Handlers receive
 // (request, env, ctx, { url, params }); params[n] are the regex captures.
 const ROUTES = [
-  { method: "GET", path: "/", handler: () => htmlResponse(renderAppHtml()) },
+  { method: "GET", path: "/", handler: (request, env, ctx, { url }) => htmlResponse(renderAppHtml(url.origin)) },
 
   // Battle highlight video renderer (battle-highlights-bluesky.md): a standalone
   // page that deterministically replays a battle onto a canvas and encodes an
@@ -4156,38 +4156,44 @@ async function getRoster(env, userId, options = {}) {
   `;
   const statusBinds = [status, status, status, status];
 
-  const rows = await env.DB.prepare(`
-    SELECT * FROM (${baseQuery}) roster
-    WHERE ${statusClause}
-    ORDER BY ${orderBy}
-    LIMIT ? OFFSET ?
-  `).bind(...baseBinds, ...statusBinds, limit, offset).all();
+  // One D1 batch (single round trip) for the page rows, the filtered total,
+  // and the iconic-group counts — this is the hottest endpoint in the app.
+  const [rows, totalRows, iconicRows] = await env.DB.batch([
+    env.DB.prepare(`
+      SELECT * FROM (${baseQuery}) roster
+      WHERE ${statusClause}
+      ORDER BY ${orderBy}
+      LIMIT ? OFFSET ?
+    `).bind(...baseBinds, ...statusBinds, limit, offset),
+    env.DB.prepare(`
+      SELECT COUNT(*) AS total FROM (${baseQuery}) roster
+      WHERE ${statusClause}
+    `).bind(...baseBinds, ...statusBinds),
+    env.DB.prepare(`
+      SELECT COALESCE(t.iconic_taxon_name, 'Life') AS iconic, COUNT(*) AS count
+      FROM user_taxa ut
+      JOIN taxa t ON t.taxon_id = ut.taxon_id
+      WHERE ut.user_id = ?
+      GROUP BY COALESCE(t.iconic_taxon_name, 'Life')
+      ORDER BY count DESC, iconic ASC
+    `).bind(userId)
+  ]);
+  const totalRow = (totalRows.results ?? [])[0];
 
-  const totalRow = await env.DB.prepare(`
-    SELECT COUNT(*) AS total FROM (${baseQuery}) roster
-    WHERE ${statusClause}
-  `).bind(...baseBinds, ...statusBinds).first();
-
-  const iconicRows = await env.DB.prepare(`
-    SELECT COALESCE(t.iconic_taxon_name, 'Life') AS iconic, COUNT(*) AS count
-    FROM user_taxa ut
-    JOIN taxa t ON t.taxon_id = ut.taxon_id
-    WHERE ut.user_id = ?
-    GROUP BY COALESCE(t.iconic_taxon_name, 'Life')
-    ORDER BY count DESC, iconic ASC
-  `).bind(userId).all();
-
-  const buffMap = await loadUserBuffMap(env, userId);
   const rosterRows = rows.results ?? [];
   const rosterTaxonIds = rosterRows.map((row) => Number(row.taxon_id));
-  const movesMap = await loadSpeciesMovesMap(env, rosterTaxonIds);
-  const variantMap = await loadReadySpriteVariantMap(env, rosterTaxonIds);
-  const preferenceMap = await loadUserSpritePreferenceMap(env, userId, rosterTaxonIds);
+  const [summary, buffMap, movesMap, variantMap, preferenceMap] = await Promise.all([
+    getRosterSummary(env, userId, includePendingCustomSprites),
+    loadUserBuffMap(env, userId),
+    loadSpeciesMovesMap(env, rosterTaxonIds),
+    loadReadySpriteVariantMap(env, rosterTaxonIds),
+    loadUserSpritePreferenceMap(env, userId, rosterTaxonIds)
+  ]);
 
   return {
     userId,
     total: Number(totalRow?.total ?? rosterRows.length),
-    summary: await getRosterSummary(env, userId, includePendingCustomSprites),
+    summary,
     limit,
     offset,
     iconicCounts: (iconicRows.results ?? []).map((row) => ({
@@ -10174,7 +10180,9 @@ function applyCors(response, env, request) {
   });
 }
 
-function renderAppHtml() {
+// `origin` feeds the social-share (Open Graph / Twitter) tags, which require
+// absolute URLs; it is the request origin so previews work on any deploy.
+function renderAppHtml(origin) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -10184,12 +10192,23 @@ function renderAppHtml() {
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="iNat Battler">
+  <meta name="description" content="Turn your iNaturalist observations into a creature-battler roster. Import the species you've really found, train them, and challenge other naturalists over Bluesky.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="iNat Battler">
+  <meta property="og:title" content="iNat Battler — creature battles from real observations">
+  <meta property="og:description" content="Turn your iNaturalist observations into a creature-battler roster. Import the species you've really found, train them, and challenge other naturalists over Bluesky.">
+  <meta property="og:url" content="${origin}/">
+  <meta property="og:image" content="${origin}/assets/landing-hero-battle.webp">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="iNat Battler — creature battles from real observations">
+  <meta name="twitter:description" content="Turn your iNaturalist observations into a creature-battler roster. Import the species you've really found, train them, and challenge other naturalists over Bluesky.">
+  <meta name="twitter:image" content="${origin}/assets/landing-hero-battle.webp">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon-180.png">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
-  <script src="https://unpkg.com/protomaps-leaflet@4.0.1/dist/protomaps-leaflet.js" crossorigin="" defer></script>
+  <!-- Roster cards and battle plates load taxon photos from these hosts. -->
+  <link rel="preconnect" href="https://inaturalist-open-data.s3.amazonaws.com" crossorigin>
+  <link rel="preconnect" href="https://static.inaturalist.org" crossorigin>
   <title>iNat Battler</title>
   <script>
     // Apply the saved theme before first paint to avoid a flash of the wrong theme.
@@ -10214,6 +10233,11 @@ ${APP_CSS}
   </style>
 </head>
 <body>
+  <noscript>
+    <p style="margin: 16px; padding: 12px 16px; border: 1px solid #d9ded4; border-radius: 8px; background: #fff;">
+      iNat Battler needs JavaScript to import your roster and run battles. Please enable it and reload.
+    </p>
+  </noscript>
   <main class="shell">
     <header class="topbar">
       <div class="brand">
@@ -10350,7 +10374,7 @@ ${APP_CSS}
           </select>
           <button class="primary" id="startBattleButton" type="button" disabled>Battle NPC</button>
         </div>
-        <p class="status" id="statusLine"></p>
+        <p class="status" id="statusLine" role="status" aria-live="polite"></p>
       </aside>
 
       <section>
