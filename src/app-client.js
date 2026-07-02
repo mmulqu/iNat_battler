@@ -2348,6 +2348,13 @@
       state.activeView = ["home", "roster", "tree", "recent", "battle", "leaderboard", "buddies", "map", "training", "settings"].includes(view) ? view : "home";
       renderViewTabs();
 
+      if (state.activeView === "battle" && !state.battle) {
+        // The arena entry point normally piggybacks on the roster render, which
+        // never runs for a fresh guest with no imported roster — without this
+        // their Battle tab is blank (no checklist, no demo battle).
+        renderBattle();
+      }
+
       if (state.activeView === "map") {
         initTerritoryMap();
       }
