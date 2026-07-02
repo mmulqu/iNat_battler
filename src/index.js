@@ -10754,6 +10754,10 @@ ${APP_CSS}
               </div>
             </div>
             <div class="settings-subsection">
+              <h4>Bluesky</h4>
+              <div class="settings-inat-account" id="settingsBskyAccount"></div>
+            </div>
+            <div class="settings-subsection">
               <h4>iNaturalist link</h4>
               <div class="settings-inat-account" id="settingsInatAccount"></div>
             </div>

@@ -232,6 +232,7 @@
       rosterLookupButton: document.getElementById("rosterLookupButton"),
       rosterViewBanner: document.getElementById("rosterViewBanner"),
       settingsInatAccount: document.getElementById("settingsInatAccount"),
+      settingsBskyAccount: document.getElementById("settingsBskyAccount"),
       apiKeyLabelInput: document.getElementById("apiKeyLabelInput"),
       apiKeyCreateButton: document.getElementById("apiKeyCreateButton"),
       apiKeyReveal: document.getElementById("apiKeyReveal"),
@@ -353,7 +354,9 @@
     els.recentTabButton.addEventListener("click", () => switchView("recent"));
     els.settingsTabButton.addEventListener("click", () => switchView("settings"));
     els.settingsReimportButton.addEventListener("click", () => importRoster());
-    els.settingsSignOutButton.addEventListener("click", () => bskyLogout());
+    // Route through handleBskyAction so the busy state and post-logout
+    // re-render (sidebar, Home, Settings blocks) all happen.
+    els.settingsSignOutButton.addEventListener("click", () => handleBskyAction("logout"));
     els.themeToggle.addEventListener("click", (event) => {
       const btn = event.target.closest("[data-theme-pref]");
       if (btn) setThemePreference(btn.getAttribute("data-theme-pref"));
@@ -921,6 +924,9 @@
     els.settingsInatAccount.addEventListener("click", handleBskyContainerClick);
     els.settingsInatAccount.addEventListener("input", handleBskyContainerInput);
     els.settingsInatAccount.addEventListener("keydown", handleBskyContainerKeydown);
+    els.settingsBskyAccount.addEventListener("click", handleBskyContainerClick);
+    els.settingsBskyAccount.addEventListener("input", handleBskyContainerInput);
+    els.settingsBskyAccount.addEventListener("keydown", handleBskyContainerKeydown);
 
     els.apiKeyCreateButton.addEventListener("click", createApiKeyFromInput);
     els.apiKeyList.addEventListener("click", (event) => {
@@ -1156,8 +1162,11 @@
     }
 
     async function bskyLogin() {
+      // Several sign-in inputs can be visible at once (sidebar, Home card,
+      // Settings); use whichever one the user actually filled in.
       const inputs = Array.from(document.querySelectorAll("[data-bsky-login-input]"));
-      const input = inputs.find((candidate) => candidate.offsetParent !== null) || inputs[0] || null;
+      const visible = inputs.filter((candidate) => candidate.offsetParent !== null);
+      const input = visible.find((candidate) => candidate.value.trim()) || visible[0] || inputs[0] || null;
       const handle = input ? input.value.trim() : "";
       if (!handle) {
         setStatus("Enter your Bluesky handle (like name.bsky.social).");
@@ -1189,6 +1198,7 @@
       const wasGuest = Boolean(state.me && state.me.guest);
       await apiFetch("/api/auth/logout", { method: "POST" });
       state.me = { loggedIn: false };
+      state.bskyMessage = "";
       state.challenges = [];
       stopPresence();
       state.presence.buddies = new Map();
@@ -2029,7 +2039,45 @@
       return html;
     }
 
+    // Bluesky identity controls in Settings → Account: sign in when signed out,
+    // the Connect upgrade path for guests, and the current handle when connected.
+    // Sign out stays in the section's action row (settingsSignOutButton).
+    function renderBskyAccountBlock(me, busyAttr) {
+      if (!me || !me.loggedIn) {
+        return '<p class="subtle">Sign in to save teams, link your iNaturalist account, and challenge other players.</p>' +
+          renderTypeaheadInput("settingsBskyHandleInput", "you.bsky.social", "login") +
+          '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
+          '</button>' +
+          '<div class="subtle">No Bluesky account? ' +
+            '<button class="link-button" type="button" data-bsky-action="guest"' + busyAttr + '>' +
+              (state.bskyBusy && state.bskyAction === "guest" ? "Starting..." : "Play as a guest") +
+            '</button>' +
+          '</div>';
+      }
+
+      if (me.guest) {
+        return '<div class="bsky-row"><strong>Guest naturalist</strong></div>' +
+          '<p class="subtle">Connect Bluesky to challenge friends, see buddies online, and share victories. Your linked iNaturalist roster comes with you.</p>' +
+          renderTypeaheadInput("settingsBskyHandleInput", "you.bsky.social", "login") +
+          '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Connect Bluesky") +
+          '</button>';
+      }
+
+      return '<div class="bsky-row"><div class="subtle">Signed in as <strong>' +
+        escapeHtml(me.displayName || "@" + (me.handle || "")) + '</strong>' +
+        (me.displayName && me.handle ? ' (@' + escapeHtml(me.handle) + ')' : '') +
+        '</div></div>';
+    }
+
     function renderInatSettings() {
+      if (els.settingsBskyAccount) {
+        els.settingsBskyAccount.innerHTML = renderBskyAccountBlock(state.me, state.bskyBusy ? " disabled" : "");
+      }
+      if (els.settingsSignOutButton) {
+        els.settingsSignOutButton.hidden = !(state.me && state.me.loggedIn);
+      }
       if (!els.settingsInatAccount) return;
       els.settingsInatAccount.innerHTML = renderInatAccountBlock(state.me, state.bskyBusy ? " disabled" : "");
     }
@@ -3335,18 +3383,30 @@
 
     function homeNextStep(summary, selectedCount) {
       if (!state.me || !state.me.loggedIn) {
+        const busyAttr = state.bskyBusy ? " disabled" : "";
         return {
           title: "Sign in with Bluesky",
-          body: "Use the Bluesky panel to sign in before sending or accepting player challenges.",
+          body: "Sign in to link your iNaturalist account, save teams, and challenge other players.",
           action: null,
-          label: ""
+          label: "",
+          html:
+            renderBskyStatus() +
+            renderTypeaheadInput("homeBskyHandleInput", "you.bsky.social", "login") +
+            '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
+              (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
+            '</button>' +
+            '<div class="subtle">No Bluesky account? ' +
+              '<button class="link-button" type="button" data-bsky-action="guest"' + busyAttr + '>' +
+                (state.bskyBusy && state.bskyAction === "guest" ? "Starting..." : "Play as a guest") +
+              '</button>' +
+            '</div>'
         };
       }
 
       if (!state.me.inatLogin) {
         return {
           title: "Verify your iNaturalist account",
-          body: "Use the Bluesky panel to create a profile code, verify ownership, and import your observations.",
+          body: "Open Settings → Account to verify your iNaturalist username and import your observations.",
           action: null,
           label: ""
         };
@@ -3458,6 +3518,7 @@
             '<strong>' + escapeHtml(next.title) + '</strong>' +
             '<p>' + escapeHtml(next.body) + '</p>' +
             (next.action ? '<button class="primary" type="button" data-home-action="' + escapeAttr(next.action) + '">' + escapeHtml(next.label) + '</button>' : '') +
+            (next.html || '') +
           '</div>' +
         '</section>' +
         '<section class="home-metrics" aria-label="Roster summary">' +
