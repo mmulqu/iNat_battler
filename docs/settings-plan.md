@@ -57,7 +57,9 @@ Legend: ✅ already exists (relocate) · 🆕 new build.
 
 ### Sprites
 - ✅ **Custom/manual sprite upload** + submission status (pending QA / approved /
-  rejected).
+  rejected). Submission/status lists are scoped to the signed-in submitter only; other
+  players never see another user's approval-pipeline rows. Approved art can still render
+  publicly in-game after Discord QA approval.
 - ✅ Default sprite source (AI vs your uploads) — per-taxon preference API exists; a
   global default is small.
 
@@ -78,9 +80,13 @@ Legend: ✅ already exists (relocate) · 🆕 new build.
 - 🆕 "What we store" disclosure ✅ (in the section). Privacy / terms **links** still TODO.
 - 🆕 Export my data (optional) — not started.
 
-### About / app
-- 🆕 **Install app** (PWA `beforeinstallprompt` — not currently wired).
-- 🆕 Version / build, "Alpha" label, links (GitHub, feedback).
+### Support / tip the creator
+- 🆕 **Tip the creator** — a small support entry at the **bottom of the Settings menu**.
+  Links out to a tip/donation destination (e.g. Ko-fi / Buy Me a Coffee / GitHub
+  Sponsors / Stripe payment link — pick one) so players can support ongoing
+  development and sprite-generation costs. Keep it low-key (optional, no nag), placed
+  last so it never competes with account/privacy controls. Open question: which
+  platform, and whether to mention that tips help cover AI sprite-generation costs.
 - ✅ **Dev Lab access**: no public Dev Lab tab. Private ops routes are server-gated by
   `ADMIN_DIDS` (plus optional handle/iNat-login env fallbacks) and return 404 to
   non-admins. Configure the deployed admin identity before relying on these routes.
