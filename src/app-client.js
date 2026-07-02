@@ -1103,6 +1103,7 @@
 
       try {
         if (action === "login") await bskyLogin();
+        else if (action === "guest") await guestLogin();
         else if (action === "logout") await bskyLogout();
         else if (action === "inat-start") await inatLinkStart();
         else if (action === "inat-confirm") await inatLinkConfirm();
@@ -1127,6 +1128,7 @@
     }
 
     function bskyProgressMessage(action) {
+      if (action === "guest") return "Setting up a guest account.";
       if (action === "inat-confirm") return "Checking your iNaturalist profile for the verification code.";
       if (action === "inat-start") return "Creating a new iNaturalist verification code.";
       if (action === "inat-unlink") return "Unlinking your iNaturalist account.";
@@ -1140,6 +1142,7 @@
     }
 
     function bskyBusyButtonText(action) {
+      if (action === "guest") return "Starting...";
       if (action === "inat-confirm") return "Verifying...";
       if (action === "inat-start") return "Creating code...";
       if (action === "inat-unlink") return "Unlinking...";
@@ -1170,7 +1173,20 @@
       window.location.href = res.authorizeUrl;
     }
 
+    // Play without Bluesky: the server creates a real (guest) account + session,
+    // so linking iNaturalist, importing, battles, training, and territory all
+    // work. Bluesky-only features stay locked until the guest connects Bluesky
+    // (which carries the linked iNat account over).
+    async function guestLogin() {
+      await apiFetch("/api/auth/guest", { method: "POST" });
+      state.bskyMessage = "";
+      await refreshMe();
+      await switchView("home");
+      setStatus("Playing as a guest. Link your iNaturalist account to import your roster — you can connect Bluesky anytime.");
+    }
+
     async function bskyLogout() {
+      const wasGuest = Boolean(state.me && state.me.guest);
       await apiFetch("/api/auth/logout", { method: "POST" });
       state.me = { loggedIn: false };
       state.challenges = [];
@@ -1180,7 +1196,9 @@
         els.buddiesPanel.innerHTML = '<p class="subtle">Sign in with Bluesky to see which of your mutuals are online.</p>';
         els.buddiesMetaLabel.textContent = "";
       }
-      setStatus("Signed out of Bluesky.");
+      setStatus(wasGuest
+        ? "Left guest mode. Your roster stays saved under your iNaturalist account — verify it again anytime to pick up where you left off."
+        : "Signed out of Bluesky.");
     }
 
     async function inatLinkStart() {
@@ -1750,6 +1768,9 @@
       if (!me || !me.loggedIn) {
         return '<div class="challenge-banner">' + body + '<div class="subtle">Sign in with Bluesky as @' + escapeHtml(info.opponentHandle) + ' to battle.</div></div>';
       }
+      if (me.guest) {
+        return '<div class="challenge-banner">' + body + '<div class="subtle">Challenges are answered with a Bluesky identity — connect Bluesky as @' + escapeHtml(info.opponentHandle) + ' to battle.</div></div>';
+      }
       if (me.did !== info.opponentDid) {
         return '<div class="challenge-banner">' + body + '<div class="subtle">This challenge was sent to @' + escapeHtml(info.opponentHandle) + ', not your account.</div></div>';
       }
@@ -1883,7 +1904,12 @@
         '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
           (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
         '</button>' +
-        '<div class="landing-auth-note">Uses Bluesky OAuth for identity and challenge posts. iNaturalist linking happens after sign-in.</div>';
+        '<div class="landing-auth-note">Uses Bluesky OAuth for identity and challenge posts. iNaturalist linking happens after sign-in.</div>' +
+        '<div class="landing-auth-note landing-guest-note">No Bluesky account? ' +
+          '<button class="link-button" type="button" data-bsky-action="guest"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "guest" ? "Starting..." : "Play without one") +
+          '</button>' +
+          ' — link just your iNaturalist account and battle NPCs, train, and claim territory. Challenges and buddies need Bluesky, and you can connect it later.</div>';
     }
 
     // Write text to the clipboard and briefly flip a button's label to "Copied!".
@@ -2099,13 +2125,23 @@
         return;
       }
 
-      els.bskyStateLabel.textContent = state.bskyBusy ? "working" : "@" + me.handle;
+      els.bskyStateLabel.textContent = state.bskyBusy ? "working" : (me.guest ? "guest" : "@" + me.handle);
 
       let html = renderBskyStatus() +
       '<div class="bsky-row">' +
-        '<strong>' + escapeHtml(me.displayName || "@" + me.handle) + '</strong>' +
+        '<strong>' + escapeHtml(me.guest ? "Guest naturalist" : (me.displayName || "@" + me.handle)) + '</strong>' +
         '<button class="secondary" type="button" data-bsky-action="logout"' + busyAttr + '>Sign out</button>' +
       '</div>';
+
+      // Guests get the upgrade path where challenges would otherwise live.
+      // Connecting Bluesky adopts the linked iNat account, so nothing is lost.
+      if (me.guest) {
+        html += '<div class="subtle"><strong>Connect Bluesky</strong> to challenge friends, see buddies online, and share victories. Your linked iNaturalist roster comes with you.</div>' +
+          renderTypeaheadInput("bskyHandleInput", "you.bsky.social", "login") +
+          '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
+            (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Connect Bluesky") +
+          '</button>';
+      }
 
       // iNaturalist linking/swap/unlink lives in Settings → Account to keep the
       // gameplay sidebar uncluttered. Just point there from here.
@@ -2119,14 +2155,19 @@
 
       html += renderChallengeBanner();
 
-      if (me.inatLogin) {
+      if (me.inatLogin && !me.guest) {
         html += '<div class="subtle"><strong>Challenge a player</strong> (uses your selected 5)</div>' +
           renderTypeaheadInput("challengeHandleInput", "opponent.bsky.social", "challenge-send") +
           '<input id="challengeMessageInput" placeholder="Optional taunt (140 chars)" maxlength="140">' +
           '<button class="primary" type="button" data-bsky-action="challenge-send"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "challenge-send" ? "Sending..." : "Send Challenge via Bluesky") +
-          '</button>' +
-          renderCustomSpritePanel(busyAttr);
+          '</button>';
+      }
+
+      // Custom sprite uploads only need a linked iNat account (Discord QA),
+      // so guests get them too.
+      if (me.inatLogin) {
+        html += renderCustomSpritePanel(busyAttr);
       }
 
       if (state.challenges.length) {
@@ -3183,12 +3224,14 @@
               '<span class="subtle">' + you.wins + 'W / ' + you.losses + 'L &middot; best streak ' + you.bestStreak + '</span>' +
               streakHtml(you) +
             '</div>' +
-            '<button class="secondary bsky-share-button" type="button" data-share-rank>Post my rank to Bluesky 🦋</button>' +
+            (state.me && state.me.guest
+              ? '<span class="subtle">Connect Bluesky (sidebar) to post your rank.</span>'
+              : '<button class="secondary bsky-share-button" type="button" data-share-rank>Post my rank to Bluesky 🦋</button>') +
           '</div>';
       } else if (state.me && state.me.loggedIn && state.me.inatLogin) {
         youCard = '<div class="lb-you-card"><span class="subtle">Win a rated NPC battle to enter the rankings.</span></div>';
       } else {
-        youCard = '<div class="lb-you-card"><span class="subtle">Sign in with Bluesky and link your iNaturalist account to get ranked.</span></div>';
+        youCard = '<div class="lb-you-card"><span class="subtle">Sign in and link your iNaturalist account to get ranked.</span></div>';
       }
 
       els.leaderboardPanel.innerHTML = '<div class="lb-podium">' + podium + '</div>' + table + youCard;
@@ -3534,9 +3577,13 @@
         '<div class="onboarding-copy">' +
           '<div class="subtle">Setup</div>' +
           '<h2>Link your field life.</h2>' +
-          '<p>You are signed in with Bluesky. One quick iNaturalist verification connects your real observations to the game roster.</p>' +
+          '<p>' + (me.guest
+            ? 'You are playing as a guest. One quick iNaturalist verification connects your real observations to the game roster.'
+            : 'You are signed in with Bluesky. One quick iNaturalist verification connects your real observations to the game roster.') + '</p>' +
           '<div class="onboarding-steps">' +
-            renderOnboardingStep("1", "Bluesky connected", "Signed in as @" + (me.handle || "Bluesky"), "complete") +
+            (me.guest
+              ? renderOnboardingStep("1", "Playing as guest", "No Bluesky needed. Connect one later (sidebar) for challenges and buddies.", "complete")
+              : renderOnboardingStep("1", "Bluesky connected", "Signed in as @" + (me.handle || "Bluesky"), "complete")) +
             renderOnboardingStep("2", "Choose iNaturalist username", "Enter the public iNaturalist account you want to battle with.", hasCode ? "complete" : "active") +
             renderOnboardingStep("3", "Paste code and verify", "Add the code to your iNaturalist profile bio, verify here, then remove it.", hasCode ? "active" : "") +
           '</div>' +
@@ -4871,8 +4918,10 @@
 
     function startPresence(force) {
       const me = state.me;
-      if (!me || !me.loggedIn || !me.did) {
-        els.buddiesPanel.innerHTML = '<p class="subtle">Sign in with Bluesky to see which of your mutuals are online.</p>';
+      if (!me || !me.loggedIn || !me.did || me.guest) {
+        els.buddiesPanel.innerHTML = me && me.guest
+          ? '<p class="subtle">Buddies are your Bluesky mutuals — connect a Bluesky account (sidebar) to see who’s online.</p>'
+          : '<p class="subtle">Sign in with Bluesky to see which of your mutuals are online.</p>';
         els.buddiesMetaLabel.textContent = "";
         return;
       }
@@ -5461,7 +5510,7 @@
         : "";
 
       const canShare = battle.status === "won" && !battle.demo &&
-        state.me && state.me.loggedIn && state.me.inatLogin;
+        state.me && state.me.loggedIn && state.me.inatLogin && !state.me.guest;
       const canShareVideo = !battle.demo && (battle.status === "won" || battle.status === "lost") &&
         state.me && state.me.loggedIn && state.me.inatLogin;
       const actionsHtml = '<div class="overlay-actions">' +

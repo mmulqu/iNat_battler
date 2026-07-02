@@ -3619,6 +3619,13 @@
       text-decoration: underline;
     }
 
+    /* The guest-mode link sits on the dark hero image, where the default teal
+       link color would be illegible — inherit the hero's light text instead. */
+    .landing-guest-note .link-button {
+      color: inherit;
+      font-weight: 750;
+    }
+
     .settings-subsection {
       margin-top: 12px;
     }

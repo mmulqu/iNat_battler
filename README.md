@@ -194,6 +194,10 @@ curl -X POST https://inat-battler.intrinsic3141.workers.dev/api/sprite-batches/<
 
 Players sign in with their Bluesky account via atproto OAuth, implemented directly in the Worker with WebCrypto (no atproto SDK dependency): handle -> DID -> PDS resolution, authorization server discovery, PAR + PKCE, and DPoP-bound tokens (ES256) with automatic nonce retries and refresh.
 
+### Guest mode (no Bluesky required)
+
+Bluesky is optional. `POST /api/auth/guest` (the landing page's "Play without one" link) creates a Bluesky-less account + session using the same `accounts`/`oauth_sessions` rows with empty OAuth fields, so everything session-based works unchanged: guests link their iNaturalist account with the bio-code flow, import a roster, battle NPCs, train, claim territory, upload custom sprites, and create API keys for agents. Bluesky-only features — sending/accepting challenges, sharing to Bluesky, the Buddies presence tab — stay locked with clear 403s that explain what connecting unlocks. When a guest later signs in with Bluesky, the OAuth callback adopts their linked iNat account and API keys into the Bluesky identity and retires the guest account (game data needs no migration — it is keyed by `inat:<login>`).
+
 The app requests only the granular auth scope it needs:
 
 ```text
