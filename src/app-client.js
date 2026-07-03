@@ -136,6 +136,7 @@
       battleBusy: false,
       battlePhase: "idle",
       soundOn: localStorage.getItem("inatBattler:sound") !== "off",
+      musicOn: localStorage.getItem("inatBattler:battleMusic") !== "off",
       backdropCache: null,
       lastResultBattle: null,
       polling: null,
@@ -279,8 +280,10 @@
       settingsView: document.getElementById("settingsView"),
       settingsHighlightOptIn: document.getElementById("settingsHighlightOptIn"),
       settingsReimportButton: document.getElementById("settingsReimportButton"),
+      settingsImportInfo: document.getElementById("settingsImportInfo"),
       settingsSignOutButton: document.getElementById("settingsSignOutButton"),
       settingsSoundToggle: document.getElementById("settingsSoundToggle"),
+      settingsMusicToggle: document.getElementById("settingsMusicToggle"),
       themeToggle: document.getElementById("themeToggle"),
       settingsDeleteButton: document.getElementById("settingsDeleteButton"),
       settingsDeletePanel: document.getElementById("settingsDeletePanel"),
@@ -443,6 +446,14 @@
     els.settingsSoundToggle.addEventListener("change", () => {
       state.soundOn = els.settingsSoundToggle.checked;
       localStorage.setItem("inatBattler:sound", state.soundOn ? "on" : "off");
+      updateBattleMusic();
+      if (state.battle) renderBattle();
+    });
+
+    els.settingsMusicToggle.addEventListener("change", () => {
+      state.musicOn = els.settingsMusicToggle.checked;
+      localStorage.setItem("inatBattler:battleMusic", state.musicOn ? "on" : "off");
+      updateBattleMusic();
       if (state.battle) renderBattle();
     });
 
@@ -633,6 +644,17 @@
       if (soundButton) {
         state.soundOn = !state.soundOn;
         localStorage.setItem("inatBattler:sound", state.soundOn ? "on" : "off");
+        updateBattleMusic();
+        playSfx("click");
+        renderBattle();
+        return;
+      }
+
+      const musicButton = event.target.closest("[data-music-toggle]");
+      if (musicButton) {
+        state.musicOn = !state.musicOn;
+        localStorage.setItem("inatBattler:battleMusic", state.musicOn ? "on" : "off");
+        updateBattleMusic();
         playSfx("click");
         renderBattle();
         return;
@@ -2382,6 +2404,7 @@
           setStatus(error.message);
         }
       }
+      updateBattleMusic();
     }
 
     function renderViewTabs() {
@@ -2413,6 +2436,7 @@
       els.settingsView.hidden = view !== "settings";
       if (view === "settings") {
         els.settingsSoundToggle.checked = state.soundOn;
+        els.settingsMusicToggle.checked = state.musicOn;
         const linked = !!(state.me && state.me.loggedIn && state.me.inatLogin);
         els.settingsHighlightOptIn.checked = !!(state.me && state.me.allowHighlightBot);
         els.settingsHighlightOptIn.disabled = !linked;
@@ -3660,7 +3684,7 @@
           '<h3>Verify iNaturalist</h3>' +
           renderBskyStatus() +
           '<label>iNaturalist username' +
-            '<input id="homeInatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="mmulqueen" value="' + escapeAttr(pendingLogin) + '">' +
+            '<input id="homeInatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="your-inat-username" value="' + escapeAttr(pendingLogin) + '">' +
           '</label>' +
           '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : (hasCode ? "Refresh Code" : "Get Verification Code")) +
@@ -3721,13 +3745,42 @@
       els.refreshLabel.textContent = state.rosterTotal
         ? (state.rosterTotal > ROSTER_PAGE_SIZE
           ? rosterRangeLabel() + " of " + state.rosterTotal
-          : String(state.rosterTotal) + " species")
+          : String(state.rosterTotal) + " species") + importedDateSuffix()
         : "";
       renderViewTabs();
       renderHome();
+      renderImportInfo();
       renderSpriteTree();
       renderRecentSprites();
       renderBattle();
+    }
+
+    // Settings: "your roster is saved" reassurance + when it was last pulled
+    // from iNaturalist. Only reflects the viewer's own roster, not someone
+    // else's roster being browsed read-only.
+    function renderImportInfo() {
+      if (!els.settingsImportInfo || state.viewUserId) return;
+      const summary = state.rosterSummary;
+      if (!summary || !summary.totalCount) {
+        els.settingsImportInfo.hidden = true;
+        return;
+      }
+      const when = summary.lastImportedAt ? new Date(summary.lastImportedAt) : null;
+      const dateLabel = when && !Number.isNaN(when.getTime())
+        ? when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
+        : "";
+      els.settingsImportInfo.hidden = false;
+      els.settingsImportInfo.textContent =
+        "Roster saved: " + summary.totalCount + " species" +
+        (dateLabel ? " · last imported " + dateLabel : "") +
+        ". Re-import anytime to pick up new observations.";
+    }
+
+    function importedDateSuffix() {
+      const summary = state.rosterSummary;
+      const when = summary && summary.lastImportedAt ? new Date(summary.lastImportedAt) : null;
+      if (!when || Number.isNaN(when.getTime())) return "";
+      return " · imported " + when.toLocaleDateString(undefined, { month: "short", day: "numeric" });
     }
 
     function rosterRangeLabel() {
@@ -4451,6 +4504,7 @@
       state.battlePhase = battle.status === "active" && !(options && options.skipIntro) ? "intro" : "active";
       switchView("battle");
       renderBattle();
+      updateBattleMusic();
 
       if (state.battlePhase === "intro") {
         playSfx("start");
@@ -4492,6 +4546,7 @@
       } finally {
         state.battleBusy = false;
         renderBattle();
+        updateBattleMusic();
         const finished = state.battle && state.battle.status !== "active";
         if (finished && state.lastResultBattle !== state.battle.battleId) {
           state.lastResultBattle = state.battle.battleId;
@@ -5339,14 +5394,18 @@
       osc.stop(t0 + dur + 0.03);
     }
 
-    function sfxNoise(ctx, out, opts) {
+    function getNoiseBuffer(ctx) {
       if (!audioNoiseBuffer) {
         audioNoiseBuffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.3), ctx.sampleRate);
         const data = audioNoiseBuffer.getChannelData(0);
         for (let index = 0; index < data.length; index += 1) data[index] = Math.random() * 2 - 1;
       }
+      return audioNoiseBuffer;
+    }
+
+    function sfxNoise(ctx, out, opts) {
       const source = ctx.createBufferSource();
-      source.buffer = audioNoiseBuffer;
+      source.buffer = getNoiseBuffer(ctx);
       const filter = ctx.createBiquadFilter();
       filter.type = "bandpass";
       filter.frequency.value = opts.freq || 700;
@@ -5419,6 +5478,131 @@
         // Audio is best-effort; never break the battle over it.
       }
     }
+
+    // -- Battle music (WebAudio, fully synthesized, no assets) --------------
+    // A four-bar chiptune loop in A minor (Am / F / G / E), 8th notes at
+    // 150 BPM, scheduled a beat ahead on a timer so it survives busy frames.
+
+    const MUSIC_STEP_SECONDS = 0.2;
+    // Bass roots per 8th note; 0 = rest. A2/E2/G2/F2/C3/D3/B2/G#2.
+    const MUSIC_BASS = [
+      110, 110, 82.41, 110, 110, 110, 98, 110,
+      87.31, 87.31, 130.81, 87.31, 87.31, 87.31, 82.41, 87.31,
+      98, 98, 146.83, 98, 98, 98, 87.31, 98,
+      82.41, 82.41, 123.47, 82.41, 82.41, 82.41, 103.83, 82.41
+    ];
+    const MUSIC_LEAD = [
+      440, 0, 523.25, 0, 659.25, 0, 523.25, 0,
+      349.23, 0, 440, 0, 523.25, 0, 440, 0,
+      392, 0, 493.88, 0, 587.33, 0, 493.88, 0,
+      329.63, 415.3, 493.88, 0, 659.25, 0, 493.88, 415.3
+    ];
+
+    const music = { timer: null, gain: null, step: 0, nextTime: 0 };
+
+    function startBattleMusic() {
+      if (music.timer) return;
+      try {
+        const ctx = ensureAudio();
+        music.gain = ctx.createGain();
+        music.gain.gain.value = 0.26;
+        music.gain.connect(ctx.destination);
+        music.step = 0;
+        music.nextTime = ctx.currentTime + 0.06;
+        music.timer = setInterval(scheduleMusic, 80);
+        scheduleMusic();
+      } catch (error) {
+        music.timer = null;
+        music.gain = null;
+      }
+    }
+
+    function stopBattleMusic() {
+      if (!music.timer && !music.gain) return;
+      if (music.timer) clearInterval(music.timer);
+      music.timer = null;
+      const gain = music.gain;
+      music.gain = null;
+      if (!gain || !audioCtx) return;
+      try {
+        // Short fade so already-scheduled notes don't cut off with a click.
+        gain.gain.setTargetAtTime(0.0001, audioCtx.currentTime, 0.08);
+      } catch (error) {
+        // fall through to disconnect
+      }
+      setTimeout(() => {
+        try { gain.disconnect(); } catch (error) { /* already gone */ }
+      }, 500);
+    }
+
+    function scheduleMusic() {
+      const ctx = audioCtx;
+      if (!ctx || !music.gain) return;
+      while (music.nextTime < ctx.currentTime + 0.3) {
+        scheduleMusicStep(ctx, music.gain, music.step % MUSIC_BASS.length, music.nextTime);
+        music.step += 1;
+        music.nextTime += MUSIC_STEP_SECONDS;
+      }
+    }
+
+    function scheduleMusicStep(ctx, out, step, t) {
+      const inBar = step % 8;
+      if (inBar === 0 || inBar === 4) {
+        musicTone(ctx, out, { type: "sine", from: 150, to: 45, t, dur: 0.09, gain: 0.5 });
+      }
+      if (inBar % 2 === 1) musicHat(ctx, out, t);
+      if (MUSIC_BASS[step]) {
+        musicTone(ctx, out, { type: "square", from: MUSIC_BASS[step], t, dur: 0.18, gain: 0.24 });
+      }
+      if (MUSIC_LEAD[step]) {
+        musicTone(ctx, out, { type: "triangle", from: MUSIC_LEAD[step], t, dur: 0.17, gain: 0.34 });
+      }
+    }
+
+    // Like sfxTone, but at an absolute AudioContext time instead of "now".
+    function musicTone(ctx, out, opts) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const t0 = opts.t;
+      const dur = opts.dur || 0.15;
+      osc.type = opts.type || "square";
+      osc.frequency.setValueAtTime(Math.max(20, opts.from), t0);
+      if (opts.to) osc.frequency.exponentialRampToValueAtTime(Math.max(20, opts.to), t0 + dur);
+      gain.gain.setValueAtTime(opts.gain || 0.2, t0);
+      gain.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+      osc.connect(gain);
+      gain.connect(out);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.03);
+    }
+
+    function musicHat(ctx, out, t) {
+      const source = ctx.createBufferSource();
+      source.buffer = getNoiseBuffer(ctx);
+      const filter = ctx.createBiquadFilter();
+      filter.type = "highpass";
+      filter.frequency.value = 5500;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.14, t);
+      gain.gain.exponentialRampToValueAtTime(0.0008, t + 0.045);
+      source.connect(filter);
+      filter.connect(gain);
+      gain.connect(out);
+      source.start(t);
+      source.stop(t + 0.08);
+    }
+
+    // Single gate for the loop: plays only while an active battle is on the
+    // visible Battle tab with sound + music both enabled. Everything that
+    // changes one of those inputs calls this.
+    function updateBattleMusic() {
+      const wanted = state.soundOn && state.musicOn && !document.hidden &&
+        state.activeView === "battle" && state.battle && state.battle.status === "active";
+      if (wanted) startBattleMusic();
+      else stopBattleMusic();
+    }
+
+    document.addEventListener("visibilitychange", () => updateBattleMusic());
 
     // -- Procedural pixel-art battle backdrops ------------------------------
 
@@ -5736,6 +5920,7 @@
           '<div class="battle-head-tools">' +
             '<span class="subtle">' + escapeHtml(battle.status) + ' / turn ' + Number(battle.turn || 1) + '</span>' +
             '<button class="secondary" type="button" data-sound-toggle>' + (state.soundOn ? "Sound: on" : "Sound: off") + '</button>' +
+            '<button class="secondary" type="button" data-music-toggle>' + (state.musicOn ? "Music: on" : "Music: off") + '</button>' +
             '<button class="secondary" type="button" data-battle-exit>Exit</button>' +
           '</div>' +
         '</div>' +
@@ -5861,8 +6046,54 @@
     }
 
     function renderSheetSprite(url, animationClass) {
-      return '<div class="sheet-sprite ' + escapeAttr(animationClass || "anim-idle") + '" data-sprite-url="' + escapeAttr(url) + '" style="background-image:url(&quot;' + escapeAttr(url) + '&quot;)"></div>';
+      return '<div class="sheet-sprite ' + escapeAttr(animationClass || "anim-idle") + '" data-sprite-url="' + escapeAttr(url) + '"></div>';
     }
+
+    // Sprite sheets load lazily: renderSheetSprite emits no background-image,
+    // and this observer fills it in as tiles approach the viewport — so a
+    // 100-tile roster page or the 1000-sprite tree only fetches what's on
+    // screen instead of every sheet at once. Battle alpha-keying
+    // (setSpriteBackground) still wins if it lands after us: it overwrites the
+    // background, and the !backgroundImage guard stops us clobbering it back.
+    const lazySpriteObserver = typeof IntersectionObserver === "function"
+      ? new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            loadLazySprite(entry.target);
+            lazySpriteObserver.unobserve(entry.target);
+          });
+        }, { rootMargin: "300px" })
+      : null;
+
+    function loadLazySprite(el) {
+      const url = el.getAttribute("data-sprite-url");
+      if (url && !el.style.backgroundImage) {
+        el.style.backgroundImage = 'url("' + url + '")';
+      }
+    }
+
+    let lazySpriteScanQueued = false;
+    function bindLazySprites() {
+      const nodes = document.querySelectorAll(".sheet-sprite[data-sprite-url]:not([data-lazy-bound])");
+      nodes.forEach((el) => {
+        el.setAttribute("data-lazy-bound", "1");
+        if (lazySpriteObserver) lazySpriteObserver.observe(el);
+        else loadLazySprite(el);
+      });
+    }
+
+    // Every render path builds HTML strings and swaps innerHTML, so watch for
+    // new nodes globally rather than chasing each call site. Mutations arrive
+    // in bursts; one rAF coalesces them into a single scan.
+    new MutationObserver(() => {
+      if (lazySpriteScanQueued) return;
+      lazySpriteScanQueued = true;
+      requestAnimationFrame(() => {
+        lazySpriteScanQueued = false;
+        bindLazySprites();
+      });
+    }).observe(document.body, { childList: true, subtree: true });
+    bindLazySprites();
 
     const keyedSpriteCache = new Map();
 

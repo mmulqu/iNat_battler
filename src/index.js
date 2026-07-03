@@ -3978,6 +3978,7 @@ async function getRosterSummary(env, userId, includePendingCustomSprites = false
       SELECT
         ut.obs_count,
         ut.bond_level,
+        ut.imported_at,
         COALESCE(st.points_spent, 0) AS points_spent,
         EXISTS (
           SELECT 1
@@ -4021,7 +4022,8 @@ async function getRosterSummary(env, userId, includePendingCustomSprites = false
       SUM(CASE WHEN NOT has_ready AND NOT has_pending AND NOT has_failed THEN 1 ELSE 0 END) AS missing_count,
       SUM(COALESCE(obs_count, 0)) AS observation_total,
       SUM(COALESCE(bond_level, 0)) AS affinity_total,
-      SUM(COALESCE(points_spent, 0)) AS training_spent
+      SUM(COALESCE(points_spent, 0)) AS training_spent,
+      MAX(imported_at) AS last_imported_at
     FROM roster_status
   `).bind(
     DEFAULT_ASSET_KIND,
@@ -4042,7 +4044,8 @@ async function getRosterSummary(env, userId, includePendingCustomSprites = false
     missingCount: Number(row?.missing_count ?? 0),
     observationTotal: Number(row?.observation_total ?? 0),
     affinityTotal: Number(row?.affinity_total ?? 0),
-    trainingSpent: Number(row?.training_spent ?? 0)
+    trainingSpent: Number(row?.training_spent ?? 0),
+    lastImportedAt: row?.last_imported_at || null
   };
 }
 
@@ -10785,6 +10788,7 @@ ${APP_CSS}
               <div class="api-key-list" id="apiKeyList"></div>
             </div>
             <div class="settings-actions">
+              <p class="subtle" id="settingsImportInfo" hidden></p>
               <button class="secondary" id="settingsReimportButton" type="button">Re-import roster</button>
               <button class="secondary" id="settingsSignOutButton" type="button">Sign out</button>
             </div>
@@ -10802,6 +10806,10 @@ ${APP_CSS}
             <label class="settings-toggle">
               <input type="checkbox" id="settingsSoundToggle">
               <span>Sound effects</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="settingsMusicToggle">
+              <span>Battle music</span>
             </label>
           </div>
           <div class="settings-section">
