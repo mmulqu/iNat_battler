@@ -1254,9 +1254,9 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ inatLogin: login })
       });
-      state.bskyMessage = "Verification code created. Add it to your iNaturalist bio, save, then click Verify Link.";
+      state.bskyMessage = "Code created — add it to your iNaturalist bio, save, then verify.";
       state.bskyMessageKind = "success";
-      setStatus("Code created. Add it to your iNaturalist profile bio, save, then click Verify.");
+      setStatus("Verification code created.");
       await refreshMe();
     }
 
@@ -1725,7 +1725,7 @@
         els.trainingTotalsLabel.textContent = "";
         els.trainingEmptyState.textContent = linked
           ? "Press Sync iNat Data to pull your iNaturalist observations and start earning points."
-          : "To train creatures: sign in with Bluesky (sidebar), link your iNaturalist account, then press Sync iNat Data. Research Grade observations earn training points.";
+          : "Sign in and link your iNaturalist account, then press Sync iNat Data. Research Grade observations earn training points.";
         return;
       }
 
@@ -1936,12 +1936,11 @@
         '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
           (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
         '</button>' +
-        '<div class="landing-auth-note">Uses Bluesky OAuth for identity and challenge posts. iNaturalist linking happens after sign-in.</div>' +
-        '<div class="landing-auth-note landing-guest-note">No Bluesky account? ' +
+        '<div class="landing-auth-note landing-guest-note">No Bluesky? ' +
           '<button class="link-button" type="button" data-bsky-action="guest"' + busyAttr + '>' +
-            (state.bskyBusy && state.bskyAction === "guest" ? "Starting..." : "Play without one") +
+            (state.bskyBusy && state.bskyAction === "guest" ? "Starting..." : "Play as a guest") +
           '</button>' +
-          ' — link just your iNaturalist account and battle NPCs, train, and claim territory. Challenges and buddies need Bluesky, and you can connect it later.</div>';
+          ' — connect it later.</div>';
     }
 
     // Write text to the clipboard and briefly flip a button's label to "Copied!".
@@ -2036,8 +2035,8 @@
       if (showInatForm) {
         html += '<div class="subtle">' +
           (me.inatLogin
-            ? 'Switch to a different iNaturalist account by proving ownership (your current roster stays saved):'
-            : 'Link your iNaturalist account by proving ownership &mdash; no iNat OAuth, no write access:') +
+            ? 'Switch accounts &mdash; your current roster stays saved:'
+            : 'Verify your username with a temporary profile-bio code &mdash; no password needed:') +
           '</div>' +
           '<input id="inatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="iNaturalist username" value="' + escapeAttr(me.inatPendingLogin || "") + '">' +
           '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
@@ -2049,7 +2048,7 @@
             '<div class="subtle">Add this code to the profile bio of "' + escapeHtml(me.inatPendingLogin) +
             '" in <a href="https://www.inaturalist.org/users/edit" target="_blank" rel="noopener">iNaturalist settings</a>, save, then verify. You can remove it afterwards.</div>' +
             '<button class="primary" type="button" data-bsky-action="inat-confirm"' + busyAttr + '>' +
-              (state.bskyBusy && state.bskyAction === "inat-confirm" ? "Verifying..." : "Verify Link") +
+              (state.bskyBusy && state.bskyAction === "inat-confirm" ? "Verifying..." : "Verify and Import") +
             '</button>';
         }
 
@@ -2066,7 +2065,7 @@
     // Sign out stays in the section's action row (settingsSignOutButton).
     function renderBskyAccountBlock(me, busyAttr) {
       if (!me || !me.loggedIn) {
-        return '<p class="subtle">Sign in to save teams, link your iNaturalist account, and challenge other players.</p>' +
+        return '<p class="subtle">Sign in to save teams and challenge other players.</p>' +
           renderTypeaheadInput("settingsBskyHandleInput", "you.bsky.social", "login") +
           '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
@@ -2080,7 +2079,7 @@
 
       if (me.guest) {
         return '<div class="bsky-row"><strong>Guest naturalist</strong></div>' +
-          '<p class="subtle">Connect Bluesky to challenge friends, see buddies online, and share victories. Your linked iNaturalist roster comes with you.</p>' +
+          '<p class="subtle">Connect Bluesky to challenge friends and see buddies online &mdash; your roster comes with you.</p>' +
           renderTypeaheadInput("settingsBskyHandleInput", "you.bsky.social", "login") +
           '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Connect Bluesky") +
@@ -2190,8 +2189,7 @@
           renderTypeaheadInput("bskyHandleInput", "you.bsky.social", "login") +
           '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
-          '</button>' +
-          '<div class="subtle">Uses AT Protocol OAuth (Bluesky and any compatible PDS) and only asks for permission to create posts.</div>';
+          '</button>';
         return;
       }
 
@@ -2206,7 +2204,7 @@
       // Guests get the upgrade path where challenges would otherwise live.
       // Connecting Bluesky adopts the linked iNat account, so nothing is lost.
       if (me.guest) {
-        html += '<div class="subtle"><strong>Connect Bluesky</strong> to challenge friends, see buddies online, and share victories. Your linked iNaturalist roster comes with you.</div>' +
+        html += '<div class="subtle"><strong>Connect Bluesky</strong> to challenge friends and see buddies online &mdash; your roster comes with you.</div>' +
           renderTypeaheadInput("bskyHandleInput", "you.bsky.social", "login") +
           '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Connect Bluesky") +
@@ -3304,7 +3302,7 @@
               streakHtml(you) +
             '</div>' +
             (state.me && state.me.guest
-              ? '<span class="subtle">Connect Bluesky (sidebar) to post your rank.</span>'
+              ? '<span class="subtle">Connect Bluesky to post your rank.</span>'
               : '<button class="secondary bsky-share-button" type="button" data-share-rank>Post my rank to Bluesky 🦋</button>') +
           '</div>';
       } else if (state.me && state.me.loggedIn && state.me.inatLogin) {
@@ -3417,7 +3415,7 @@
         const busyAttr = state.bskyBusy ? " disabled" : "";
         return {
           title: "Sign in with Bluesky",
-          body: "Sign in to link your iNaturalist account, save teams, and challenge other players.",
+          body: "Sign in to save teams and challenge other players.",
           action: null,
           label: "",
           html:
@@ -3426,7 +3424,7 @@
             '<button class="primary" type="button" data-bsky-action="login"' + busyAttr + '>' +
               (state.bskyBusy && state.bskyAction === "login" ? "Signing in..." : "Sign in with Bluesky") +
             '</button>' +
-            '<div class="subtle">No Bluesky account? ' +
+            '<div class="subtle">No Bluesky? ' +
               '<button class="link-button" type="button" data-bsky-action="guest"' + busyAttr + '>' +
                 (state.bskyBusy && state.bskyAction === "guest" ? "Starting..." : "Play as a guest") +
               '</button>' +
@@ -3537,7 +3535,7 @@
           '<div class="home-copy">' +
             '<div class="subtle">Player Home</div>' +
             '<h2>' + escapeHtml(handle) + '</h2>' +
-            '<p>Manage your observed-species roster, pick a five-creature team, train favorites, and jump into battles without scrolling through the full collection first.</p>' +
+            '<p>Pick a team of five from your observed species, train favorites, and jump into battle.</p>' +
             '<div class="home-actions">' +
               '<button class="primary" type="button" data-home-action="ready-roster">Pick Team</button>' +
               '<button class="secondary" type="button" data-home-action="training">Training</button>' +
@@ -3666,51 +3664,32 @@
       const hasCode = Boolean(me.inatPendingLogin && me.inatVerificationCode);
 
       return '<section class="onboarding-card">' +
-        '<div class="onboarding-copy">' +
-          '<div class="subtle">Setup</div>' +
-          '<h2>Link your field life.</h2>' +
-          '<p>' + (me.guest
-            ? 'You are playing as a guest. One quick iNaturalist verification connects your real observations to the game roster.'
-            : 'You are signed in with Bluesky. One quick iNaturalist verification connects your real observations to the game roster.') + '</p>' +
-          '<div class="onboarding-steps">' +
-            (me.guest
-              ? renderOnboardingStep("1", "Playing as guest", "No Bluesky needed. Connect one later (sidebar) for challenges and buddies.", "complete")
-              : renderOnboardingStep("1", "Bluesky connected", "Signed in as @" + (me.handle || "Bluesky"), "complete")) +
-            renderOnboardingStep("2", "Choose iNaturalist username", "Enter the public iNaturalist account you want to battle with.", hasCode ? "complete" : "active") +
-            renderOnboardingStep("3", "Paste code and verify", "Add the code to your iNaturalist profile bio, verify here, then remove it.", hasCode ? "active" : "") +
-          '</div>' +
-        '</div>' +
         '<div class="onboarding-form">' +
-          '<h3>Verify iNaturalist</h3>' +
+          '<h2>Link your iNaturalist</h2>' +
+          '<p>Your observations become your roster of battlers.</p>' +
           renderBskyStatus() +
           '<label>iNaturalist username' +
-            '<input id="homeInatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" placeholder="your-inat-username" value="' + escapeAttr(pendingLogin) + '">' +
+            '<input id="homeInatLinkInput" data-inat-link-input="1" data-bsky-enter="inat-start" value="' + escapeAttr(pendingLogin) + '">' +
           '</label>' +
-          '<button class="secondary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
-            (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : (hasCode ? "Refresh Code" : "Get Verification Code")) +
-          '</button>' +
           (hasCode
             ? '<div class="onboarding-code">' +
-                '<span class="subtle">Add this code to your iNaturalist profile bio</span>' +
+                '<span class="subtle">Your verification code</span>' +
                 '<strong>' + escapeHtml(me.inatVerificationCode) + '</strong>' +
-                '<span class="subtle">Use iNaturalist settings for "' + escapeHtml(pendingLogin) + '", save, then verify below.</span>' +
+                '<span class="subtle">Paste it into the profile bio of &ldquo;' + escapeHtml(pendingLogin) + '&rdquo;, save, then verify. You can remove it afterwards.</span>' +
               '</div>' +
               '<a class="manual-result-link" href="https://www.inaturalist.org/users/edit" target="_blank" rel="noopener">Open iNaturalist settings</a>' +
               '<button class="primary" type="button" data-bsky-action="inat-confirm"' + busyAttr + '>' +
                 (state.bskyBusy && state.bskyAction === "inat-confirm" ? "Verifying..." : "Verify and Import") +
+              '</button>' +
+              '<button class="link-button" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
+                (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : "Get a new code") +
               '</button>'
-            : '<p>No iNaturalist password or write access needed. The temporary bio code only proves that the public profile is yours.</p>') +
+            : '<button class="primary" type="button" data-bsky-action="inat-start"' + busyAttr + '>' +
+                (state.bskyBusy && state.bskyAction === "inat-start" ? "Creating code..." : "Get Verification Code") +
+              '</button>' +
+              '<p class="subtle">No password needed &mdash; a temporary code in your profile bio proves the account is yours.</p>') +
         '</div>' +
       '</section>';
-    }
-
-    function renderOnboardingStep(index, title, body, stateClass) {
-      const className = stateClass ? " " + stateClass : "";
-      const marker = index;
-      return '<div class="onboarding-step' + className + '">' +
-        '<div class="onboarding-step-index">' + escapeHtml(marker) + '</div>' +
-        '<div><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(body) + '</span></div>' +
-      '</div>';
     }
 
     function render() {
@@ -5058,7 +5037,7 @@
       const me = state.me;
       if (!me || !me.loggedIn || !me.did || me.guest) {
         els.buddiesPanel.innerHTML = me && me.guest
-          ? '<p class="subtle">Buddies are your Bluesky mutuals — connect a Bluesky account (sidebar) to see who’s online.</p>'
+          ? '<p class="subtle">Connect a Bluesky account to see who’s online.</p>'
           : '<p class="subtle">Sign in with Bluesky to see which of your mutuals are online.</p>';
         els.buddiesMetaLabel.textContent = "";
         return;

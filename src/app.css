@@ -207,36 +207,13 @@
       font-weight: 650;
     }
 
-    .landing-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      align-items: center;
-      margin-top: 24px;
-    }
-
-    .landing-actions .primary,
-    .landing-actions .secondary {
-      display: inline-flex;
-      align-items: center;
-      min-width: 156px;
-      justify-content: center;
-      text-decoration: none;
-    }
-
-    .landing-actions .secondary {
-      color: #fffaf0;
-      background: rgba(255, 255, 255, 0.14);
-      border-color: rgba(255, 255, 255, 0.34);
-    }
-
     .landing-auth {
       display: grid;
       grid-template-columns: minmax(220px, 340px) auto;
       gap: 8px;
       align-items: start;
       width: min(540px, 100%);
-      margin-top: 18px;
+      margin-top: 22px;
     }
 
     .landing-auth .typeahead,
@@ -881,11 +858,8 @@
     }
 
     .onboarding-card {
-      display: grid;
-      grid-template-columns: minmax(0, 1.05fr) minmax(300px, 0.95fr);
-      gap: 18px;
-      align-items: start;
-      padding: 20px;
+      width: min(480px, 100%);
+      margin: 12px auto 0;
       border: 1px solid var(--line);
       border-radius: 8px;
       background:
@@ -894,81 +868,22 @@
       box-shadow: var(--shadow);
     }
 
-    .onboarding-copy,
     .onboarding-form {
       display: grid;
       gap: 14px;
+      padding: 22px 20px;
     }
 
-    .onboarding-copy h2 {
+    .onboarding-form h2 {
       margin: 0;
-      max-width: 12ch;
-      font-size: clamp(1.9rem, 4vw, 3.2rem);
-      line-height: 0.98;
+      font-size: 1.45rem;
+      line-height: 1.1;
     }
 
-    .onboarding-form h3 {
-      margin: 0;
-    }
-
-    .onboarding-copy p,
     .onboarding-form p {
       margin: 0;
       color: var(--muted);
       line-height: 1.5;
-    }
-
-    .onboarding-steps {
-      display: grid;
-      gap: 9px;
-      margin-top: 4px;
-    }
-
-    .onboarding-step {
-      display: grid;
-      grid-template-columns: 34px minmax(0, 1fr);
-      gap: 10px;
-      align-items: start;
-    }
-
-    .onboarding-step-index {
-      display: grid;
-      place-items: center;
-      width: 34px;
-      aspect-ratio: 1 / 1;
-      border-radius: 50%;
-      background: var(--surface-3);
-      color: var(--teal);
-      font-weight: 900;
-    }
-
-    .onboarding-step.complete .onboarding-step-index {
-      background: var(--teal);
-      color: #fff;
-    }
-
-    .onboarding-step.active .onboarding-step-index {
-      background: #f4d487;
-      color: #533b0c;
-    }
-
-    .onboarding-step strong,
-    .onboarding-step span {
-      display: block;
-      min-width: 0;
-    }
-
-    .onboarding-step span {
-      color: var(--muted);
-      font-size: 0.86rem;
-      line-height: 1.4;
-    }
-
-    .onboarding-form {
-      padding: 16px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface-2);
     }
 
     .onboarding-form label {
@@ -1519,6 +1434,7 @@
 
     .tree-tools input:not([type="range"]),
     .tree-tools select,
+    .roster-lookup input,
     .roster-toolbar input:not([type="range"]),
     .roster-toolbar select {
       min-height: 42px;
@@ -3914,7 +3830,6 @@
       }
 
       .home-hero-card,
-      .onboarding-card,
       .home-panels {
         grid-template-columns: 1fr;
       }
@@ -3965,6 +3880,13 @@
         display: none;
       }
 
+      /* The topbar import form is desktop furniture: linking auto-imports and
+         Settings has Re-import. Card-size sliders don't earn phone space. */
+      .login,
+      .zoom-control {
+        display: none;
+      }
+
       body.app-active .mobile-nav {
         display: flex;
         position: fixed;
@@ -3989,7 +3911,6 @@
         padding: 14px;
       }
 
-      .login,
       .landing-auth,
       .roster-head {
         grid-template-columns: 1fr;
@@ -4032,6 +3953,15 @@
         width: 100%;
       }
 
+      /* Buttons that sit beside an input or label keep their natural width;
+         stretching them crushes the control next to them. */
+      .roster-lookup .secondary,
+      .bsky-row .secondary,
+      .bsky-row-actions .secondary,
+      .agent-prompt-bar .secondary {
+        width: auto;
+      }
+
       .grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 10px;
@@ -4042,8 +3972,25 @@
         grid-template-columns: 1fr;
       }
 
-      .tree-tools {
-        grid-template-columns: 1fr;
+      /* Toolbars: search and actions span the row, paired selects share it. */
+      .tree-tools,
+      .roster-toolbar {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .tree-tools input:not([type="range"]),
+      .tree-tools button,
+      .roster-toolbar input[type="search"],
+      .roster-toolbar .mode-toggle {
+        grid-column: 1 / -1;
+      }
+
+      .tree-tools select,
+      .roster-toolbar select {
+        width: 100%;
+        min-width: 0;
       }
 
       .training-split {

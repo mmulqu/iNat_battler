@@ -10470,10 +10470,7 @@ ${APP_CSS}
         <div class="landing-copy">
           <div class="landing-kicker">Creature battles from real observations</div>
           <h2>iNat Battler</h2>
-          <p class="landing-lede">Turn your iNaturalist observations into a roster of species battlers, link them to your Bluesky identity, and challenge friends with creatures you actually found.</p>
-          <div class="landing-actions">
-            <a class="secondary" href="#how-it-works">See how it works</a>
-          </div>
+          <p class="landing-lede">Turn your iNaturalist observations into battling creatures and challenge your friends.</p>
           <div class="landing-auth" id="landingAuth">Checking Bluesky session...</div>
         </div>
       </section>
@@ -10489,24 +10486,23 @@ ${APP_CSS}
       <section class="landing-section" id="how-it-works">
         <div class="landing-section-head">
           <h3>How It Works</h3>
-          <p>Sign in, verify your iNaturalist account, import your public observations, then build a team from your real-life species list.</p>
         </div>
         <div class="landing-steps">
           <div class="landing-step">
-            <strong>1. Sign in with Bluesky</strong>
-            <span>Bluesky gives the app an identity for challenges and posts.</span>
+            <strong>1. Sign in</strong>
+            <span>Your Bluesky account is your player identity.</span>
           </div>
           <div class="landing-step">
             <strong>2. Verify iNaturalist</strong>
-            <span>Paste a temporary code into your iNaturalist profile to prove ownership.</span>
+            <span>A temporary profile-bio code proves the account is yours.</span>
           </div>
           <div class="landing-step">
             <strong>3. Import observations</strong>
             <span>Your public species counts become a playable roster.</span>
           </div>
           <div class="landing-step">
-            <strong>4. Battle with species</strong>
-            <span>Pick ready sprites, train favorites, and challenge other naturalists.</span>
+            <strong>4. Battle</strong>
+            <span>Build a team of five and challenge other naturalists.</span>
           </div>
         </div>
       </section>
@@ -10514,7 +10510,7 @@ ${APP_CSS}
       <section class="landing-section landing-agent" id="play-with-agent">
         <div class="landing-section-head">
           <h3>Play with an AI agent</h3>
-          <p>iNat Battler is also an API. Point your own coding agent — Claude Code, Codex, or any MCP/HTTP agent — at it and it plays for you: builds a team, battles NPCs, and claims territory while you observe nature.</p>
+          <p>iNat Battler is also an API. Point a coding agent at it and it plays for you while you observe nature.</p>
         </div>
         <div class="landing-steps">
           <div class="landing-step">
@@ -10611,7 +10607,7 @@ ${APP_CSS}
             <span class="subtle" id="refreshLabel"></span>
           </div>
           <div class="roster-lookup">
-            <input id="rosterLookupInput" type="search" placeholder="View another naturalist (iNaturalist username)" data-roster-lookup-enter>
+            <input id="rosterLookupInput" type="search" placeholder="View another naturalist" data-roster-lookup-enter>
             <button class="secondary" id="rosterLookupButton" type="button">View roster</button>
           </div>
           <div class="roster-view-banner" id="rosterViewBanner" hidden></div>
@@ -10670,7 +10666,7 @@ ${APP_CSS}
               <button class="secondary" id="buddiesRefreshButton" type="button">Refresh mutuals</button>
             </div>
           </div>
-          <p class="subtle buddy-intro">Your Bluesky mutuals, live. Presence is read from the firehose: <span class="buddy-dot online"></span> active (posting), <span class="buddy-dot idle"></span> lurking (likes only), <span class="buddy-dot offline"></span> quiet. Challenge whoever is online now.</p>
+          <p class="subtle buddy-intro">Your Bluesky mutuals, live: <span class="buddy-dot online"></span> active &middot; <span class="buddy-dot idle"></span> lurking &middot; <span class="buddy-dot offline"></span> quiet. Challenge whoever is on.</p>
           <div id="buddiesPanel"><p class="subtle">Open this tab to connect to the Bluesky firehose and load your buddy list.</p></div>
         </section>
         <section class="view-panel map-view" id="mapView" hidden>
