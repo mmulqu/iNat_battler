@@ -10761,7 +10761,6 @@ ${APP_CSS}
               <div class="stats">
                 <div class="stat"><span class="subtle">Taxa</span><strong id="taxaCount">0</strong></div>
                 <div class="stat"><span class="subtle">Sprites</span><strong id="spriteCount">0</strong></div>
-                <div class="stat"><span class="subtle">Queued</span><strong id="queuedCount">0</strong></div>
                 <div class="stat"><span class="subtle">Affinity</span><strong id="bondCount">0</strong></div>
               </div>
             </div>

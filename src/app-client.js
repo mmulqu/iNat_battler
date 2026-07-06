@@ -162,7 +162,6 @@
       // always stays the signed-in owner) and all editing is suppressed.
       viewUserId: null,
       viewLabel: "",
-      mySprites: [],
       training: null,
       trainingFilter: "",
       trainingSelected: null,
@@ -196,7 +195,6 @@
       accountLabel: document.getElementById("accountLabel"),
       taxaCount: document.getElementById("taxaCount"),
       spriteCount: document.getElementById("spriteCount"),
-      queuedCount: document.getElementById("queuedCount"),
       bondCount: document.getElementById("bondCount"),
       refreshLabel: document.getElementById("refreshLabel"),
       homeTabButton: document.getElementById("homeTabButton"),
@@ -1045,7 +1043,7 @@
         state.inatLogin = res.inatLogin;
         localStorage.setItem("inatBattler:userId", state.userId);
         localStorage.setItem("inatBattler:inatLogin", state.inatLogin);
-        setStatus((res.warning ? res.warning + " " : "") + "Imported " + res.importedTaxa + " taxa, queued " + res.queuedSprites + " sprites");
+        setStatus((res.warning ? res.warning + " " : "") + "Imported " + res.importedTaxa + " taxa. New sprites will appear as they finish.");
         await loadRoster();
       } catch (error) {
         setStatus(error.message);
@@ -1087,10 +1085,6 @@
           state.challenges = res.challenges || [];
         } catch (error) {
           state.challenges = [];
-        }
-
-        if (state.me.inatLogin) {
-          await loadMySprites();
         }
 
         if (state.me.userId && state.me.userId !== state.userId) {
@@ -1140,8 +1134,6 @@
         else if (action === "challenge-accept") await acceptChallengeAction(challengeId);
         else if (action === "challenge-decline") await declineChallengeAction(challengeId);
         else if (action === "battle-open") await openBattle(challengeId);
-        else if (action === "sprite-upload") await uploadCustomSprite();
-        else if (action === "sprites-sync") await syncMySprites();
       } catch (error) {
         state.bskyMessage = error.message;
         state.bskyMessageKind = "error";
@@ -1164,8 +1156,6 @@
       if (action === "challenge-send") return "Creating and posting the Bluesky challenge.";
       if (action === "challenge-accept") return "Accepting the challenge and opening battle.";
       if (action === "challenge-decline") return "Declining the challenge.";
-      if (action === "sprite-upload") return "Submitting your custom sprite for Discord QA.";
-      if (action === "sprites-sync") return "Checking Discord QA reactions.";
       return "Working.";
     }
 
@@ -1178,8 +1168,6 @@
       if (action === "challenge-send") return "Sending...";
       if (action === "challenge-accept") return "Accepting...";
       if (action === "challenge-decline") return "Declining...";
-      if (action === "sprite-upload") return "Submitting...";
-      if (action === "sprites-sync") return "Refreshing...";
       return "Working...";
     }
 
@@ -1390,101 +1378,6 @@
       if (!battleId) return;
       const battle = await apiFetch("/api/battles/" + encodeURIComponent(battleId));
       enterBattle(battle, { skipIntro: true });
-    }
-
-    async function loadMySprites() {
-      try {
-        const res = await apiFetch("/api/my-sprites");
-        state.mySprites = res.submissions || [];
-      } catch (error) {
-        state.mySprites = [];
-      }
-    }
-
-    async function uploadCustomSprite() {
-      const input = document.getElementById("customSpriteFile");
-      const file = input && input.files && input.files[0];
-      const taxonInput = document.getElementById("customSpriteTaxonId");
-      const manualTaxonInput = document.getElementById("manualTaxonId");
-      const typedTaxonId = taxonInput ? taxonInput.value.trim() : "";
-      const fallbackTaxonId = !typedTaxonId && manualTaxonInput ? manualTaxonInput.value.trim() : "";
-      const rawTaxonId = typedTaxonId || fallbackTaxonId;
-      if (!file) {
-        throw new Error("Choose an image file first (PNG, JPEG, or WebP 4x4 sprite sheet).");
-      }
-      if (!rawTaxonId && state.selectedTaxa.size !== 1) {
-        throw new Error("Enter an iNaturalist taxon ID in the Custom sprites field, or select one ready creature card.");
-      }
-
-      const typedTaxonMatch = rawTaxonId.match(/[0-9]+/);
-      const taxonId = typedTaxonMatch ? typedTaxonMatch[0] : Array.from(state.selectedTaxa)[0];
-      if (!taxonId || !/^[0-9]+$/.test(String(taxonId))) {
-        throw new Error('Could not read a numeric iNaturalist taxon ID from "' + rawTaxonId + '".');
-      }
-
-      const form = new FormData();
-      form.append("sprite", file);
-      form.append("taxonId", String(taxonId));
-
-      setStatus("Uploading custom sprite…");
-      const res = await apiFetch("/api/my-sprites/upload", { method: "POST", body: form });
-      const movesNote = res.moves?.generated
-        ? " New image-matched moves: " + (res.moves.signatureMoves || []).join(", ") + "."
-        : res.moves?.skipped
-          ? ""
-          : res.moves?.error
-            ? " (Move generation failed: " + res.moves.error + ")"
-            : "";
-      const message = res.discordError
-        ? "Sprite saved and live for you, but the Discord QA post failed: " + res.discordError + " (it will retry automatically)" + movesNote
-        : "Custom sprite for " + res.name + " submitted for QA. It's live for you now; opponents see it once approved on Discord." + movesNote;
-      if (res.discordError) {
-        state.bskyMessageKind = "error";
-      } else {
-        state.bskyMessageKind = "success";
-      }
-      state.bskyMessage = message;
-      setStatus(message);
-      await loadMySprites();
-      await loadRoster();
-    }
-
-    async function syncMySprites() {
-      setStatus("Checking Discord QA reactions…");
-      const res = await apiFetch("/api/sprite-submissions/sync", { method: "POST" });
-      await loadMySprites();
-      await loadRoster();
-      setStatus("QA refresh: " + Number(res.approved || 0) + " approved, " + Number(res.rejected || 0) + " rejected, " + Number(res.checked || 0) + " checked.");
-    }
-
-    function renderMySpriteItem(item) {
-      const badge = item.status === "approved" ? "✅" : item.status === "rejected" ? "❌" : "🕒";
-      return '<div class="challenge-item">' +
-        '<div>' + badge + ' <strong>' + escapeHtml(item.name) + '</strong> &mdash; ' + escapeHtml(item.status) +
-        (item.discordError ? ' <span class="subtle">(Discord: ' + escapeHtml(item.discordError) + ')</span>' : '') +
-        '</div>' +
-      '</div>';
-    }
-
-    function renderCustomSpritePanel(busyAttr) {
-      const list = state.mySprites.length
-        ? state.mySprites.map(renderMySpriteItem).join("")
-        : '<div class="challenge-item"><div class="subtle">No custom sprite submissions yet.</div></div>';
-
-      return '<div class="bsky-section">' +
-        '<div class="bsky-row">' +
-          '<strong>Custom sprites</strong>' +
-          '<button class="secondary" type="button" data-bsky-action="sprites-sync"' + busyAttr + '>' +
-            (state.bskyBusy && state.bskyAction === "sprites-sync" ? "Refreshing..." : "Refresh QA") +
-          '</button>' +
-        '</div>' +
-        '<input id="customSpriteTaxonId" inputmode="numeric" placeholder="QA taxon ID, e.g. 145436">' +
-        '<input id="customSpriteFile" type="file" accept="image/png,image/jpeg,image/webp">' +
-        '<button class="primary" type="button" data-bsky-action="sprite-upload"' + busyAttr + '>' +
-          (state.bskyBusy && state.bskyAction === "sprite-upload" ? "Submitting..." : "Submit for QA") +
-        '</button>' +
-        '<div class="batch-list">' + list + '</div>' +
-      '</div>';
     }
 
     const TRAIN_STATS = ["vigor", "strike", "guard", "tempo", "sense"];
@@ -2230,12 +2123,6 @@
           '<button class="primary" type="button" data-bsky-action="challenge-send"' + busyAttr + '>' +
             (state.bskyBusy && state.bskyAction === "challenge-send" ? "Sending..." : "Send Challenge via Bluesky") +
           '</button>';
-      }
-
-      // Custom sprite uploads only need a linked iNat account (Discord QA),
-      // so guests get them too.
-      if (me.inatLogin) {
-        html += renderCustomSpritePanel(busyAttr);
       }
 
       if (state.challenges.length) {
@@ -3453,7 +3340,7 @@
       if (summary.readyCount < 5) {
         return {
           title: "Get five ready sprites",
-          body: "You need at least five ready sprites to battle. Queue missing sprites or use the ready species already available.",
+          body: "You need at least five ready sprites to battle. More are on the way — use the ready species already available.",
           action: "ready-roster",
           label: "Show Ready Species"
         };
@@ -3496,7 +3383,6 @@
         '<div class="import-summary-stats">' +
           importStat(total, "Taxa imported") +
           importStat(ready, "Sprites ready") +
-          importStat(queued, "Queued") +
         '</div>' +
         '<div class="home-actions">' +
           '<button class="primary" type="button" data-home-action="ready-roster">Pick your team</button>' +
@@ -3553,8 +3439,7 @@
         '<section class="home-metrics" aria-label="Roster summary">' +
           renderHomeMetric("Taxa", summary.totalCount, "Imported species") +
           renderHomeMetric("Ready", summary.readyCount, readyPct + "% battle-art ready") +
-          renderHomeMetric("Queued", summary.pendingCount, "Sprite jobs active") +
-          renderHomeMetric("Missing", summary.missingCount, "Need generated art") +
+          renderHomeMetric("Missing", summary.missingCount, "Need sprites") +
         '</section>' +
         '<section class="home-panels">' +
           '<div class="home-panel wide">' +
@@ -3716,7 +3601,6 @@
 
       els.taxaCount.textContent = String(summary.totalCount || state.rosterTotal || state.taxa.length);
       els.spriteCount.textContent = String(summary.readyCount);
-      els.queuedCount.textContent = String(summary.pendingCount);
       els.bondCount.textContent = String(summary.affinityTotal);
       els.teamCount.textContent = selectedCount + " / 5 selected";
       els.clearTeamButton.disabled = selectedCount === 0;
@@ -3799,6 +3683,12 @@
       ).join("");
     }
 
+    // Players shouldn't see generation-queue internals; anything in flight
+    // just reads as "coming soon" on cards and tiles.
+    function spriteBadgeLabel(status) {
+      return ["queued", "running", "batch_submitted"].includes(status) ? "coming soon" : status;
+    }
+
     function renderSpriteTile(taxon) {
       const status = taxon.sprite.status;
       const isReady = status === "ready";
@@ -3815,7 +3705,7 @@
         '" data-taxon-card data-taxon-id="' + escapeAttr(taxonId) + '" tabindex="0" role="button" aria-pressed="' + String(isSelected) +
         '" aria-label="' + escapeAttr((taxon.nickname || taxon.name || taxon.scientificName || "Taxon") + " combat selection") + '">' +
         '<div class="sprite-tile-art">' + image + '</div>' +
-        (!isReady ? '<span class="badge">' + escapeHtml(status) + '</span>' : '') +
+        (!isReady ? '<span class="badge">' + escapeHtml(spriteBadgeLabel(status)) + '</span>' : '') +
         '<div class="select-mark" aria-hidden="true">' + (isSelected ? "OK" : "") + '</div>' +
         '<div class="sprite-tile-caption">' + escapeHtml(taxon.nickname || taxon.name || taxon.scientificName || "") +
           '<span class="subtle">' + escapeHtml(taxon.scientificName || "") + '</span>' +
@@ -4170,7 +4060,6 @@
         setStatus("Custom sprite submitted for " + (result.name || "taxon " + taxonId) + ". It is live for you while QA is pending.");
 
         if (state.userId) {
-          await loadMySprites();
           await loadRoster();
         }
 
@@ -4307,7 +4196,7 @@
         : imageUrl
         ? '<img alt="" loading="lazy" src="' + escapeAttr(imageUrl) + '">'
         : '<div class="placeholder-shape placeholder-' + escapeAttr(taxon.sprite.placeholder || "unknown") + '"></div>';
-      const badge = isReady ? "ready" : status;
+      const badge = isReady ? "ready" : spriteBadgeLabel(status);
       const types = Array.isArray(taxon.types) ? taxon.types.join(" / ") : (taxon.iconicTaxon || "Life");
 
       // Selection (building your team of 5) is its own corner toggle so the rest
